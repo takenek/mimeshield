@@ -236,10 +236,11 @@ final class Tool
     /**
      * The directory for a new key file must exist, be a real directory and be writable. Missing
      * directories are only created on the administrator's explicit request (--create-parent): one
-     * level at a time with mkdir() (which never follows a symbolic link and fails if the name
-     * exists), mode 0700 for the current user, only when no existing component of the path is a
-     * symbolic link, owned by a user other than root / the current user, or writable by other
-     * users without the sticky bit.
+     * level at a time with mkdir() (which fails if the final name exists, also as a symbolic link,
+     * but does follow symbolic links in the ancestor path), mode 0700 for the current user. With
+     * --create-parent every existing component of the path, including an already existing parent
+     * directory, must not be a symbolic link, owned by a user other than root / the current user,
+     * or writable by other users without the sticky bit.
      */
     private function prepareParentDir(string $dir, bool $create): bool
     {
@@ -257,7 +258,10 @@ final class Tool
                     . "Run keygen as a user that may write there (e.g. root) and then adjust ownership of the key file.\n");
                 return false;
             }
-            return true;
+            if (!$create) {
+                return true;
+            }
+            // --create-parent: the existing parent goes through the same path-chain check below
         }
 
         if (!$create) {
@@ -313,6 +317,9 @@ final class Tool
                 return false;
             }
             $base = $path;
+        }
+        if ($missing === []) {
+            return true; // the whole path exists and passed the checks: nothing to create
         }
         $old = umask(0o077);
         try {

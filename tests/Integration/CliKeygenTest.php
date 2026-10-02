@@ -153,6 +153,33 @@ final class CliKeygenTest extends TestCase
         self::assertFileDoesNotExist($other . '/sub/new');
     }
 
+    public function testCreateParentRefusesExistingParentReachedThroughSymbolicLink(): void
+    {
+        // nothing has to be created, the existing parent is still checked component by component
+        mkdir($this->base . '/real/existing', 0o700, true);
+        symlink($this->base . '/real', $this->base . '/link');
+
+        [$code, $out] = $this->keygen(['keygen', 'file' => $this->base . '/link/existing/mimeshield.key', 'create-parent' => true]);
+        self::assertSame(1, $code, $out);
+        self::assertStringContainsString($this->base . '/link is a symbolic link', $out);
+        self::assertFileDoesNotExist($this->base . '/real/existing/mimeshield.key');
+    }
+
+    public function testCreateParentRefusesExistingParentOwnedByAnotherUser(): void
+    {
+        if (!function_exists('posix_geteuid') || posix_geteuid() !== 0) {
+            self::markTestSkipped('needs root to give a directory to another uid');
+        }
+        $foreign = $this->base . '/foreign';
+        mkdir($foreign, 0o700);
+        self::assertTrue(chown($foreign, 65534));
+
+        [$code, $out] = $this->keygen(['keygen', 'file' => $foreign . '/mimeshield.key', 'create-parent' => true]);
+        self::assertSame(1, $code, $out);
+        self::assertStringContainsString("{$foreign} is owned by uid 65534", $out);
+        self::assertFileDoesNotExist($foreign . '/mimeshield.key');
+    }
+
     public function testCreateParentRefusesDirectoriesWritableByOthersAndUnnormalisedPaths(): void
     {
         mkdir($this->base . '/shared', 0o700);
