@@ -71,7 +71,8 @@
             var url = rcmail.url('plugin.mimeshield-export', {
                 _type: String($(this).data('type')), _id: String($(this).data('id')), _token: rcmail.env.request_token
             });
-            rcmail.location_href(url, window, true);
+            // a download does not fire 'load': navigate without the busy lock of location_href(.., true)
+            rcmail.location_href(url, window, false);
         });
         $(document).on('click', 'a.mimeshield-bind', function (e) {
             e.preventDefault();
@@ -201,11 +202,17 @@
             // option changes must mark the draft as changed (otherwise it is not re-saved)
             var origHash = rcmail.compose_field_hash;
             rcmail.compose_field_hash = function (save) {
-                var h = origHash.call(rcmail, save);
-                return String(h) + (sign.prop('checked') ? 'S' : 's') + (enc.prop('checked') ? 'E' : 'e');
+                var h = String(origHash.call(rcmail, save)) + (sign.prop('checked') ? 'S' : 's') + (enc.prop('checked') ? 'E' : 'e');
+                if (save) {
+                    // core stores its own hash in cmp_hash; store the extended one so comparisons match
+                    rcmail.cmp_hash = h;
+                }
+                return h;
             };
 
             this.update();
+            // the core computed its "unchanged" baseline before this wrapper existed
+            rcmail.cmp_hash = rcmail.compose_field_hash();
         },
 
         exclusiveWithEnigma: function (el) {
@@ -300,14 +307,15 @@
                 return;
             }
             var key = missing.join(',');
-            if (key === this.lastQuery && this.pending) {
-                return;
+            if (key === this.lastQuery && this.pending && t - this.pending < 15000) {
+                return; // same request still in flight (a failed request is retried after 15 s)
             }
             this.lastQuery = key;
             $.each(missing, function (i, a) {
                 compose.cache[a] = compose.cache[a] || { status: 'checking', time: 0 };
             });
-            this.pending = rcmail.http_post('plugin.mimeshield-recipients', { _addresses: missing });
+            this.pending = t;
+            rcmail.http_post('plugin.mimeshield-recipients', { _addresses: missing });
         },
 
         received: function (data) {
@@ -315,6 +323,13 @@
             this.pending = null;
             $.each((data && data.recipients) || {}, function (addr, r) {
                 compose.cache[String(addr)] = { status: String(r.status), until: r.until ? String(r.until) : '', time: t };
+            });
+            // addresses as typed (e.g. IDN in Unicode) -> normalised address used by the server
+            $.each((data && data.aliases) || {}, function (typed, norm) {
+                var r = compose.cache[String(norm)];
+                if (r) {
+                    compose.cache[String(typed)] = r;
+                }
             });
             this.render(this.addresses());
         },
@@ -375,27 +390,32 @@
                 ul.append($('<li>').text(addr + ' – ' + label('recipient_' + st)));
             });
             content.append(ul);
-            content.append($('<p>').text(label('sendwithoutencrypt')));
-
-            rcmail.show_popup_dialog(content, label('missingtitle'), [
-                {
+            var locked = $.inArray('encrypt', rcmail.env.mimeshield_locks || []) >= 0 || compose.enc.prop('disabled');
+            var buttons = [];
+            if (!locked) {
+                content.append($('<p>').text(label('sendwithoutencrypt')));
+                buttons.push({
                     text: label('sendunencrypted'),
                     'class': 'mainaction send',
                     click: function (e, ui, dialog) {
                         // explicit, conscious user decision: switch encryption off (visibly) and send
                         compose.enc.prop('checked', false).trigger('change');
                         (rcmail.is_framed() ? parent.$ : $)(this).dialog('close');
-                        rcmail.command('send');
+                        // the compose input was already validated by the first send attempt
+                        rcmail.command('send', { nocheck: true });
                     }
-                },
-                {
-                    text: label('cancel'),
-                    'class': 'cancel',
-                    click: function () {
-                        (rcmail.is_framed() ? parent.$ : $)(this).dialog('close');
-                    }
+                });
+            } else {
+                content.append($('<p>').text(label('encryptlocked')));
+            }
+            buttons.push({
+                text: label('cancel'),
+                'class': 'cancel',
+                click: function () {
+                    (rcmail.is_framed() ? parent.$ : $)(this).dialog('close');
                 }
-            ]);
+            });
+            rcmail.show_popup_dialog(content, label('missingtitle'), buttons);
         }
     };
 

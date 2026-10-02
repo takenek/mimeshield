@@ -143,7 +143,7 @@ final class IncomingProcessorTest extends TestCase
     private function storage(string $raw): \rcube_imap
     {
         $calls = &$this->calls;
-        return new class($raw, $calls) extends \rcube_imap {
+        return new class ($raw, $calls) extends \rcube_imap {
             /** @var list<array{0: string, 1: mixed}> */
             private array $log;
 

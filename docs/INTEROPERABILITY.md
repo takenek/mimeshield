@@ -6,10 +6,13 @@
 |---|---|---|---|
 | **OpenSSL 3.5 CLI** (`openssl cms`) | final SMTP DATA captured from real Roundcube 1.7.4 sends; Sent copies fetched over IMAP | MIME Shield → OpenSSL: verify, decrypt, decrypt + inner verify | pass (E2E suite) |
 | OpenSSL 3.5 CLI | messages created with `openssl cms`, delivered to IMAP, opened in Roundcube | OpenSSL → MIME Shield | pass (E2E suite) |
-| **Mozilla NSS 3.110 `cmsutil`** — the CMS/S/MIME library used by **Thunderbird** | `tests/interop/run.sh` | both directions: detached signature verify (+ tamper detection), envelope decrypt | 11/11 checks pass |
-| **GnuPG 2.4.7 `gpgsm`** — S/MIME engine of KMail, Kleopatra, Evolution | `tests/interop/run.sh` | both directions | pass |
-| Outlook-style structures (emulated) | crafted with OpenSSL: opaque `application/pkcs7-mime; smime-type=signed-data` (`smime.p7m`), `application/x-pkcs7-signature`, SHA-1 signatures (Outlook on the web default), enveloped data containing opaque signed data, triple wrap, AuthEnvelopedData AES-GCM **without** `aes-ICVlen` (Exchange quirk), RSA-OAEP key transport, BER/indefinite-length CMS, `application/octet-stream` + `.p7m` | → MIME Shield (displayed in Roundcube) | see docs/TESTING.md |
-| Thunderbird-style structures (emulated) | enveloped data containing `multipart/signed; micalg=sha-256`, AES-128-CBC (NSS default for RSA ≤ 3072) | → MIME Shield | see docs/TESTING.md |
+| **Mozilla NSS 3.110 `cmsutil`** — the CMS/S/MIME library used by **Thunderbird** | `tests/interop/run.sh` | both directions: detached signature verify (+ tamper detection), envelope decrypt | 4/4 checks pass |
+| **GnuPG 2.4.7 `gpgsm`** — S/MIME engine of KMail, Kleopatra, Evolution | `tests/interop/run.sh` | both directions | 4/4 checks pass |
+| OpenSSL 3.5 CLI (CMS level) | `tests/interop/run.sh` | MIME Shield → OpenSSL | 3/3 checks pass (whole script: 11/11, on PHP 8.1–8.5) |
+| Outlook-style structures (emulated) | crafted with OpenSSL: opaque `application/pkcs7-mime; smime-type=signed-data` (`smime.p7m`), `application/x-pkcs7-signature`, SHA-1 signatures (Outlook on the web default), enveloped data containing opaque signed data, triple wrap, AuthEnvelopedData AES-GCM **without** `aes-ICVlen` (Exchange quirk), RSA-OAEP key transport, BER/indefinite-length CMS | → MIME Shield (displayed in Roundcube, E2E I1–I9) | pass |
+| Thunderbird-style structures (emulated) | enveloped data (AES-256-CBC) containing `multipart/signed; micalg=sha-256` (E2E I6); AES-128-CBC decryption (PHPUnit CmsServiceTest, and NSS-produced AES-128-CBC in tests/interop) | → MIME Shield | pass |
+
+`application/octet-stream` + `.p7m` detection is covered by PHPUnit (IncomingProcessorTest) only.
 
 What these automated tests prove: the CMS produced by MIME Shield is accepted by NSS (Thunderbird's
 crypto), gpgsm and OpenSSL; MIME Shield accepts CMS produced by them; the MIME layout MIME Shield

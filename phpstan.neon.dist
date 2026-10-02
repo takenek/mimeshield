@@ -4,8 +4,8 @@
 #   php -d memory_limit=2G vendor/bin/phpstan analyse -c phpstan.neon.dist
 #
 # Roundcube is not a Composer dependency of the plugin; its classes are resolved from a Roundcube
-# 1.7.x installation via scanDirectories (hard-coded below: adjust the paths, or symlink
-# /opt/rcrun/1.7.4, when your Roundcube lives elsewhere). Run PHPStan on PHP >= 8.3 so that
+# 1.7.x installation via scanDirectories. The paths below point to the test installation; copy this
+# file to phpstan.neon (git-ignored) and adjust them, or symlink your Roundcube to /opt/rcrun/1.7.4. Run PHPStan on PHP >= 8.3 so that
 # curl constants added in 8.3 (CURLOPT_*_PROTOCOLS_STR, used behind defined()) are known.
 
 parameters:

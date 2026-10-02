@@ -32,7 +32,7 @@ Documentation: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
 |---|---|
 | Roundcube | 1.7.x (tested: see [Compatibility](#9-compatibility)), Elastic skin |
 | PHP | 8.1 – 8.5 |
-| PHP extensions | `openssl` (with CMS functions, OpenSSL ≥ 3.0), `mbstring`, `intl` (recommended, IDN addresses), `sodium` (recommended, otherwise AES-256-GCM is used for the key store), `curl` (only for CRL checks) |
+| PHP extensions | `openssl` (with CMS functions, OpenSSL ≥ 3.0), `mbstring`; recommended: `intl` (internationalised domain names), `sodium` (XChaCha20-Poly1305 key store; otherwise AES-256-GCM), `curl` (only for CRL checks) |
 | Database | whatever Roundcube 1.7 supports: MySQL/MariaDB, PostgreSQL, SQLite |
 | OpenSSL CLI | optional, only for converting legacy RC2 PKCS#12 files (`mimeshield_pkcs12_legacy_cli`) |
 
@@ -55,15 +55,22 @@ The directory **must** be named `plugins/mimeshield`.
 
 ```sh
 cd /var/www/roundcube
-composer require takenek/mimeshield
+composer require takenek/mimeshield          # once a release is tagged and published
+# until then: add a VCS repository for https://github.com/takenek/mimeshield and require ":dev-main"
 ```
 
-(The installer copies `config.inc.php.dist` and runs the database initialisation, see 2.3.)
+The installer (roundcube/plugin-installer) copies `config.inc.php.dist` to
+`plugins/mimeshield/config.inc.php`, creates the database tables (unless `SKIP_DB_INIT` is set) and
+asks whether to enable the plugin — skip 2.3 and 2.5 then, and edit
+`plugins/mimeshield/config.inc.php` (a `config/mimeshield.inc.php` is read only when the plugin
+directory contains no `config.inc.php`).
 
 ### 2.2 Generate the master key
 
-The master key encrypts the users' private keys. It must not be inside the web root, the
-Roundcube directory or the database.
+The master key encrypts the users' private keys. It must not be inside the database. The plugin
+refuses key files that are group-writable or accessible by others (mode bits 027) and key files
+under `<roundcube>/public_html/`, `<roundcube>/plugins/` or the web server document root; keeping it
+outside the whole Roundcube directory is recommended.
 
 ```sh
 plugins/mimeshield/bin/mimeshield.sh keygen --file=/etc/roundcube/mimeshield.key
@@ -138,7 +145,8 @@ sudo -u www-data plugins/mimeshield/bin/mimeshield.sh diag
 
 The command checks Roundcube/PHP/OpenSSL versions, extensions, CMS functions, the temp directory
 (0600 files), the CA bundle, the master key (AEAD self-test, never printed), the database schema
-and the configuration. Exit code 0 = OK.
+and the configuration. Exit code 0 = OK (warnings such as a missing `intl` do not fail). If the
+plugin directory is a symlink, set `ROUNDCUBE_INSTALL_PATH=/var/www/roundcube`.
 
 ## 3. Using it
 
@@ -148,8 +156,9 @@ and the configuration. Exit code 0 = OK.
 2. Select the `.p12` / `.pfx` file, enter its password, *Import*.
 3. The details page shows Subject, Issuer, e-mail address, serial number, SHA-256 fingerprint,
    validity, key usage, extended key usage, key algorithm/size and chain status.
-4. The certificate is automatically assigned for signing to every identity whose e-mail address
-   it contains; adjust under *Use for signing messages from*.
+4. If the certificate is valid for signing, it is assigned automatically to every identity whose
+   e-mail address it contains, unless that identity already uses a valid certificate that expires
+   later; adjust under *Use for signing messages from*.
 
 The password is used only for the import. If the import says the file uses an outdated algorithm
 (RC2), re-export the certificate from Windows with **AES256-SHA256** (certificate export wizard)
@@ -165,7 +174,8 @@ openssl pkcs12 -legacy -in old.pfx -nodes | openssl pkcs12 -export -out new.p12
 
 * Open a signed message → *Save sender certificate to S/MIME contacts* (offered only when the
   signature is valid and matches the sender), or
-* Settings → **S/MIME contacts** → *Import* (`.cer`, `.crt`, `.pem`, `.der`, `.p7b`).
+* Settings → **S/MIME contacts** → *Import* (`.cer`, `.crt`, `.pem`, `.der`, `.p7b`, `.p7c`).
+  Importing the same certificate again together with its CA chain updates the stored chain.
 
 If a different certificate already exists for an address, the import shows both fingerprints and
 requires confirmation.
@@ -198,9 +208,11 @@ private key shows a warning because messages encrypted for it can no longer be d
 ```sh
 plugins/mimeshield/bin/mimeshield.sh keygen --file=/etc/roundcube/mimeshield.key --append --kid=k2
 # config: $config['mimeshield_master_key_active'] = 'k2';
+plugins/mimeshield/bin/mimeshield.sh rotate --dry-run
 plugins/mimeshield/bin/mimeshield.sh rotate
 plugins/mimeshield/bin/mimeshield.sh check-keystore
-# then remove the old "k1 ..." line from the key file
+# then remove the line of the old key id from the key file (keygen's default id is k<YYYYMMDD>;
+# key ids are 1-16 characters a-z0-9)
 ```
 
 ## 5. Upgrade
@@ -216,13 +228,25 @@ Replace the plugin files, then run `bin/updatedb.sh --package=mimeshield
 2. Optional data removal (irreversible – users lose their stored private keys; make sure they
    still have their PKCS#12 files):
 
+   MySQL / MariaDB:
+   ```sql
+   DROP TABLE `mimeshield_cert_emails`, `mimeshield_certs`, `mimeshield_bindings`, `mimeshield_keys`;
+   DELETE FROM `system` WHERE `name` = 'mimeshield-version';
+   ```
+   PostgreSQL:
+   ```sql
+   DROP TABLE mimeshield_cert_emails, mimeshield_certs, mimeshield_bindings, mimeshield_keys;
+   DROP SEQUENCE mimeshield_keys_seq, mimeshield_certs_seq;
+   DELETE FROM "system" WHERE name = 'mimeshield-version';
+   ```
+   SQLite:
    ```sql
    DROP TABLE mimeshield_cert_emails; DROP TABLE mimeshield_certs;
-   DROP TABLE mimeshield_bindings;    DROP TABLE mimeshield_keys;
+   DROP TABLE mimeshield_bindings; DROP TABLE mimeshield_keys;
    DELETE FROM system WHERE name = 'mimeshield-version';
-   -- PostgreSQL also: DROP SEQUENCE mimeshield_keys_seq; DROP SEQUENCE mimeshield_certs_seq;
    ```
-   (prefix table names with your `db_prefix`).
+   With `$config['db_prefix']` (e.g. `rc_`) every name gets the prefix: the tables, the `system`
+   table (`rc_system`) and the PostgreSQL sequences (`rc_mimeshield_keys_seq`, ...).
 3. Remove `plugins/mimeshield`, the plugin configuration and – after the data is gone – destroy
    the master key file securely.
 
@@ -247,10 +271,12 @@ controls the web server process can use the keys (inherent to server-side S/MIME
 ## 9. Compatibility
 
 Tested versions and the exact test results are listed in [docs/TESTING.md](docs/TESTING.md):
-Roundcube 1.7.0 – 1.7.4, PHP 8.1 – 8.5, OpenSSL 3.5, MariaDB 11.8, PostgreSQL 17, SQLite 3.
-Interoperability status (Outlook, Thunderbird, NSS, gpgsm, OpenSSL) is documented in
-[docs/INTEROPERABILITY.md](docs/INTEROPERABILITY.md) — Microsoft Outlook was **not** available in
-the test environment; a manual checklist is provided.
+Roundcube 1.7.0, 1.7.1, 1.7.2, 1.7.3, 1.7.4 (git tags; 1.7.4 also as the official signed release
+tarball), PHP 8.1, 8.2, 8.3, 8.4, 8.5, OpenSSL 3.5, MariaDB 11.8, PostgreSQL 17, SQLite 3, Chromium
+154 for the browser tests. Interoperability status (NSS = Thunderbird's crypto library, gpgsm,
+OpenSSL) is documented in [docs/INTEROPERABILITY.md](docs/INTEROPERABILITY.md) — Microsoft Outlook
+and the Thunderbird application itself were **not** available in the test environment; a manual
+checklist is provided.
 
 ## 10. Known limitations
 

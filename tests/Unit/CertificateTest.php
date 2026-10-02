@@ -427,7 +427,7 @@ final class CertificateTest extends TestCase
             $newTbs = Asn1::replaceAt($tbs, [$serialIdx], $serial);
             $sig = '';
             self::assertTrue(openssl_sign($newTbs, $sig, $intKey, OPENSSL_ALGO_SHA256));
-            if (in_array(substr($sig, -1), [" ", "\t", "\n", "\r", "\0", "\x0B"], true)) {
+            if (in_array(substr($sig, -1), [' ', "\t", "\n", "\r", "\0", "\x0B"], true)) {
                 return Asn1::encode("\x30", $newTbs . $algo . Asn1::encode("\x03", "\x00" . $sig));
             }
         }

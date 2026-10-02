@@ -580,7 +580,7 @@ final class EntityBuilderTest extends TestCase
         }
         self::assertSame(1, preg_match('/boundary="?([^";\r\n]+)"?/i', $headers, $b), 'no boundary');
         $delim = '--' . $b[1];
-        self::assertStringContainsString("\r\n" . $delim . "--", "\r\n" . $body, 'no close delimiter');
+        self::assertStringContainsString("\r\n" . $delim . '--', "\r\n" . $body, 'no close delimiter');
         $body = substr("\r\n" . $body, 0, (int) strpos("\r\n" . $body, "\r\n" . $delim . '--'));
         $chunks = explode("\r\n" . $delim . "\r\n", $body);
         array_shift($chunks); // preamble

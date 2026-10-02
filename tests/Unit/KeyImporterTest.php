@@ -361,7 +361,7 @@ final class KeyImporterTest extends TestCase
     {
         $d = $this->tempDir();
         $marker = $d . '/PWNED';
-        $password = "a'b\"c \$(touch " . $marker . ") `touch " . $marker . "` ; | & -passin pass:x";
+        $password = "a'b\"c \$(touch " . $marker . ') `touch ' . $marker . '` ; | & -passin pass:x';
         file_put_contents($d . '/pw', $password . "\n");
         $p12 = self::opensslOk([
             'pkcs12', '-export', '-legacy', '-in', TestPki::path('alice.crt'), '-inkey', TestPki::path('alice.key'),

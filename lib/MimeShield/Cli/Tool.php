@@ -48,7 +48,7 @@ final class Tool
                 return $this->checkKeystore();
             default:
                 $this->out("MIME Shield administration tool\n\n"
-                    . "Usage: bin/mimeshield.sh <command> [options]\n\n"
+                    . "Usage: plugins/mimeshield/bin/mimeshield.sh <command> [options]  (run from the Roundcube directory as the web server user)\n\n"
                     . "  diag                              check the installation (no secrets are shown)\n"
                     . "  keygen --file=PATH [--kid=ID]     create a new master key file (mode 0400)\n"
                     . "  keygen --file=PATH --append [--kid=ID]\n"
@@ -69,9 +69,10 @@ final class Tool
         $this->ok('OpenSSL (PHP)', OPENSSL_VERSION_TEXT);
 
         $this->section('PHP extensions');
-        foreach (['openssl', 'mbstring', 'intl'] as $ext) {
+        foreach (['openssl', 'mbstring'] as $ext) {
             $this->check(extension_loaded($ext), 'ext-' . $ext, extension_loaded($ext) ? 'loaded' : 'MISSING');
         }
+        $this->check(extension_loaded('intl'), 'ext-intl', extension_loaded('intl') ? 'loaded' : 'missing - internationalised domain names cannot be matched', true);
         $this->check(extension_loaded('sodium'), 'ext-sodium', extension_loaded('sodium') ? 'loaded (XChaCha20-Poly1305 key store)' : 'missing - AES-256-GCM fallback is used', !extension_loaded('sodium'));
         $this->check(extension_loaded('curl') || $cfg->revocationMode() === 'off', 'ext-curl', extension_loaded('curl') ? 'loaded' : 'missing (needed only for CRL checking)', !extension_loaded('curl'));
         foreach (['openssl_cms_sign', 'openssl_cms_verify', 'openssl_cms_encrypt', 'openssl_cms_decrypt', 'openssl_cms_read', 'openssl_pkcs12_read'] as $fn) {
@@ -209,7 +210,7 @@ final class Tool
         $this->out("Master key '{$kid}' written to {$file}.\n"
             . "Make it readable by the PHP user only, e.g.:  chown root:www-data {$file} && chmod 0440 {$file}\n"
             . "Then set \$config['mimeshield_master_key_file'] = '{$file}';\n"
-            . ($append ? "Set \$config['mimeshield_master_key_active'] = '{$kid}'; and run: bin/mimeshield.sh rotate\n" : '')
+            . ($append ? "Set \$config['mimeshield_master_key_active'] = '{$kid}'; and run: plugins/mimeshield/bin/mimeshield.sh rotate\n" : '')
             . "BACK UP THIS FILE: without it no stored private key can be used.\n");
         return 0;
     }

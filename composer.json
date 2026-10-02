@@ -2,7 +2,7 @@
     "name": "takenek/mimeshield",
     "type": "roundcube-plugin",
     "description": "MIME Shield - S/MIME for Roundcube 1.7: sign, verify, encrypt, decrypt, PKCS#12 import, encrypted private key store, recipient certificate store, trust validation, multiple identities.",
-    "keywords": ["roundcube", "plugin", "s/mime", "smime", "cms", "pkcs12", "encryption", "signature"],
+    "keywords": ["roundcube", "plugin", "smime", "s-mime", "cms", "pkcs12", "encryption", "signature"],
     "license": "GPL-3.0-or-later",
     "homepage": "https://github.com/takenek/mimeshield",
     "require": {

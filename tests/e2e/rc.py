@@ -163,11 +163,12 @@ class Roundcube:
         return r
 
     def import_cert(self, path, confirm=False, filename=None):
+        if confirm:
+            # the confirmation form posts directly (a GET of the import form discards the pending upload)
+            return self.s.post(self.url(_task='settings', _action='plugin.mimeshield-certimport', _framed=1),
+                               data={'_token': self.token, '_confirm': '1'})
         r = self.get(_task='settings', _action='plugin.mimeshield-certimport', _framed=1)
         tok = self.env_token(r.text) or self.token
-        if confirm:
-            return self.s.post(self.url(_task='settings', _action='plugin.mimeshield-certimport', _framed=1),
-                               data={'_token': tok, '_confirm': '1'})
         with open(path, 'rb') as f:
             files = {'_file': (filename or path.split('/')[-1], f.read(), 'application/pkix-cert')}
         return self.s.post(self.url(_task='settings', _action='plugin.mimeshield-certimport', _framed=1),

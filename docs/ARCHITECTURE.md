@@ -24,6 +24,8 @@ lib/MimeShield/
   Cert/
     Certificate.php            X.509 value object; SAN/KU/EKU/BC/CRLDP/AIA parsed from DER
     KeyImporter.php            PKCS#12 / PEM import with precise error classification
+    KdfInspector.php           PKCS#12/PKCS#8 KDF cost limits, checked before OpenSSL
+    ImportedKey.php            import result (transient, holds the key in memory only)
     LegacyPkcs12Converter.php  opt-in RC2 PKCS#12 conversion via openssl CLI (no shell, no disk)
     PublicCertImporter.php     PEM / DER / PKCS#7 certs-only
   KeyStore/
@@ -36,6 +38,7 @@ lib/MimeShield/
     RevocationChecker.php      opt-in CRL checking (signature, freshness, critical extensions)
     SafeHttpClient.php         SSRF-hardened HTTP GET for CRLs
     VerificationResult.php     separated crypto / chain / identity / revocation / time / policy states
+    ChainResult.php, RevocationResult.php   result value objects
   Storage/                     rcube_db repositories (always scoped by user_id)
   Service/
     KeyService.php             own keys: import, unwrap, signer per identity, decryption candidates
@@ -71,7 +74,7 @@ Roundcube requires the class name to equal the directory name
 | mail compose | `message_compose_body`, `template_container` (`composeoptions`) | options, env, draft restore |
 | mail send | `message_ready` | sign / encrypt (and abort on error) |
 | mail send | `message_before_send` | fail-closed check, Bcc envelopes, dot guard |
-| mail | `plugin.mimeshield-recipients`, `plugin.mimeshield-identities`, `plugin.mimeshield-savecert` | AJAX |
+| mail | `plugin.mimeshield-recipients`, `plugin.mimeshield-savecert` | AJAX |
 | settings | `settings_actions`, `preferences_list`, `preferences_save`, `identity_delete` | settings UI |
 | settings | `plugin.mimeshield*` actions | certificate management pages |
 | cli | `user_delete` | cleanup in `bin/deluser.sh` |
@@ -151,7 +154,7 @@ so a decrypting gateway still yields a verifiable signature. Receiving supports 
 |---|---|---|
 | Signature digest | SHA-256 (OpenSSL 3 default for RSA/EC; PHP has no digest parameter) | RFC 8551 §2.1; micalg is read back from the DER, MD5/SHA-1 are never emitted |
 | SMIMECapabilities | omitted (`CMS_NOSMIMECAP`) | OpenSSL's default list advertises RC2/DES that OpenSSL 3 cannot decrypt |
-| Content encryption | AES-256-CBC (EnvelopedData) | decryptable by Outlook (OWA default), Thunderbird ESR (no GCM before 154), Apple Mail, gpgsm |
+| Content encryption | AES-256-CBC (EnvelopedData) | verified with NSS (Thunderbird's library) and gpgsm in tests/interop; per vendor documentation also used/decrypted by Outlook (OWA default AES-256) and reported for Apple Mail (not tested); Thunderbird decrypts GCM only from 154 |
 | Optional | AES-256-GCM (AuthEnvelopedData) | PHP ≥ 8.5 only; admin opt-in |
 | Key transport | RSA PKCS#1 v1.5; ECDH (stdDH-sha1kdf + AES key wrap) for EC certs | PHP cannot select RSA-OAEP for encryption; OAEP is not universally decryptable |
 | Never for new mail | RC2, DES, 3DES, MD5, SHA-1 | RFC 8551 App. B |
@@ -275,8 +278,8 @@ PKCS#12 upload ─► openssl_pkcs12_read (password used once, wiped, never stor
 The master key (32 random bytes, `kid base64` lines) lives in a file outside the web root and the
 plugin directory (refused otherwise, world-readable files refused) or in an environment variable.
 It is never stored in the database and never generated implicitly. Rotation: add a key
-(`bin/mimeshield.sh keygen --append`), set `mimeshield_master_key_active`, run
-`bin/mimeshield.sh rotate` (re-wraps every blob), then remove the old key.
+(`plugins/mimeshield/bin/mimeshield.sh keygen --append`), set `mimeshield_master_key_active`, run
+`plugins/mimeshield/bin/mimeshield.sh rotate` (re-wraps every blob), then remove the old key.
 
 Private keys are unwrapped only in memory for a single sign/decrypt operation, passed to OpenSSL
 as PEM strings (verified with strace: OpenSSL writes no key file) and wiped afterwards (best effort

@@ -65,7 +65,7 @@ class mimeshield extends rcube_plugin
             'missingtitle', 'missingintro', 'sendunencrypted', 'cancel', 'confirmdeletekey', 'confirmdeletecert',
             'confirmreplace', 'saving', 'loading', 'bccwarning', 'forceencryptwarning', 'sendwithoutencrypt',
             'signdisabledidentity', 'importkey', 'importcert', 'certsaved', 'replacetitle', 'replacebutton',
-            'enigmaconflict', 'expiresat',
+            'enigmaconflict', 'expiresat', 'encryptlocked',
         ]);
 
         $this->schemaOk = $this->checkSchema();
@@ -113,6 +113,23 @@ class mimeshield extends rcube_plugin
                 $this->includeAssets();
             }
         }
+    }
+
+    /**
+     * Plugin information shown in Roundcube's "About" page.
+     *
+     * @return array<string, string>
+     */
+    #[\Override]
+    public static function info()
+    {
+        return [
+            'name' => 'MIME Shield',
+            'vendor' => 'MIME Shield contributors',
+            'version' => '1.0.0',
+            'license' => 'GPL-3.0-or-later',
+            'uri' => 'https://github.com/takenek/mimeshield',
+        ];
     }
 
     public function services(): Services
@@ -184,7 +201,8 @@ class mimeshield extends rcube_plugin
     private function includeAssets(): void
     {
         $this->include_script('js/mimeshield.js');
-        $this->include_stylesheet($this->local_skin_path() . '/mimeshield.css');
+        $skin = $this->local_skin_path();
+        $this->include_stylesheet((is_dir($this->home . '/' . $skin) ? $skin : 'skins/elastic') . '/mimeshield.css');
     }
 
     // ------------------------------------------------------------------ incoming mail

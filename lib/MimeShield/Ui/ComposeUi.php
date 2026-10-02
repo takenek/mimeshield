@@ -66,14 +66,22 @@ final class ComposeUi
             $force = true;
         }
 
-        if ($force && !empty($p['html']) && is_string($p['body'] ?? null) && $p['body'] !== '') {
-            // EFAIL hardening: core washes draft HTML with "safe" (remote content allowed) after our
-            // message_load hook; wash decrypted HTML again with remote resources blocked
+        if ($force && $mode === 'draft' && !empty($p['html']) && is_string($p['body'] ?? null) && $p['body'] !== '') {
+            // EFAIL hardening: for drafts core sets is_safe=true AFTER our message_load hook and washes
+            // with remote content allowed; wash decrypted draft HTML again with remote resources
+            // blocked, keeping the compose attachment URLs of inline images (same-origin, relative)
+            $keep = [];
+            if (preg_match_all('/\ssrc="(\.\/\?_task=mail&[^"]*_action=display-attachment[^"]*)"/', $p['body'], $mm)) {
+                foreach ($mm[1] as $u) {
+                    $u = html_entity_decode($u, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+                    $keep[$u] = $u;
+                }
+            }
             $p['body'] = \rcmail_action_mail_index::wash_html($p['body'], [
                 'safe' => false,
                 'add_comments' => false,
                 'ignore_elements' => ['body'],
-            ], []);
+            ], $keep);
         }
 
         $out->set_env('mimeshield_restore', $restore);
@@ -154,7 +162,12 @@ final class ComposeUi
                 $entry['until'] = gmdate('Y-m-d', $c->notAfter);
                 $entry['soon'] = $c->notAfter - time() < 30 * 86400;
             } catch (MimeShieldException $e) {
-                $entry['reason'] = $this->plugin->text($e->getUserLabel(), $e->getVars());
+                // short status text for the compose sidebar (the long variants are send errors)
+                $short = [
+                    'signnocert' => 'id_nocert', 'signaddressmismatch' => 'id_mismatch', 'signcertexpired' => 'id_expired',
+                    'signcertnotyet' => 'id_notyet', 'signcertusage' => 'id_usage',
+                ][$e->getUserLabel()] ?? 'nocertificate';
+                $entry['reason'] = $this->plugin->text($short, $e->getVars());
             }
             $entry['encryptself'] = $keys->encryptionCertFor((string) $ident['email'], $iid) !== null;
             $out[$iid] = $entry;
@@ -171,10 +184,14 @@ final class ComposeUi
         $input = self::postedAddresses();
         $max = $this->plugin->config()->int('mimeshield_max_recipients', 1, 1000);
         $emails = [];
+        $aliases = [];
         foreach ($input as $a) {
             $n = AddressMatcher::normalize($a);
             if ($n !== null) {
                 $emails[$n] = true;
+                if (mb_strtolower($a) !== $n) {
+                    $aliases[mb_strtolower($a)] = $n;
+                }
             }
             if (count($emails) >= $max) {
                 break;
@@ -198,7 +215,7 @@ final class ComposeUi
             Log::error('compose', 'recipient lookup failed: ' . $e->getMessage());
         }
 
-        $rc->output->command('plugin.mimeshield_recipients', ['recipients' => $result]);
+        $rc->output->command('plugin.mimeshield_recipients', ['recipients' => $result, 'aliases' => $aliases]);
         $rc->output->send();
     }
 

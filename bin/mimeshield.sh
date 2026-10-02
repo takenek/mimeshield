@@ -4,8 +4,9 @@
 /**
  * MIME Shield - administration tool (diagnostics, master key generation and rotation).
  *
- * Run from the Roundcube installation directory as the user owning the Roundcube files, e.g.:
- *   plugins/mimeshield/bin/mimeshield.sh diag
+ * Run from the Roundcube installation directory as the PHP / web server user (it must be able to
+ * read the master key), e.g.:
+ *   sudo -u www-data plugins/mimeshield/bin/mimeshield.sh diag
  *
  * @license GPL-3.0-or-later
  */

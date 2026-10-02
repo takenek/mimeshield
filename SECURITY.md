@@ -22,8 +22,9 @@ Only the latest release receives security fixes.
   XChaCha20-Poly1305 (libsodium) or AES-256-GCM (OpenSSL) when libsodium is unavailable.
 * The 256-bit data key is derived (HKDF-SHA256) from an **installation master key** that is kept
   outside the database, outside the web root and outside the plugin directory (key file with mode
-  0400/0440, or an environment variable). The plugin refuses world-readable key files and key files
-  under `public_html/` or `plugins/`.
+  0400/0440, or an environment variable). The plugin refuses key files that are group-writable or
+  accessible by others (mode bits 027) and key files under `public_html/`, `plugins/` or the web
+  server document root.
 * Every record has its own random nonce, a 128-bit authentication tag, a key identifier (for
   rotation) and a format version. The ciphertext is bound (associated data) to the user id and the
   certificate fingerprint; tampering or moving a blob to another row is detected.
@@ -42,8 +43,8 @@ Only the latest release receives security fixes.
 * Back it up **separately** from database backups. Losing it makes all stored private keys
   unusable (users would have to re-import their PKCS#12 files). Stealing it together with a
   database dump reveals all private keys.
-* Rotate: `keygen --append` → set `mimeshield_master_key_active` → `bin/mimeshield.sh rotate` →
-  `bin/mimeshield.sh check-keystore` → remove the old key line.
+* Rotate: `keygen --append` → set `mimeshield_master_key_active` → `plugins/mimeshield/bin/mimeshield.sh rotate` →
+  `plugins/mimeshield/bin/mimeshield.sh check-keystore` → remove the old key line.
 * Never commit it, never put it into `config.inc.php.dist`, never place it inside the Roundcube
   directory tree.
 
@@ -69,6 +70,6 @@ See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full threat model and
   user.
 * Keep `mimeshield_revocation = 'off'` unless outbound HTTP from the web server is acceptable; if
   enabled, consider `mimeshield_revocation_allow_hosts` and a proxy.
-* Run `bin/mimeshield.sh diag` after every upgrade.
+* Run `plugins/mimeshield/bin/mimeshield.sh diag` after every upgrade.
 * Restrict `log_dir` permissions; the plugin never logs secrets, but logs contain user ids and
   certificate fingerprints.

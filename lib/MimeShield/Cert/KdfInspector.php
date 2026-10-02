@@ -156,7 +156,7 @@ final class KdfInspector
             return PHP_INT_MAX;
         }
         $c = ltrim($node->content(), "\x00");
-        if ($c === '' ) {
+        if ($c === '') {
             return 0;
         }
         if (strlen($c) > 7 || (ord($node->content()[0]) & 0x80)) {

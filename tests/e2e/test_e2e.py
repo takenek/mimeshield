@@ -1001,6 +1001,20 @@ def c31():
     check(re.search(r'<input[^>]*name="_mimeshield_encrypt"[^>]*checked', text), 'encrypt checkbox not checked')
 
 
+@case('47 encrypted HTML draft with a remote image: reopened compose never loads the remote resource')
+def c47():
+    a = session('alice')
+    subj = 'e2e 47 html draft'
+    html = '<p>Draft 47</p><p><img src="http://tracker.example.test/d47.png" alt="t"></p>'
+    r = a.send(to=addr('bob'), subject=subj, body=html, html_body=True, encrypt=True, draft=True, identity=ident_id('alice'))
+    check(has_message(r, 'Message saved to Drafts.', 'confirmation'), 'draft not saved: %r' % messages_of(r))
+    uid, raw = imap_fetch_all('alice', 'Drafts', ('header', 'subject', subj))[-1]
+    check(b'tracker.example.test' not in raw, 'draft must be encrypted')
+    env, text = compose_env('alice', _draft_uid=uid, _mbox='Drafts')
+    check('Draft 47' in text, 'draft body not restored')
+    check(not re.search(r'src=(&quot;|"|\\")http://tracker\.example\.test', text), 'remote image would be loaded in compose')
+
+
 @case('32 reply to an encrypted message forces encryption')
 def c32():
     uid = newest_uid('bob', subject='e2e 19 enc')
@@ -1291,6 +1305,115 @@ def ci9():
 
 
 # =========================================================================== final aggregate checks
+
+@case('42 reply to an encrypted message, signed + encrypted (quoted text inside, verified by openssl)')
+def c42():
+    uid = E.state.get('enc19_uid') or newest_uid('bob', subject='e2e 19 enc')
+    r, mark = send('bob', to=addr('alice'), subject='Re: e2e 19 enc', body='Reply 42\n> Top secret 19 for Bob only.',
+                   sign=True, encrypt=True, compose_params={'_reply_uid': uid, '_mbox': 'INBOX'})
+    assert_sent(r)
+    m = sink_one(mark, [addr('alice')])
+    plain, err = cms_decrypt(m['data'], 'alice')
+    check(plain is not None, 'alice cannot decrypt: %s' % err)
+    ok, content, pem, err = cms_verify(plain)
+    check(ok, 'inner signature: %s' % err)
+    check(b'Top secret 19' in content.replace(b'=\r\n', b''), 'quoted text missing')
+    check(re.search(r'^In-Reply-To:', header_block(m['data']), re.M), 'In-Reply-To header missing')
+
+
+@case('43 forward of an encrypted message: inline (signed) and as attachment (original stays encrypted)')
+def c43():
+    uid = E.state.get('enc19_uid') or newest_uid('bob', subject='e2e 19 enc')
+    r, mark = send('bob', to=addr('carol'), subject='Fwd: e2e 19 enc', body='Forward 43\n-------- Original Message --------\nTop secret 19 for Bob only.',
+                   sign=True, compose_params={'_forward_uid': uid, '_mbox': 'INBOX'})
+    assert_sent(r)
+    m = sink_one(mark, [addr('carol')])
+    ok, content, pem, err = cms_verify(m['data'])
+    check(ok, 'forward signature: %s' % err)
+    r, mark = send('bob', to=addr('carol'), subject='Fwd att: e2e 19 enc', body='Forward as attachment 43',
+                   sign=True, compose_params={'_forward_uid': uid, '_mbox': 'INBOX', '_attachment': 1})
+    assert_sent(r)
+    m = sink_one(mark, [addr('carol')])
+    ok, content, pem, err = cms_verify(m['data'])
+    check(ok, 'forward-as-attachment signature: %s' % err)
+    check(b'message/rfc822' in content and b'pkcs7-mime' in content, 'original encrypted message must be attached unchanged')
+    check(b'Top secret 19' not in content, 'attached original must stay encrypted')
+
+
+@case('44 contact certificate replaced: fingerprint-change confirmation, preferred certificate selection')
+def c44():
+    # a second certificate for bob (TEST int CA, shorter validity) imported by alice
+    d = os.path.join(E.tmp, 'bobnew')
+    os.makedirs(d, exist_ok=True)
+    with open(d + '/x.cnf', 'w') as f:
+        f.write('[x]\nbasicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\nextendedKeyUsage=emailProtection\n'
+                'subjectAltName=email:bob@example.test\n')
+    ossl(['req', '-new', '-newkey', 'rsa:2048', '-nodes', '-keyout', d + '/b.key', '-out', d + '/b.csr', '-subj', '/CN=bob new (TEST ONLY)'])
+    r = ossl(['x509', '-req', '-in', d + '/b.csr', '-CA', PKI + '/int.crt', '-CAkey', PKI + '/int.key', '-CAcreateserial',
+              '-out', d + '/b.crt', '-days', '100', '-extfile', d + '/x.cnf', '-extensions', 'x'])
+    check(r.returncode == 0, 'cert generation: %s' % r.stderr.decode())
+    with open(d + '/bundle.pem', 'w') as f:
+        f.write(open(d + '/b.crt').read() + open(PKI + '/int.crt').read())
+    a = session('alice')
+    r = a.import_cert(d + '/bundle.pem')
+    check('fingerprint changed' in r.text or 'different certificate' in r.text, 'confirmation expected: %s' % Roundcube.text_of(r.text)[:300])
+    ids_before, _ = a.cert_ids()
+    r = a.import_cert(None, confirm=True)
+    check(any('imported' in t for t, _ in messages_of(r)) or 'Certificate details' in r.text or 'certimported' in r.text, 'confirm import failed')
+    ids_after, page = a.cert_ids()
+    check(len(ids_after) == len(ids_before) + 1, 'both certificates must be stored')
+    code, resp = a.ajax('mail', 'plugin.mimeshield-recipients', {'_addresses[]': [addr('bob')]})
+    st = Roundcube.callbacks(resp, 'plugin.mimeshield_recipients')[0]['recipients'][addr('bob')]
+    check(st['status'] == 'ok', 'new cert usable: %r' % st)
+    new_until = st['until']
+    # prefer the original certificate again
+    old_id = [i for i in ids_after if i not in set(ids_after) - set(ids_before)]
+    new_id = [i for i in ids_after if i not in ids_before][0]
+    ok_old = None
+    for cid in ids_before:
+        rr = a.post_action('plugin.mimeshield-certprefer', {'_id': cid, '_email': addr('bob')}, task='settings', header=True)
+        code, resp = a.ajax('mail', 'plugin.mimeshield-recipients', {'_addresses[]': [addr('bob')]})
+        st2 = Roundcube.callbacks(resp, 'plugin.mimeshield_recipients')[0]['recipients'][addr('bob')]
+        if st2.get('until') and st2['until'] != new_until:
+            ok_old = cid
+            break
+    check(ok_old, 'preferring the old certificate did not change the selection')
+    # remove the runtime certificate again (keeps later cases decryptable with the fixture key)
+    a.post_action('plugin.mimeshield-certdelete', {'_id': new_id}, task='settings', header=True)
+    ids_final, _ = a.cert_ids()
+    check(new_id not in ids_final, 'certificate delete failed')
+
+
+@case('45 sender certificate from an untrusted chain is saved as "observed" and not used for encryption')
+def c45():
+    b = session('bob')
+    uid = newest_uid('bob', subject='e2e 17 untrusted')
+    rr = b.post_action('plugin.mimeshield-savecert', {'_uid': uid, '_mbox': 'INBOX'}, task='mail', header=True)
+    if 'mimeshield_savecert_confirm' in rr.text:
+        rr = b.post_action('plugin.mimeshield-savecert', {'_uid': uid, '_mbox': 'INBOX', '_confirm': 1}, task='mail', header=True)
+    check('Sender certificate saved.' in rr.text, 'savecert: %s' % rr.text[:300])
+    ids, page = b.cert_ids()
+    check('observed (not verified)' in page, 'observed badge missing')
+
+
+@case('46 decrypted HTML: scripts removed, remote content blocked (show, preview, _safe=1, get)')
+def c46():
+    html = ('<html><body><p>EFAIL 46</p><img src="http://tracker.example.test/x.png">'
+            '<script>alert(1)</script><img src="x" onerror="alert(2)"></body></html>')
+    entity = ('Content-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n%s\r\n' % html).encode()
+    msg = mail({'From': addr('alice'), 'To': addr('bob'), 'Subject': 'e2e 46 efail'}, smime_encrypt(entity, ['bob']))
+    uid, page = deliver_and_show('bob', msg)
+    b = session('bob')
+    for name, pg in (('show', page), ('preview', b.show(uid, action='preview')),
+                     ('safe', b.get(_task='mail', _action='show', _uid=uid, _mbox='INBOX', _safe=1).text)):
+        check('EFAIL 46' in pg, '%s: decrypted body missing' % name)
+        check(not re.search(r'src="http://tracker\.example\.test', pg), '%s: remote image not blocked' % name)
+        check('<script>alert(1)' not in pg and 'onerror="alert(2)"' not in pg, '%s: active content not removed' % name)
+    links = re.findall(r'_part=([0-9.]+)', page)
+    for part in set(links):
+        g = b.get(_task='mail', _action='get', _uid=uid, _mbox='INBOX', _part=part, _safe=1).text
+        check(not re.search(r'src="http://tracker\.example\.test', g) and '<script>alert(1)' not in g, 'get part %s not sanitised' % part)
+
 
 @case('41 CLI: diag, keygen (no overwrite), master key rotation, check-keystore; mail still decrypts')
 def c41():

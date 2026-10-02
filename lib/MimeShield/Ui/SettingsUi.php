@@ -78,10 +78,37 @@ final class SettingsUi
 
     // ------------------------------------------------------------------ list pages
 
+    /**
+     * Messages to show after the list page reloads (import results).
+     *
+     * @param list<array{0: string, 1: string}> $messages
+     */
+    private function flash(array $messages): void
+    {
+        $messages = array_slice($messages, 0, 8);
+        foreach ($messages as [$label, $type]) {
+            // shown now (non-JS clients / until the parent reloads) and again after the list reload
+            $this->rc->output->show_message('mimeshield.' . $label, $type);
+        }
+        $_SESSION['mimeshield_flash'] = $messages;
+    }
+
+    private function showFlash(): void
+    {
+        foreach ((array) ($_SESSION['mimeshield_flash'] ?? []) as $m) {
+            if (is_array($m) && isset($m[0], $m[1]) && $this->rc->text_exists('mimeshield.' . $m[0])) {
+                $this->rc->output->show_message('mimeshield.' . $m[0], in_array($m[1], ['confirmation', 'warning'], true) ? $m[1] : 'notice');
+            }
+        }
+        unset($_SESSION['mimeshield_flash']);
+    }
+
     private function keysPage(): void
     {
         $this->rc->output->set_pagetitle($this->plugin->text('mykeys'));
+        $this->rc->output->include_script('list.js');
         $this->rc->output->set_env('mimeshield_page', 'keys');
+        $this->showFlash();
         $this->rc->output->set_env('mimeshield_select', (int) \rcube_utils::get_input_string('_sel', \rcube_utils::INPUT_GET));
         $this->keystoreWarning();
         $this->plugin->register_handler('plugin.mimeshieldlist', [$this, 'keysList']);
@@ -92,7 +119,9 @@ final class SettingsUi
     private function contactsPage(): void
     {
         $this->rc->output->set_pagetitle($this->plugin->text('contactcerts'));
+        $this->rc->output->include_script('list.js');
         $this->rc->output->set_env('mimeshield_page', 'contacts');
+        $this->showFlash();
         $this->rc->output->set_env('mimeshield_select', (int) \rcube_utils::get_input_string('_sel', \rcube_utils::INPUT_GET));
         $this->plugin->register_handler('plugin.mimeshieldlist', [$this, 'contactsList']);
         $this->plugin->register_handler('plugin.mimeshieldtitle', fn () => \rcube::Q($this->plugin->text('contactcerts')));
@@ -239,6 +268,7 @@ final class SettingsUi
             $this->importForm('key');
             return;
         }
+        $this->rejectOversizedPost('key');
         $this->plugin->requirePostToken();
         $password = (string) \rcube_utils::get_input_string('_password', \rcube_utils::INPUT_POST, true);
         unset($_POST['_password'], $_REQUEST['_password']);
@@ -257,10 +287,8 @@ final class SettingsUi
                 KeyVault::wipe($data);
             }
         }
-        $this->rc->output->show_message('mimeshield.keyimported', 'confirmation');
-        foreach ($result['warnings'] as $w) {
-            $this->rc->output->show_message('mimeshield.' . $w, 'warning');
-        }
+        // the list page is reloaded: hand the messages over to it
+        $this->flash(array_merge([['keyimported', 'confirmation']], array_map(static fn ($w) => [$w, 'warning'], $result['warnings'])));
         $this->rc->output->command('parent.mimeshield_list_reload', $result['id']);
         $this->keyInfo($result['id']);
     }
@@ -375,6 +403,7 @@ final class SettingsUi
             $this->importForm('cert');
             return;
         }
+        $this->rejectOversizedPost('cert');
         $this->plugin->requirePostToken();
         $confirmed = (bool) \rcube_utils::get_input_value('_confirm', \rcube_utils::INPUT_POST);
         if ($confirmed && !empty($_SESSION['mimeshield_pending_cert']) && is_string($_SESSION['mimeshield_pending_cert'])) {
@@ -406,7 +435,7 @@ final class SettingsUi
         }
         if ($result['imported'] === [] && $result['updated'] !== []) {
             $up = $result['updated'][0];
-            $this->rc->output->show_message('mimeshield.certupdated', 'confirmation');
+            $this->flash([['certupdated', 'confirmation']]);
             $this->rc->output->command('parent.mimeshield_list_reload', $up['id']);
             $this->certInfo($up['id']);
             return;
@@ -417,10 +446,9 @@ final class SettingsUi
             return;
         }
         $first = $result['imported'][0];
-        $this->rc->output->show_message('mimeshield.certimported', 'confirmation');
-        if ($first['trust'] !== 'verified') {
-            $this->rc->output->show_message('mimeshield.certimporteduntrusted', 'warning');
-        }
+        $this->flash($first['trust'] !== 'verified'
+            ? [['certimported', 'confirmation'], ['certimporteduntrusted', 'warning']]
+            : [['certimported', 'confirmation']]);
         $this->rc->output->command('parent.mimeshield_list_reload', $first['id']);
         $this->certInfo($first['id']);
     }
@@ -582,6 +610,19 @@ final class SettingsUi
             throw new \MimeShield\Exception\ValidationException('importtoolarge', 'upload too large');
         }
         return $data;
+    }
+
+    /**
+     * A body above post_max_size arrives with empty $_POST/$_FILES (no token): show the size error
+     * instead of a bare 403 (nothing is changed by this response).
+     */
+    private function rejectOversizedPost(string $type): void
+    {
+        if (empty($_POST) && empty($_FILES) && (int) ($_SERVER['CONTENT_LENGTH'] ?? 0) > 0) {
+            $this->rc->output->show_message('mimeshield.importtoolarge', 'error');
+            $this->importForm($type);
+            exit;
+        }
     }
 
     private function knownLabel(string $label): string

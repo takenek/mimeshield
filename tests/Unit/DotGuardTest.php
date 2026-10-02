@@ -229,7 +229,7 @@ final class DotGuardTest extends TestCase
     private static function transmit(string $data): string
     {
         self::loadNetSmtp();
-        $smtp = new class('localhost') extends \Net_SMTP {
+        $smtp = new class ('localhost') extends \Net_SMTP {
             public string $wire = '';
 
             protected function send($data)

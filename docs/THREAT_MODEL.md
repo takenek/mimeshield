@@ -97,8 +97,12 @@
   80/443; no user info, no redirects; host allow/deny lists; the host is resolved once and **every**
   address must be public (loopback, RFC 1918, CGNAT, link-local incl. 169.254.169.254, ULA, multicast,
   documentation, IPv4-mapped/6to4/Teredo/NAT64 forms rejected); the connection is pinned to the
-  checked address (`CURLOPT_RESOLVE`) and the connected address is verified (DNS rebinding);
+  checked address (`CURLOPT_RESOLVE`), host names with a trailing dot are refused, and the connected
+  address is verified (before the request is sent on PHP >= 8.4, after the transfer on older PHP);
   timeouts and a hard size limit; at most 2 URLs per certificate; results cached.
+* When `mimeshield_revocation_proxy` is set, pinning and the connected-address check are performed
+  by the proxy, not by the plugin: the proxy must enforce the egress policy (or use
+  `mimeshield_revocation_allow_hosts`).
 
 ### T8 XSS
 * Server: every dynamic value escaped; template-object handlers return escaped HTML; status bars
@@ -120,7 +124,9 @@
 * Missing recipient certificates block sending and list the recipients; sending without
   encryption requires an explicit user action ("Send without encryption" switches the option off
   visibly). The plugin never unchecks encryption on its own.
-* Drafts of messages marked for encryption are stored encrypted to the sender (or refused).
+* Drafts of messages marked for encryption are stored encrypted to the sender (or refused) while
+  `mimeshield_encrypt_drafts = true` (default); with `false` they are stored on the IMAP server in
+  plaintext.
 
 ### T11 Log leakage
 * The logger redacts PEM blocks, long base64 runs and binary data, strips control characters (log

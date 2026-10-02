@@ -16,3 +16,17 @@
 /tests/e2e/*.log
 # NOTE: tests/fixtures/pki/ IS committed on purpose: TEST-ONLY keys (see tests/fixtures/pki/README.txt)
 __pycache__/
+# editors / local tooling
+.claude/
+.idea/
+.vscode/
+.DS_Store
+*.swp
+.env
+/phpstan.neon
+# never commit real key material (test fixtures are the only exception)
+*.p12
+*.pfx
+*.key
+!tests/fixtures/pki/**
+tests/fixtures/pki/*.srl

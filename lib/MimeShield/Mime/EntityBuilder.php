@@ -162,7 +162,7 @@ final class EntityBuilder
             . rtrim(chunk_split(base64_encode($signatureDer), 76, "\r\n"), "\r\n") . "\r\n"
             . '--' . $b . "--\r\n";
 
-        $ct = "multipart/signed; protocol=\"application/pkcs7-signature\"; micalg=" . $micalg . "; boundary=\"" . $b . '"';
+        $ct = 'multipart/signed; protocol="application/pkcs7-signature"; micalg=' . $micalg . '; boundary="' . $b . '"';
 
         return ['contentType' => $ct, 'body' => $body];
     }

@@ -55,6 +55,8 @@ $config['mimeshield_encrypt_to_self'] = true;
 
 // When "Encrypt" is checked, drafts are stored encrypted to the sender's own certificate only.
 // Drafts are never signed (the signature is created only when the message is finally sent).
+// WARNING: with false, drafts of messages marked for encryption are stored on the IMAP server in
+// plaintext.
 $config['mimeshield_encrypt_drafts'] = true;
 
 // How encrypted messages to Bcc recipients are built:
@@ -70,11 +72,12 @@ $config['mimeshield_decrypt_in_compose'] = true;
 // ---------------------------------------------------------------------------------------------
 // ALGORITHMS
 // ---------------------------------------------------------------------------------------------
-// Content encryption for new messages. 'aes-256-cbc' (default) is decryptable by Outlook,
-// Thunderbird (incl. ESR), Apple Mail and gpgsm. 'aes-128-cbc' also allowed.
-// 'aes-256-gcm' / 'aes-128-gcm' (AuthEnvelopedData, RFC 5083/5084) require PHP >= 8.5 and are NOT
-// decryptable by Thunderbird before version 154 (and are undocumented for Outlook) - use only
-// when all your correspondents support them. RC2, DES and 3DES are never used for new messages.
+// Content encryption for new messages. 'aes-256-cbc' (default): verified with NSS (Thunderbird's
+// crypto library) and gpgsm in tests/interop; per vendor documentation also supported by Outlook and
+// Apple Mail (not tested, see docs/INTEROPERABILITY.md). 'aes-128-cbc' also allowed.
+// 'aes-256-gcm' / 'aes-128-gcm' (AuthEnvelopedData, RFC 5083/5084) require PHP >= 8.5 (on older PHP
+// such a setting falls back to aes-256-cbc) and are NOT decryptable by Thunderbird before 154 (and
+// are undocumented for Outlook). RC2, DES and 3DES are never used for new messages.
 // Signatures always use SHA-256 (OpenSSL default for RSA/EC keys).
 $config['mimeshield_cipher'] = 'aes-256-cbc';
 
@@ -135,12 +138,14 @@ $config['mimeshield_revocation_proxy'] = '';             // optional HTTP proxy 
 // ---------------------------------------------------------------------------------------------
 // LIMITS
 // ---------------------------------------------------------------------------------------------
-$config['mimeshield_max_key_upload'] = 102400;           // bytes, PKCS#12/PEM upload
-$config['mimeshield_max_cert_upload'] = 65536;           // bytes, public certificate upload
-$config['mimeshield_max_keys_per_user'] = 20;
-$config['mimeshield_max_certs_per_user'] = 500;
-$config['mimeshield_max_message_size'] = 52428800;       // bytes, messages signed/encrypted/decrypted
-$config['mimeshield_max_recipients'] = 100;              // per encrypted message
+$config['mimeshield_max_key_upload'] = 102400;           // bytes, PKCS#12/PEM upload (1024 .. 1048576)
+$config['mimeshield_max_cert_upload'] = 65536;           // bytes, public certificate upload (1024 .. 1048576)
+$config['mimeshield_max_keys_per_user'] = 20;            // 1 .. 1000
+$config['mimeshield_max_certs_per_user'] = 500;          // 1 .. 100000
+$config['mimeshield_max_message_size'] = 52428800;       // bytes, messages signed/encrypted/decrypted (>= 65536)
+$config['mimeshield_max_recipients'] = 100;              // per encrypted message (1 .. 1000)
+// PKCS#12 / encrypted PKCS#8 uploads whose KDF costs exceed 2 000 000 iterations (scrypt: N > 2^20,
+// r > 32, p > 4) are always refused (CPU denial-of-service protection).
 
 // ---------------------------------------------------------------------------------------------
 // FILES
