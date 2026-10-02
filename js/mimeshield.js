@@ -80,18 +80,26 @@
         });
         $(document).on('click', 'button.mimeshield-bind', function (e) {
             e.preventDefault();
+            if (this.disabled) {
+                return;
+            }
             rcmail.http_post('plugin.mimeshield-bind', { _id: String($(this).data('id')), _identities: boundIdentities() },
                 rcmail.set_busy(true, 'mimeshield.saving'));
         });
 
-        // identity bindings: show the "not saved yet" notice while the selection differs from the saved one
-        // (after saving, the list and this frame are reloaded with the stored state)
+        // identity bindings: show the "not saved yet" notice and enable Save only while the selection
+        // differs from the stored one (after saving, the list and this frame are reloaded with the stored
+        // state, which becomes the new baseline)
         var bindings = $('fieldset.mimeshield-bindings');
         if (bindings.length) {
             var saved = boundIdentities().join(',');
-            bindings.on('change', 'input[name="_identities[]"]', function () {
-                bindings.toggleClass('mimeshield-dirty', boundIdentities().join(',') !== saved);
-            });
+            var markDirty = function () {
+                var dirty = boundIdentities().join(',') !== saved;
+                bindings.toggleClass('mimeshield-dirty', dirty);
+                bindings.find('button.mimeshield-bind').prop('disabled', !dirty);
+            };
+            bindings.on('change', 'input[name="_identities[]"]', markDirty);
+            markDirty();
         }
         $(document).on('click', 'a.mimeshield-prefer', function (e) {
             e.preventDefault();

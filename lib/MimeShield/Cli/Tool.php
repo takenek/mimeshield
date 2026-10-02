@@ -28,6 +28,13 @@ final class Tool
     /** oldest Roundcube release without published security fixes the plugin relies on (MS-14) */
     private const MIN_SECURE_ROUNDCUBE = '1.7.4';
 
+    /**
+     * CVE-2026-35189 (excessive memory allocation in relative CRL distribution point processing,
+     * certificate parsing): branch => first fixed patch release, from the OpenSSL advisory of
+     * 2026-09-29 (3.0.23 is a premium support release; 1.1.1 / 1.0.2 are below the plugin minimum)
+     */
+    private const CVE_2026_35189_FIXED = ['3.0' => 23, '3.4' => 8, '3.5' => 9, '3.6' => 5, '4.0' => 3];
+
     private int $failures = 0;
 
     /** @var resource */
@@ -149,6 +156,9 @@ final class Tool
             if ($v !== '') {
                 $row = $db->fetchOne('SELECT COUNT(*) AS cnt FROM ' . $db->table('mimeshield_keys'));
                 $this->ok('stored private keys', (string) ($row['cnt'] ?? 0));
+                // a stored key alone does not sign: bindings select the signing key of an identity
+                $row = $db->fetchOne('SELECT COUNT(*) AS cnt FROM ' . $db->table('mimeshield_bindings'));
+                $this->ok('stored identity bindings', (string) ($row['cnt'] ?? 0));
                 $row = $db->fetchOne('SELECT COUNT(*) AS cnt FROM ' . $db->table('mimeshield_certs'));
                 $this->ok('stored contact certificates', (string) ($row['cnt'] ?? 0));
             }
@@ -449,10 +459,27 @@ final class Tool
         if (!preg_match('/OpenSSL Library Version\s*(?:=>|<\/td><td[^>]*>)\s*([^\n<]+)/', $info, $m)) {
             return [false, 'unknown'];
         }
-        $text = trim($m[1]);
-        // CVE-2026-35189 (CRL distribution point handling): fixed in 3.5.9 for the 3.5 branch
-        if (preg_match('/OpenSSL 3\.5\.(\d+)/', $text, $v) && (int) $v[1] < 9) {
-            return [false, $text . ' - below 3.5.9 (CVE-2026-35189) unless the distribution backported the fix'];
+        return self::opensslVersionStatus(trim($m[1]));
+    }
+
+    /**
+     * Whether an OpenSSL library version text (e.g. "OpenSSL 3.5.7 9 Jun 2026") is below the release
+     * of its branch that fixes a known issue. Only the upstream version is visible: distributions may
+     * backport the fix without changing it, so a version below the fix is a warning, not a proof.
+     * Branches not listed (other libraries, end-of-life branches, newer releases) give no warning.
+     *
+     * @return array{0: bool, 1: string}
+     *
+     * @internal public for tests
+     */
+    public static function opensslVersionStatus(string $text): array
+    {
+        if (preg_match('/\bOpenSSL (\d+)\.(\d+)\.(\d+)/', $text, $v)) {
+            $branch = $v[1] . '.' . $v[2];
+            $fixedPatch = self::CVE_2026_35189_FIXED[$branch] ?? null;
+            if ($fixedPatch !== null && (int) $v[3] < $fixedPatch) {
+                return [false, sprintf('%s - below %s.%d (CVE-2026-35189) unless the distribution backported the fix', $text, $branch, $fixedPatch)];
+            }
         }
         return [true, $text];
     }

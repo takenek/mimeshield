@@ -313,6 +313,8 @@ def u10(d):
     d.find_element(By.CSS_SELECTOR, '#mimeshield-importform button[type=submit]').click()
     d.switch_to.default_content()
     wait(d, lambda x: 'imported' in (js(x, 'return $("#messagestack").text()') or ''), timeout=15, msg='import message not visible')
+    wait(d, lambda x: 'automatically assigned to the matching identity' in (js(x, 'return $("#messagestack").text()') or ''), timeout=15,
+         msg='auto-binding message not visible')
     wait(d, lambda x: x.find_elements(By.CSS_SELECTOR, '#mimeshield-list tr'), msg='list not reloaded')
     check('carol' in d.find_element(By.ID, 'mimeshield-list').text, 'carol certificate not listed')
 
@@ -345,7 +347,7 @@ def u12(d):
     check('reveals the quoted content' in d.find_element(By.ID, 'mimeshield-status').text, 'warning not shown')
 
 
-@case('U13 bindings: unsaved-changes notice, primary Save, confirmation after reload; compose S/MIME section')
+@case('U13 bindings: Save idle without changes, unsaved-changes notice, primary Save, confirmation after reload; compose S/MIME section')
 def u13(d):
     login(d, 'alice@example.test')
     d.get(C.base + '?_task=settings&_action=plugin.mimeshield')
@@ -356,12 +358,23 @@ def u13(d):
     check(js(d, in_frame + 'return !!doc.querySelector(".mimeshield-delete.btn-danger") && !doc.querySelector(".mimeshield-bind.btn-danger")'),
           'delete must be danger, save must not')
     unsaved = in_frame + 'var u=doc.querySelector(".mimeshield-unsaved"); return !!u && u.offsetParent !== null;'
+    save_enabled = in_frame + 'var b=doc.querySelector(".mimeshield-bind"); return !!b && !b.disabled && b.offsetParent !== null;'
+    # the key was bound by its import (setup): checked, nothing pending, Save idle
+    check(js(d, in_frame + 'return f.contentWindow.$("input[name=\'_identities[]\']:checked").length') == 1, 'binding of the import not shown')
     check(not js(d, unsaved), 'unsaved notice shown before any change')
+    check(not js(d, save_enabled), 'Save enabled before any change')
     toggle = in_frame + 'var w=f.contentWindow; w.$("input[name=\'_identities[]\']:enabled").first().prop("checked", arguments[0]).trigger("change");'
     js(d, toggle, False)
     check(js(d, unsaved), 'unsaved notice not shown after a change')
+    check(js(d, save_enabled), 'Save not enabled after a change')
     js(d, toggle, True)
     check(not js(d, unsaved), 'unsaved notice still shown after reverting the change')
+    check(not js(d, save_enabled), 'Save still enabled after reverting the change')
+    # a disabled Save posts nothing (no busy lock, no reload)
+    js(d, 'window.__msOld = 1')
+    js(d, in_frame + 'doc.querySelector(".mimeshield-bind").click()')
+    time.sleep(1)
+    check(js(d, 'return window.__msOld === 1'), 'clicking the disabled Save reloaded the page')
     js(d, toggle, False)
     js(d, 'window.__msOld = 1')  # marks the page before the reload
     js(d, in_frame + 'doc.querySelector(".mimeshield-bind").click()')
@@ -373,7 +386,13 @@ def u13(d):
     wait(d, lambda x: js(x, in_frame + 'return !!(doc && doc.readyState == "complete" && doc.querySelector(".mimeshield-bind") && f.contentWindow.$)'),
          msg='frame not reloaded')
     check(not js(d, unsaved), 'unsaved notice shown after saving')
+    check(not js(d, save_enabled), 'Save enabled after saving (stored state is the new baseline)')
     check(js(d, in_frame + 'return f.contentWindow.$("input[name=\'_identities[]\']:checked").length') == 0, 'binding not removed')
+    # the saved state is the baseline: checking again is a change
+    js(d, toggle, True)
+    check(js(d, unsaved) and js(d, save_enabled), 'change after saving not detected')
+    js(d, toggle, False)
+    check(not js(d, unsaved) and not js(d, save_enabled), 'reverting to the saved state not detected')
     # restore the binding for the other cases
     js(d, toggle, True)
     js(d, 'window.__msOld = 1')

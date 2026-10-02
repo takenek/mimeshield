@@ -265,8 +265,9 @@ final class SettingsUi
             . \html::div(['class' => 'boxwarning mimeshield-unsaved', 'role' => 'status'],
                 \html::tag('strong', [], \rcube::Q($this->plugin->text('unsavedchanges'))) . ' ' . \rcube::Q($this->plugin->text('unsavedhint')))
             // not .formbuttons: on small screens Elastic clones the buttons found there into the parent
-            // footer (as inert copies) and hides the originals
-            . \html::p('mimeshield-bindbuttons', \html::tag('button', ['type' => 'button', 'class' => 'button mainaction mimeshield-bind', 'data-id' => (string) $rec->id()], \rcube::Q($this->plugin->text('savebindings')))));
+            // footer (as inert copies) and hides the originals. Disabled while the selection equals the
+            // stored bindings (e.g. right after an import bound the key): the script enables it on a change
+            . \html::p('mimeshield-bindbuttons', \html::tag('button', ['type' => 'button', 'class' => 'button mainaction mimeshield-bind', 'data-id' => (string) $rec->id(), 'disabled' => true], \rcube::Q($this->plugin->text('savebindings')))));
     }
 
     /**
@@ -314,7 +315,10 @@ final class SettingsUi
             }
         }
         // the list page is reloaded: hand the messages over to it
-        $this->flash(array_merge([['keyimported', 'confirmation']], array_map(static fn ($w) => [$w, 'warning'], $result['warnings'])));
+        // the import binds the key to matching identities (KeyService::store): say so, nothing is left to
+        // save. One message: a page that is still loading keeps only the last one of several
+        $imported = $result['bound'] === [] ? 'keyimported' : (count($result['bound']) > 1 ? 'keyimportedboundmulti' : 'keyimportedbound');
+        $this->flash(array_merge([[$imported, 'confirmation']], array_map(static fn ($w) => [$w, 'warning'], $result['warnings'])));
         $this->rc->output->command('parent.mimeshield_list_reload', $result['id']);
         $this->keyInfo($result['id']);
     }

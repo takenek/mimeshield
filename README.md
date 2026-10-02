@@ -32,7 +32,7 @@ Documentation: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
 |---|---|
 | Roundcube | 1.7.4 or later 1.7.x security release (`min-version` 1.7.4: decrypted mail is rendered by the core HTML sanitiser, so its security fixes matter; tested: see [Compatibility](#9-compatibility)), Elastic skin |
 | PHP | 8.1 – 8.5 |
-| PHP extensions | `openssl` (with CMS functions, OpenSSL ≥ 3.0; keep the library loaded by PHP-FPM patched, e.g. ≥ 3.5.9 on the 3.5 branch for CVE-2026-35189 or a distribution backport — `diag` shows the library version), `mbstring`; recommended: `intl` (internationalised domain names), `sodium` (XChaCha20-Poly1305 key store; otherwise AES-256-GCM), `curl` (only for CRL checks) |
+| PHP extensions | `openssl` (with CMS functions, OpenSSL ≥ 3.0; keep the library loaded by PHP-FPM patched — for CVE-2026-35189 ≥ 3.0.23 / 3.4.8 / 3.5.9 / 3.6.5 / 4.0.3 on the respective branch or a distribution backport; `diag` shows the library version), `mbstring`; recommended: `intl` (internationalised domain names), `sodium` (XChaCha20-Poly1305 key store; otherwise AES-256-GCM), `curl` (only for CRL checks) |
 | Database | whatever Roundcube 1.7 supports: MySQL/MariaDB, PostgreSQL, SQLite |
 | OpenSSL CLI | optional, only for converting legacy RC2 PKCS#12 files (`mimeshield_pkcs12_legacy_cli`) |
 
@@ -169,12 +169,14 @@ sudo -u www-data plugins/mimeshield/bin/mimeshield.sh diag
 ```
 
 The command checks Roundcube/PHP/OpenSSL versions (warning for Roundcube older than 1.7.4 and for
-an OpenSSL library without the CVE-2026-35189 fix; the CLI SAPI may load a different OpenSSL than
-PHP-FPM — compare with `php-fpm -i`), extensions, CMS functions, the temp directory (0600 files;
-warning when the configured directory is not usable), the CA bundle (warning while the system TLS
-bundle is trusted), the master key (AEAD self-test, never printed), the database schema and the
-configuration. Exit code 0 = OK (warnings such as a missing `intl` do not fail). If the
-plugin directory is a symlink, set `ROUNDCUBE_INSTALL_PATH=/var/www/roundcube`.
+an OpenSSL library below the CVE-2026-35189 fix of its branch — 3.0.23, 3.4.8, 3.5.9, 3.6.5, 4.0.3;
+only the upstream version number is visible, so a distribution backport is not detected; the CLI
+SAPI may load a different OpenSSL than PHP-FPM — compare with `php-fpm -i`), extensions, CMS
+functions, the temp directory (0600 files; warning when the configured directory is not usable),
+the CA bundle (warning while the system TLS bundle is trusted), the master key (AEAD self-test,
+never printed), the database schema (with the number of stored private keys, identity bindings and
+contact certificates) and the configuration. Exit code 0 = OK (warnings such as a missing `intl` do
+not fail). If the plugin directory is a symlink, set `ROUNDCUBE_INSTALL_PATH=/var/www/roundcube`.
 
 ## 3. Using it
 
@@ -186,7 +188,9 @@ plugin directory is a symlink, set `ROUNDCUBE_INSTALL_PATH=/var/www/roundcube`.
    validity, key usage, extended key usage, key algorithm/size and chain status.
 4. If the certificate is valid for signing, it is assigned automatically to every identity whose
    e-mail address it contains, unless that identity already uses a valid certificate that expires
-   later; adjust under *Use for signing messages from*.
+   later. The assignment is stored right away (a confirmation says so); nothing needs to be saved.
+   To change it, tick or untick identities under *Use for signing messages from* and click *Save*
+   (enabled only while the selection differs from the stored one).
 
 The password is used only for the import. If the import says the file uses an outdated algorithm
 (RC2), re-export the certificate from Windows with **AES256-SHA256** (certificate export wizard)

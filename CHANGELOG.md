@@ -36,8 +36,10 @@ Remediation of the final security report of 2026-10-02 (IDs MS-xx / INF-xx of th
 - MS-12: `keygen` checks the directory chain (symlinks, owner, group/other-writable) in every mode,
   including `--append`, and verifies the temporary file before replacing the key file.
 - MS-13: trust store and master key source ignore user preferences named like administrator options.
-- MS-14/MS-15: `diag` warns for Roundcube older than 1.7.4 and for an OpenSSL library below 3.5.9
-  (CVE-2026-35189, 3.5 branch) and shows the library version loaded by the SAPI.
+- MS-14/MS-15: `diag` warns for Roundcube older than 1.7.4 and for an OpenSSL library without the
+  CVE-2026-35189 fix (OpenSSL advisory of 2026-09-29: below 3.0.23, 3.4.8, 3.5.9, 3.6.5 or 4.0.3 on
+  the respective branch, unless the distribution backported the fix) and shows the library version
+  loaded by the SAPI.
 - INF-02: the public certificate download uses POST (request token no longer in URLs).
 - INF-03: falling back to the system temp directory is logged and reported by `diag`.
 - INF-05: the legacy PKCS#12 converter writes to the `openssl` process without blocking; the
@@ -57,7 +59,13 @@ Remediation of the final security report of 2026-10-02 (IDs MS-xx / INF-xx of th
 - Settings > S/MIME certificates: the identity assignment "Save" is a primary button inside the
   identity section; while the selection differs from the saved one a warning notice ("Changes have
   not been saved yet. If the configuration is correct, click Save.") is shown; the confirmation
-  ("Certificate assignment to identities saved.") stays visible after the list reload.
+  ("Certificate assignment to identities saved.") stays visible after the list reload. "Save" is
+  disabled while the selection equals the stored bindings (for example right after an import bound
+  the key) and becomes active only after a change; reverting the change disables it again.
+- A key import that assigned the certificate to matching identities says so in its confirmation
+  ("Certificate and private key imported. The certificate was automatically assigned to the
+  matching identity.").
+- `diag` also shows the number of stored identity bindings (Database section).
 - "Download public certificate" and "Delete" are buttons (delete in the danger style).
 - Compose: the S/MIME options form their own section with a visible "S/MIME" heading; the
   signing certificate is shown as name / issuer / validity.
@@ -69,6 +77,8 @@ Remediation of the final security report of 2026-10-02 (IDs MS-xx / INF-xx of th
   current user, or one writable by group/others without the sticky bit makes it fail closed.
 
 ### Fixed
+- `diag` checked the CVE-2026-35189 fix only for the OpenSSL 3.5 branch; 3.0, 3.4, 3.6 and 4.0
+  libraries without the fix were reported as OK.
 - Badges in the certificate lists were stretched to the full row width.
 - `mimeshield.sh keygen` reported only "Cannot create PATH" when the parent directory of `--file`
   was missing; it now names the cause (missing / not a directory / not writable) and shows an

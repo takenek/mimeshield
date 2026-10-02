@@ -576,6 +576,47 @@ final class OutgoingPipelineTest extends TestCase
         $this->assertLabel('draftnoselfcert', fn () => $this->outgoing($this->aliceKeys, $this->aliceCerts)->process($m, ['identity_id' => self::ID_ALIAS, 'email' => 'alias@example.test'], false, true, true));
     }
 
+    // ================================================================== identity bindings
+
+    public function testImportBindsMatchingIdentityAndTheBindingIsStored(): void
+    {
+        // setUp imported alice.p12: the matching identity is bound by the import itself (no Save step),
+        // the identities with other addresses are not
+        self::assertSame([self::ID_ALICE => $this->aliceKeyId], $this->aliceKeys->repository()->bindings());
+
+        // read back through a NEW database connection (e.g. after logging out and in again)
+        $rcdb = \rcube_db::factory('sqlite:///' . $this->dbFile . '?mode=0600');
+        $rcdb->set_debug(false);
+        $rcdb->db_connect('r');
+        try {
+            $repo = new KeyRepository(new Database($rcdb), self::ALICE);
+            self::assertSame([self::ID_ALICE => $this->aliceKeyId], $repo->bindings());
+            self::assertSame($this->aliceKeyId, $repo->bindingFor(self::ID_ALICE));
+            self::assertNull($repo->bindingFor(self::ID_EXPIRED));
+            self::assertNull($repo->bindingFor(self::ID_ALIAS));
+        } finally {
+            $rcdb->closeConnection();
+        }
+        self::assertSame(TestPki::cert('alice')->fingerprint, $this->aliceKeys->signerFor($this->aliceIdentity())->fingerprint());
+    }
+
+    public function testCertificateForAnotherAddressIsNeitherBoundByImportNorEligible(): void
+    {
+        $r = $this->aliceKeys->import(TestPki::read('wrongmail.p12'), TestPki::PASSWORD, $this->identities(self::ALICE));
+        self::assertSame([], $r['bound'], 'no identity of alice has the certificate address');
+        self::assertSame([self::ID_ALICE => $this->aliceKeyId], $this->aliceKeys->repository()->bindings());
+        $rec = $this->aliceKeys->repository()->get($r['id']);
+        self::assertNotNull($rec);
+        // the check the bind action applies before storing a requested binding
+        foreach (['alice@example.test', 'expired@example.test', 'alias@example.test'] as $email) {
+            self::assertFalse($this->aliceKeys->isUsableForSigning($rec, $email), $email);
+        }
+        $alice = $this->aliceKeys->repository()->get($this->aliceKeyId);
+        self::assertNotNull($alice);
+        self::assertTrue($this->aliceKeys->isUsableForSigning($alice, 'alice@example.test'));
+        self::assertFalse($this->aliceKeys->isUsableForSigning($alice, 'alias@example.test'));
+    }
+
     // ================================================================== key rotation
 
     public function testAlice2WithIdenticalValidityDoesNotStealTheBinding(): void

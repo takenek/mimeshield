@@ -488,9 +488,17 @@ def c01():
     a = session('alice')
     r = a.import_key(os.path.join(PKI, 'alice.p12'), PW)
     check(has_message(r, 'Certificate and private key imported.', 'confirmation'), 'no import confirmation: %r' % messages_of(r))
+    # the import itself binds the key to the matching identity, and says so
+    check(has_message(r, 'automatically assigned to the matching identity', 'confirmation'), 'no auto-binding message: %r' % messages_of(r))
     ids, page = key_rows('alice')
     eq(len(ids), 1, 'alice key rows')
     E.state['alice_key'] = ids[0]
+    # details: the stored binding is shown as checked, nothing is pending (Save disabled until a change)
+    info = a.get(_task='settings', _action='plugin.mimeshield-keyinfo', _id=ids[0], _framed=1).text
+    iid = ident_id('alice')
+    check(re.search(r'<input[^>]*id="msident%s"[^>]*checked' % iid, info) or re.search(r'<input[^>]*checked[^>]*id="msident%s"' % iid, info),
+          'identity checkbox not checked after the import')
+    check(re.search(r'<button[^>]*mimeshield-bind[^>]*disabled', info), 'Save must be disabled without a change')
     check('alice (TEST ONLY)' in page and 'mimeshield-badge-ok' in page, 'key list does not show alice cert as valid/signing')
     env, _ = compose_env('alice')
     ent = env.get('mimeshield_identities', {}).get(ident_id('alice'))
@@ -582,6 +590,7 @@ def c08():
     a = session('alice')
     r = a.import_key(os.path.join(PKI, 'wrongmail.p12'), PW)
     check(has_message(r, 'Certificate and private key imported.', 'confirmation'), 'wrongmail import: %r' % messages_of(r))
+    check(not has_message(r, 'automatically assigned'), 'wrongmail must not be bound by the import: %r' % messages_of(r))
     ids, page = key_rows('alice')
     eq(len(ids), 2, 'alice key rows')
     wid = [i for i in ids if i != E.state['alice_key']][0]
@@ -591,7 +600,7 @@ def c08():
     check(re.search(r'<input[^>]*id="msident%s"[^>]*disabled' % iid, info) or re.search(r'<input[^>]*disabled[^>]*id="msident%s"' % iid, info),
           'identity checkbox must be disabled for wrongmail cert')
     rb = a.post_action('plugin.mimeshield-bind', {'_id': wid, '_identities[]': iid}, header=True)
-    check('Saved.' not in rb.text, 'binding wrongmail to alice must be refused: %s' % rb.text[:300])
+    check('Saved.' not in rb.text and 'assignment to identities saved' not in rb.text, 'binding wrongmail to alice must be refused: %s' % rb.text[:300])
     env, _ = compose_env('alice')
     ent = env['mimeshield_identities'][iid]
     check(ent.get('sign') and ent.get('cert', '').startswith('alice'), 'alice identity must still use alice cert: %r' % ent)
@@ -1043,6 +1052,15 @@ def c33():
     for act in ('plugin.mimeshield-bind', 'plugin.mimeshield-certdelete', 'plugin.mimeshield-certprefer'):
         r = a.s.get(a.url(_task='settings', _action=act, _id=1, _token=a.token))
         eq(r.status_code, 403, 'GET to ' + act)
+    # removing the signing binding (no identity posted) needs the token as well
+    ub = a.url(_task='settings', _action='plugin.mimeshield-bind')
+    for data, headers, what in (({'_id': E.state['alice_key'], '_remote': '1'}, {}, 'without token'),
+                                ({'_id': E.state['alice_key'], '_token': 'x' * 32}, {}, 'with wrong token'),
+                                ({'_id': E.state['alice_key'], '_remote': '1'}, {'X-Roundcube-Request': 'wrong-token'}, 'with wrong header token')):
+        r = a.s.post(ub, data=data, headers=headers)
+        eq(r.status_code, 403, 'bind POST ' + what)
+    env, _ = compose_env('alice')
+    check(env['mimeshield_identities'][ident_id('alice')].get('sign'), 'alice binding removed by a request without token')
     for act, fname in (('plugin.mimeshield-keyimport', 'x.p12'), ('plugin.mimeshield-certimport', 'x.crt')):
         with open(os.path.join(PKI, 'alice2.p12' if act.endswith('keyimport') else 'carol.crt'), 'rb') as f:
             data = f.read()
@@ -1428,6 +1446,9 @@ def c41():
     eq(r.returncode, 0, 'diag exit code: ' + r.stdout[-800:])
     check('Result: OK' in r.stdout, 'diag result')
     check(not re.search(r'[A-Za-z0-9+/]{43}=', r.stdout), 'diag must not print key material')
+    # a stored key alone does not say whether an identity signs with it: bindings are counted separately
+    m = re.search(r'stored identity bindings\s+(\d+)', r.stdout)
+    check(m and int(m.group(1)) >= 1, 'diag does not show the identity bindings: ' + r.stdout[-800:])
     keyfile = os.path.join(E.run, 'keys', 'master.key')
     r = cli('keygen', '--file=' + keyfile)
     check(r.returncode != 0 and 'Refusing to overwrite' in r.stdout, 'keygen must not overwrite')
