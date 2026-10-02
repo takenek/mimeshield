@@ -209,6 +209,7 @@ $messages['keydeleted'] = 'Certificate and private key deleted.';
 $messages['keyexists'] = 'This certificate has already been imported.';
 $messages['certimported'] = 'Certificate imported.';
 $messages['certimporteduntrusted'] = 'The certificate was stored, but its issuer is not trusted by this server.';
+$messages['certupdated'] = 'The certificate chain was updated.';
 $messages['certdeleted'] = 'Certificate deleted.';
 $messages['certexists'] = 'This certificate is already stored.';
 $messages['certsaved'] = 'Sender certificate saved.';

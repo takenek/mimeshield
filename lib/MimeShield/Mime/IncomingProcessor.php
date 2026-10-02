@@ -57,6 +57,9 @@ final class IncomingProcessor
     /** @var null|callable(): \rcube_storage */
     private $storageFactory;
 
+    /** @var array<string, true> first parts of a root multipart/signed (S/MIME directly inside an outer layer) */
+    private array $outerChildren = [];
+
     /** Whether the message root is a single part (root part id '1') */
     private bool $singlePartRoot = false;
 
@@ -96,6 +99,7 @@ final class IncomingProcessor
             }
             if ($mimetype === 'multipart/signed' && $this->isSmimeSigned($struct)) {
                 $this->handleSigned($p, $struct, $msg);
+                $p = $this->unwrapSignedEnvelope($p, $struct, $msg, $depth);
             }
         } catch (MimeShieldException $e) {
             $st = $this->statusOf((string) $struct->mime_id);
@@ -195,6 +199,7 @@ final class IncomingProcessor
     {
         $msg = $p['object'];
         return $struct === ($msg->headers->structure ?? null)
+            || isset($this->outerChildren[(string) $struct->mime_id])
             || isset($this->raw[(string) $struct->mime_id])
             || ($struct->mime_id === '1' && empty($msg->headers->structure->parts));
     }
@@ -352,6 +357,35 @@ final class IncomingProcessor
         [$from, $sender] = $this->senderAddresses($struct, $msg);
         $st->partial = !$root;
         $st->signature = $this->verifier->evaluate($check, $from, $sender, !$root);
+    }
+
+    /**
+     * signed(enveloped(...)) - e.g. ESS triple wrapping: when the signed content of a root
+     * multipart/signed is itself application/pkcs7-mime, process it as a direct inner S/MIME layer and
+     * replace the signed container by the decrypted/unwrapped tree. The outer signature status stays
+     * on the container id, the inner status on the inner part id.
+     *
+     * @param array<string, mixed> $p
+     *
+     * @return array<string, mixed>
+     */
+    private function unwrapSignedEnvelope(array $p, \rcube_message_part $struct, \rcube_message $msg, int $depth): array
+    {
+        $first = $struct->parts[0] ?? null;
+        if (!$first instanceof \rcube_message_part || !$this->isRoot($p, $struct)) {
+            return $p;
+        }
+        $ftype = strtolower((string) $first->mimetype);
+        if (!in_array($ftype, self::MIME_TYPES, true) && !$this->isP7mOctetStream($first, $ftype)) {
+            return $p;
+        }
+        $this->outerChildren[(string) $first->mime_id] = true;
+        $inner = $this->partStructure(['object' => $msg, 'structure' => $first, 'mimetype' => $ftype, 'recursive' => true], $depth + 1);
+        if ($inner['structure'] !== $first) {
+            $p['structure'] = $inner['structure'];
+            $p['mimetype'] = $inner['mimetype'];
+        }
+        return $p;
     }
 
     /**

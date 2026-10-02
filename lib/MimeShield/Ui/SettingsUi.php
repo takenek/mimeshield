@@ -404,6 +404,13 @@ final class SettingsUi
             $this->confirmReplaceForm($result['confirm']);
             return;
         }
+        if ($result['imported'] === [] && $result['updated'] !== []) {
+            $up = $result['updated'][0];
+            $this->rc->output->show_message('mimeshield.certupdated', 'confirmation');
+            $this->rc->output->command('parent.mimeshield_list_reload', $up['id']);
+            $this->certInfo($up['id']);
+            return;
+        }
         if ($result['imported'] === []) {
             $this->rc->output->show_message('mimeshield.certexists', 'warning');
             $this->importForm('cert');

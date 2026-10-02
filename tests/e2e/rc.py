@@ -16,12 +16,21 @@ class RcError(Exception):
 
 
 class Roundcube:
+    # every response body of every session is offered to these callbacks (e.g. secret leak checks)
+    response_observers = []
+
     def __init__(self, base, user, password='testpass'):
         self.base = base.rstrip('/') + '/'
         self.user = user
         self.password = password
         self.s = requests.Session()
+        self.s.hooks['response'].append(self._observe)
         self.token = None
+
+    def _observe(self, r, *args, **kwargs):
+        for cb in Roundcube.response_observers:
+            cb(self.user, r)
+        return r
 
     # ---------------------------------------------------------------- helpers
     def url(self, **params):
@@ -68,6 +77,35 @@ class Roundcube:
 
     def logout(self):
         self.s.get(self.url(_task='logout', _token=self.token))
+        self.token = None
+
+    def framed_token(self, action, task='settings'):
+        r = self.get(_task=task, _action=action, _framed=1)
+        return self.env_token(r.text) or self.token
+
+    def post_action(self, action, data, task='settings', token=True, header=False):
+        """POST to a plugin action like the settings JS does (form post or AJAX with header)."""
+        d = dict(data)
+        headers = {}
+        if header:
+            headers = {'X-Roundcube-Request': self.token, 'X-Requested-With': 'XMLHttpRequest'}
+            d.setdefault('_remote', '1')
+        elif token is True:
+            d['_token'] = self.token
+        elif token:
+            d['_token'] = token
+        return self.s.post(self.url(_task=task, _action=action), data=d, headers=headers)
+
+    def download(self, uid, part, mbox='INBOX'):
+        return self.get(_task='mail', _action='get', _uid=uid, _mbox=mbox, _part=part, _download=1, _token=self.token)
+
+    @staticmethod
+    def part_links(page):
+        """(part id, link text/name context) of attachment links in a show page."""
+        out = []
+        for m in re.finditer(r'href="([^"]*_action=get[^"]*_part=([0-9.]+)[^"]*)"', page):
+            out.append(m.group(2))
+        return list(dict.fromkeys(out))
 
     def get(self, **params):
         r = self.s.get(self.url(**params))

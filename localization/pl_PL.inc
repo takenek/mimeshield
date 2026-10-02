@@ -207,6 +207,7 @@ $messages['keydeleted'] = 'Usunięto certyfikat i klucz prywatny.';
 $messages['keyexists'] = 'Ten certyfikat został już zaimportowany.';
 $messages['certimported'] = 'Zaimportowano certyfikat.';
 $messages['certimporteduntrusted'] = 'Certyfikat zapisano, ale jego wystawca nie jest zaufany przez ten serwer.';
+$messages['certupdated'] = 'Zaktualizowano łańcuch certyfikatu.';
 $messages['certdeleted'] = 'Usunięto certyfikat.';
 $messages['certexists'] = 'Ten certyfikat jest już zapisany.';
 $messages['certsaved'] = 'Zapisano certyfikat nadawcy.';

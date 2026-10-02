@@ -58,7 +58,7 @@ final class CertificateService
      * $confirmed is false, nothing is stored and 'confirm' lists the old certificates (fingerprint
      * change warning).
      *
-     * @return array{imported: list<array{id: int, certificate: Certificate, trust: string}>, confirm: list<array{email: string, old: list<string>, new: string}>, skipped: list<string>}
+     * @return array{imported: list<array{id: int, certificate: Certificate, trust: string}>, confirm: list<array{email: string, old: list<string>, new: string}>, skipped: list<string>, updated: list<array{id: int, trust: string}>}
      */
     public function importFile(string $data, bool $confirmed): array
     {
@@ -73,14 +73,26 @@ final class CertificateService
             $confirm = array_merge($confirm, $this->fingerprintChanges($cert));
         }
         if ($confirm !== [] && !$confirmed) {
-            return ['imported' => [], 'confirm' => $confirm, 'skipped' => []];
+            return ['imported' => [], 'confirm' => $confirm, 'skipped' => [], 'updated' => []];
         }
 
         $imported = [];
         $skipped = [];
+        $updated = [];
         foreach ($parsed['entities'] as $cert) {
-            if ($this->repo->findByFingerprint($cert->fingerprint) !== null) {
-                $skipped[] = $cert->fingerprint;
+            $existing = $this->repo->findByFingerprint($cert->fingerprint);
+            if ($existing !== null) {
+                // same certificate uploaded again together with its CA chain: store the chain and
+                // re-evaluate the trust flag (e.g. an earlier chain-less import was 'untrusted')
+                $merged = array_values(array_unique(array_merge($existing->chainPems(), $chainPems)));
+                if ($chainPems !== [] && count($merged) > count($existing->chainPems())) {
+                    $chain = $this->chains->validate($cert, $merged, $cert->canEncrypt() ? ChainValidator::PURPOSE_ENCRYPT : ChainValidator::PURPOSE_SIGN);
+                    $trust = $chain->isTrusted() ? CertRepository::TRUST_VERIFIED : $existing->trust();
+                    $this->repo->updateChain($existing->id(), $merged, $trust);
+                    $updated[] = ['id' => $existing->id(), 'trust' => $trust];
+                } else {
+                    $skipped[] = $cert->fingerprint;
+                }
                 continue;
             }
             $emails = $cert->emails($this->subjectEmailFallback);
@@ -94,7 +106,7 @@ final class CertificateService
             $imported[] = ['id' => $id, 'certificate' => $cert, 'trust' => (string) $this->repo->get($id)?->trust()];
         }
 
-        return ['imported' => $imported, 'confirm' => [], 'skipped' => $skipped];
+        return ['imported' => $imported, 'confirm' => [], 'skipped' => $skipped, 'updated' => $updated];
     }
 
     /**

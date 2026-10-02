@@ -138,6 +138,19 @@ final class CertRepository
         );
     }
 
+    /**
+     * Replace the stored chain (intermediates) and trust flag of a certificate.
+     *
+     * @param list<string> $chainPems
+     */
+    public function updateChain(int $certId, array $chainPems, string $trust): void
+    {
+        $this->db->query(
+            'UPDATE ' . $this->db->table('mimeshield_certs') . ' SET `chain_pem` = ?, `trust` = ?, `changed` = ? WHERE `cert_id` = ? AND `user_id` = ?',
+            implode('', $chainPems), $trust, Database::now(), $certId, $this->userId
+        );
+    }
+
     public function delete(int $certId): bool
     {
         $this->db->query('DELETE FROM ' . $this->db->table('mimeshield_cert_emails') . ' WHERE `cert_id` = ? AND `user_id` = ?', $certId, $this->userId);
