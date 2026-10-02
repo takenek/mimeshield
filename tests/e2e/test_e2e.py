@@ -1292,6 +1292,41 @@ def ci9():
 
 # =========================================================================== final aggregate checks
 
+@case('41 CLI: diag, keygen (no overwrite), master key rotation, check-keystore; mail still decrypts')
+def c41():
+    tool = os.path.join(E.rc_dir, 'plugins', 'mimeshield', 'bin', 'mimeshield.sh')
+    env = dict(os.environ, ROUNDCUBE_CONFIG_DIR=E.run + '/')
+    def cli(*a):
+        return subprocess.run([E.args.php, tool] + list(a), cwd=E.rc_dir, env=env, capture_output=True, text=True)
+    r = cli('diag')
+    eq(r.returncode, 0, 'diag exit code: ' + r.stdout[-800:])
+    check('Result: OK' in r.stdout, 'diag result')
+    check(not re.search(r'[A-Za-z0-9+/]{43}=', r.stdout), 'diag must not print key material')
+    keyfile = os.path.join(E.run, 'keys', 'master.key')
+    r = cli('keygen', '--file=' + keyfile)
+    check(r.returncode != 0 and 'Refusing to overwrite' in r.stdout, 'keygen must not overwrite')
+    r = cli('keygen', '--file=' + keyfile, '--append', '--kid=k9')
+    eq(r.returncode, 0, 'keygen --append: ' + r.stdout)
+    with open(os.path.join(E.run, 'config.inc.php'), 'a') as fh:
+        fh.write("\n$config['mimeshield_master_key_active'] = 'k9';\n")
+    r = cli('rotate')
+    eq(r.returncode, 0, 'rotate: ' + r.stdout)
+    check(re.search(r'Done: \d+ re-encrypted', r.stdout), 'rotate output')
+    r = cli('rotate')
+    check(' 0 re-encrypted' in r.stdout, 'second rotate is a no-op: ' + r.stdout)
+    os.chmod(keyfile, 0o600)
+    with open(keyfile) as fh:
+        lines = [l for l in fh if not l.startswith('k1 ')]
+    with open(keyfile, 'w') as fh:
+        fh.writelines(lines)
+    os.chmod(keyfile, 0o400)
+    r = cli('check-keystore')
+    eq(r.returncode, 0, 'check-keystore after removing the old key: ' + r.stdout)
+    uid = E.state.get('enc19_uid') or newest_uid('bob', subject=E.state.get('enc19_subject', 'e2e 19 enc'))
+    page = session('bob').show(uid)
+    check(T_DECRYPTED in status(page)[1], 'decryption after rotation')
+
+
 @case('37 private key material never appears in any HTTP response', always=True)
 def c37():
     check(not E.leaks, 'private key in responses: %r' % E.leaks[:5])

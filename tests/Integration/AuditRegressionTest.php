@@ -170,6 +170,70 @@ final class AuditRegressionTest extends TestCase
         $cms->decrypt($tampered, TestPki::cert('alice'), TestPki::key('alice'));
     }
 
+    // re-audit #23: the tag check must not fail open when another field is unusual
+
+    public function testGcmTagCheckFailsClosedWithDecoyRecipient(): void
+    {
+        $in = $this->tmp . '/in.txt';
+        file_put_contents($in, "Content-Type: text/plain\r\n\r\nsecret\r\n");
+        $der = $this->tmp . '/gcm.der';
+        $this->sh('openssl cms -encrypt -binary -aes-256-gcm -outform DER -in ' . escapeshellarg($in) . ' -out ' . escapeshellarg($der) . ' ' . escapeshellarg(TestPki::path('alice.crt')));
+        $root = Asn1::parse((string) file_get_contents($der));
+        $aed = $root->child(1)->child(0);
+        $f = $aed->children();
+        $riIdx = 1;
+        // decoy KeyTransRecipientInfo with an OID arc > 2^63 (OpenSSL skips it, our inspector cannot decode it)
+        $issuer = TestPki::cert('alice')->issuerNameDer;
+        $decoy = Asn1::encode("\x30", "\x02\x01\x00"
+            . Asn1::encode("\x30", $issuer . "\x02\x03\x7F\x7E\x7D")
+            . Asn1::encode("\x30", "\x06\x0C\x2A" . str_repeat("\xFF", 10) . "\x7F" . "\x05\x00")
+            . Asn1::encode("\x04", str_repeat('A', 256)));
+        $set = Asn1::encode("\x31", $f[$riIdx]->content() . $decoy);
+        $withDecoy = Asn1::replaceAt($root, [1, 0, $riIdx], $set);
+        $root2 = Asn1::parse($withDecoy);
+        $f2 = $root2->child(1)->child(0)->children();
+        $macIdx = count($f2) - 1;
+        $tampered = Asn1::replaceAt($root2, [1, 0, $macIdx], Asn1::encode("\x04", substr($f2[$macIdx]->content(), 0, 4)));
+
+        self::assertSame(4, CmsInspector::gcmTagInfo($tampered)['macLength']);
+        $this->expectException(CryptoException::class);
+        (new CmsService($this->tmp))->decrypt($tampered, TestPki::cert('alice'), TestPki::key('alice'));
+    }
+
+    // re-audit #25: address lists are read with the header charset Roundcube displays them with
+
+    public function testFromIsParsedWithHeaderCharset(): void
+    {
+        $withCharset = AddressMatcher::parseListStrict('Alice <alice@example.test>, ceo+AEA-bank.example', true, 'UTF-7');
+        $withoutCharset = AddressMatcher::parseListStrict('Alice <alice@example.test>, ceo+AEA-bank.example', true, null);
+        self::assertNotSame($withCharset['valid'], $withoutCharset['valid'], 'the two readings differ - the processor treats the difference as unverifiable');
+    }
+
+    // re-audit #24: a stale user preference stored under an administrator key is ignored
+
+    public function testStaleUserPreferenceUnderAdminKeyIsIgnored(): void
+    {
+        $rc = new class () extends \rcube_config {
+            /** @var array<string, mixed> */
+            public array $values = [];
+
+            public function __construct()
+            {
+            }
+
+            public function get($name, $def = null)
+            {
+                return array_key_exists($name, $this->values) ? $this->values[$name] : $def;
+            }
+        };
+        // merged view as Roundcube builds it: the user preference overrides the admin value
+        $rc->values = ['mimeshield_encrypt_default' => true, 'mimeshield_options_lock' => ['encrypt']];
+        $cfg = new Config($rc, ['mimeshield_encrypt_default' => true, 'mimeshield_options_lock' => ['encrypt']]);
+        // the real administrator configuration (no mimeshield options in the test installation) wins
+        self::assertSame([], $cfg->optionsLock());
+        self::assertFalse($cfg->optionDefault('encrypt'));
+    }
+
     // #30: deeply nested BER constructed strings cannot exhaust recursion/memory
 
     public function testDeeplyNestedConstructedOctetStringIsRejected(): void

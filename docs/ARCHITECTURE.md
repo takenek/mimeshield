@@ -264,10 +264,11 @@ PKCS#12 upload ─► openssl_pkcs12_read (password used once, wiped, never stor
                ─► checks (key type/size, cert match, SAN/KU/EKU/validity/fingerprint/chain)
                ─► PKCS#8 PEM (memory only)
                ─► KeyVault::encrypt(key, context = "user:<id>|fp:<sha256>")
-                     data key = HKDF-SHA256(master key, info "mimeshield private key wrapping v1", salt "kid:<kid>")
+                     data key = HKDF-SHA256(master key, info "mimeshield private key wrapping v1|alg:<alg>", salt "kid:<kid>")
                      XChaCha20-Poly1305 (libsodium; AES-256-GCM fallback), random 192/96-bit nonce,
                      AAD = blob header || context
-                     blob = "MSK" | v1 | alg | kidLen | kid | nonce | ciphertext||tag  (base64 in DB)
+                     blob = "MSK" | v2 | alg | kidLen | kid | nonce | ciphertext||tag  (base64 in DB)
+                     (format v1 - same without "|alg:<alg>" in the HKDF info - is still read; rotate upgrades it)
                ─► mimeshield_keys.key_blob (+ key_kid, key_format)
 ```
 
@@ -318,6 +319,25 @@ user id.
 * Uploads: `is_uploaded_file`, size limits before reading, content-based format detection, the
   client file name is never used as a path, the password is read with `allow_html=true` (no
   `strip_tags` corruption) and wiped.
+
+## 8a. Hardening added after the security audit
+
+* PKCS#12 / encrypted PKCS#8 KDF cost parameters (PBKDF2 / PKCS#12-PBE iterations, MAC iterations,
+  scrypt N/r/p) are checked by `KdfInspector` before OpenSSL sees the file (≤ 2 000 000 iterations
+  per KDF, ≤ 6 000 000 in total, scrypt N ≤ 2^20, r ≤ 32, p ≤ 4) – a tiny upload can no longer
+  pin a PHP worker for minutes.
+* Administrator locks (`mimeshield_options_lock`) always use the administrator value; the user's
+  own default is stored separately (`mimeshield_pref_sign|encrypt`).
+* Address lists are parsed strictly: an unverifiable From entry turns the identity into a
+  mismatch; a recipient the plugin cannot interpret blocks encryption.
+* Messages with decrypted content are never "safe" (`is_safe=false`, `show_images=0`, `_safe`
+  ignored) on every path, including the `get` action and HTML reply/forward.
+* AuthEnvelopedData with a GCM tag shorter than 12 bytes or inconsistent `aes-ICVlen` is rejected.
+* ASN.1 nesting deeper than 32 levels and BER constructed strings nested deeper than 8 levels are
+  rejected.
+* CRL fetching refuses trailing-dot host names and, on PHP ≥ 8.4, verifies the connected address in
+  `CURLOPT_PREREQFUNCTION` before the request is sent.
+* Certificate names are neutralised for display (control, line-separator and bidi characters).
 
 ## 9. Differences from the original requirements (and why)
 

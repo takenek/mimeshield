@@ -16,9 +16,9 @@ use MimeShield\Log;
 /**
  * Authenticated encryption of private keys at rest.
  *
- * Blob format v1 (stored base64 encoded in the database):
+ * Blob format v2 (stored base64 encoded in the database; v1 blobs remain readable):
  *
- *   magic "MSK" | version 0x01 | alg (1 byte) | kidLen (1 byte) | kid | nonce | ciphertext||tag
+ *   magic "MSK" | version 0x02 | alg (1 byte) | kidLen (1 byte) | kid | nonce | ciphertext||tag
  *
  *   alg 0x01 = XChaCha20-Poly1305 (libsodium), 24-byte nonce, 16-byte tag  (default)
  *   alg 0x02 = AES-256-GCM (OpenSSL),           12-byte nonce, 16-byte tag  (fallback w/o sodium)
@@ -33,7 +33,7 @@ use MimeShield\Log;
  */
 final class KeyVault
 {
-    public const FORMAT_VERSION = 1;
+    public const FORMAT_VERSION = 2;
     public const ALG_XCHACHA20POLY1305 = 1;
     public const ALG_AES256GCM = 2;
 
@@ -97,7 +97,7 @@ final class KeyVault
             throw new CryptoException('keystorecorrupt', 'key blob: bad magic');
         }
         $version = ord($raw[3]);
-        if ($version !== self::FORMAT_VERSION) {
+        if ($version !== self::FORMAT_VERSION && $version !== 1) {
             throw new CryptoException('keystorecorrupt', 'key blob: unsupported format version ' . $version);
         }
         $alg = ord($raw[4]);
@@ -117,7 +117,7 @@ final class KeyVault
             Log::error('keystore', 'private key blob references an unknown master key id', ['kid' => $kid]);
             throw new CryptoException('keystorecorrupt', 'key blob: unknown master key id');
         }
-        $key = $this->deriveKey($kid, $alg);
+        $key = $this->deriveKey($kid, $alg, $version);
 
         try {
             if ($alg === self::ALG_XCHACHA20POLY1305) {
@@ -167,12 +167,18 @@ final class KeyVault
         return preg_match('/^[a-z0-9]{1,16}$/D', $kid) ? $kid : null;
     }
 
+    public static function blobVersion(string $blob): ?int
+    {
+        $raw = base64_decode($blob, true);
+        return ($raw === false || strlen($raw) < 4 || substr($raw, 0, 3) !== self::MAGIC) ? null : ord($raw[3]);
+    }
+
     /**
      * Re-wrap a blob with the active master key (rotation). Returns the input if already current.
      */
     public function rewrap(string $blob, string $context): string
     {
-        if (self::blobKid($blob) === $this->keys->activeKid()) {
+        if (self::blobKid($blob) === $this->keys->activeKid() && self::blobVersion($blob) === self::FORMAT_VERSION) {
             return $blob;
         }
         $pt = $this->decrypt($blob, $context);
@@ -203,9 +209,11 @@ final class KeyVault
      * Data key per master key AND algorithm (domain separation: XChaCha20-Poly1305 and AES-GCM never
      * share a key).
      */
-    private function deriveKey(string $kid, int $alg): string
+    private function deriveKey(string $kid, int $alg, int $version = self::FORMAT_VERSION): string
     {
-        return hash_hkdf('sha256', $this->keys->key($kid), 32, self::HKDF_INFO . '|alg:' . $alg, 'kid:' . $kid);
+        // v1 (first builds): one data key for both algorithms; v2: per-algorithm key
+        $info = $version === 1 ? self::HKDF_INFO : self::HKDF_INFO . '|alg:' . $alg;
+        return hash_hkdf('sha256', $this->keys->key($kid), 32, $info, 'kid:' . $kid);
     }
 
     private function aad(string $header, string $context): string

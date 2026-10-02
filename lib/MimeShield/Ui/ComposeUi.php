@@ -66,6 +66,16 @@ final class ComposeUi
             $force = true;
         }
 
+        if ($force && !empty($p['html']) && is_string($p['body'] ?? null) && $p['body'] !== '') {
+            // EFAIL hardening: core washes draft HTML with "safe" (remote content allowed) after our
+            // message_load hook; wash decrypted HTML again with remote resources blocked
+            $p['body'] = \rcmail_action_mail_index::wash_html($p['body'], [
+                'safe' => false,
+                'add_comments' => false,
+                'ignore_elements' => ['body'],
+            ], []);
+        }
+
         $out->set_env('mimeshield_restore', $restore);
         $out->set_env('mimeshield_force_encrypt', $force);
         $out->set_env('mimeshield_locks', $cfg->optionsLock());

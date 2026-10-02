@@ -116,12 +116,12 @@ final class AddressMatcher
      *
      * @return array{valid: list<string>, invalid: list<string>}
      */
-    public static function parseListStrict(string $header, bool $decode = false): array
+    public static function parseListStrict(string $header, bool $decode = false, ?string $charset = null): array
     {
         $valid = [];
         $invalid = [];
         if (class_exists('rcube_mime')) {
-            foreach ((array) \rcube_mime::decode_address_list($header, null, $decode, null, false) as $entry) {
+            foreach ((array) \rcube_mime::decode_address_list($header, null, $decode, $charset, false) as $entry) {
                 $addr = is_array($entry) ? (string) ($entry['mailto'] ?? '') : (string) $entry;
                 if ($addr === '' && is_array($entry) && isset($entry['string']) && str_contains((string) $entry['string'], ':;')) {
                     continue; // empty group such as "undisclosed-recipients:;"

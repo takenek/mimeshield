@@ -172,6 +172,9 @@ requires confirmation.
 
 ### 3.3 Compose
 
+Users choose their default state in Preferences → Encryption → *S/MIME (MIME Shield)* unless
+the administrator locked it (`mimeshield_options_lock`).
+
 The *Options and attachments* sidebar contains **Sign S/MIME** and **Encrypt S/MIME** with the
 certificate status of the selected identity and the certificate status of each recipient.
 If encryption is requested and a recipient has no usable certificate, the message is **not sent**;

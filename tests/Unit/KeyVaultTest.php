@@ -124,7 +124,7 @@ final class KeyVaultTest extends TestCase
 
         self::assertSame('MSK', substr($raw, 0, 3));
         self::assertSame(KeyVault::FORMAT_VERSION, ord($raw[3]));
-        self::assertSame(1, ord($raw[3]));
+        self::assertSame(2, ord($raw[3]));
         self::assertSame($alg, ord($raw[4]));
         self::assertSame(6, ord($raw[5]));
         self::assertSame('k2026a', substr($raw, 6, 6), 'active kid = last listed key');
@@ -262,12 +262,41 @@ final class KeyVaultTest extends TestCase
         self::assertSame('secret', $vault->decrypt(" \n" . $blob, self::CONTEXT), 'base64 whitespace is harmless');
     }
 
+    /**
+     * Blobs written by the first builds (format v1: one HKDF data key for both algorithms) stay
+     * readable, and rewrap() upgrades them to the current format.
+     */
+    #[DataProvider('algorithms')]
+    public function testLegacyFormatV1IsReadableAndRewrapped(int $alg): void
+    {
+        $mk = random_bytes(32);
+        $vault = new KeyVault($this->provider(['k1' => $mk]), $alg);
+        $key = hash_hkdf('sha256', $mk, 32, 'mimeshield private key wrapping v1', 'kid:k1');
+        $header = 'MSK' . chr(1) . chr($alg) . chr(2) . 'k1';
+        $aad = $header . '|' . self::CONTEXT;
+        if ($alg === KeyVault::ALG_XCHACHA20POLY1305) {
+            $nonce = random_bytes(24);
+            $ct = sodium_crypto_aead_xchacha20poly1305_ietf_encrypt('legacy secret', $aad, $nonce, $key);
+        } else {
+            $nonce = random_bytes(12);
+            $tag = '';
+            $ct = openssl_encrypt('legacy secret', 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $nonce, $tag, $aad, 16) . $tag;
+        }
+        $v1 = base64_encode($header . $nonce . $ct);
+
+        self::assertSame(1, KeyVault::blobVersion($v1));
+        self::assertSame('legacy secret', $vault->decrypt($v1, self::CONTEXT));
+        $v2 = $vault->rewrap($v1, self::CONTEXT);
+        self::assertSame(KeyVault::FORMAT_VERSION, KeyVault::blobVersion($v2));
+        self::assertSame('legacy secret', $vault->decrypt($v2, self::CONTEXT));
+    }
+
     #[DataProvider('algorithms')]
     public function testUnknownVersion(int $alg): void
     {
         $vault = new KeyVault($this->provider(['k1' => random_bytes(32)]), $alg);
         $raw = self::decodeRaw($vault->encrypt('secret', self::CONTEXT));
-        foreach ([0, 2, 255] as $v) {
+        foreach ([0, 3, 255] as $v) {
             $t = $raw;
             $t[3] = chr($v);
             try {

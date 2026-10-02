@@ -240,6 +240,45 @@ final class CmsInspector
     }
 
     /**
+     * Authentication tag facts of an AuthEnvelopedData, located by POSITION only (recipient infos
+     * and algorithm details are not interpreted, so unusual but irrelevant fields cannot make the
+     * check fail open). Throws ValidationException when the structure cannot be read.
+     *
+     * @return array{macLength: int, icvLength: ?int}
+     */
+    public static function gcmTagInfo(string $der): array
+    {
+        $ci = Asn1::parse($der, false, true)->expect(Asn1::TAG_SEQUENCE, true);
+        if (Asn1::oid($ci->child(0)) !== self::OID_AUTH_ENVELOPED_DATA) {
+            throw new ValidationException('malformed', 'CMS: not AuthEnvelopedData');
+        }
+        $f = $ci->child(1)->child(0)->expect(Asn1::TAG_SEQUENCE, true)->children();
+        // version, [0] originatorInfo OPTIONAL, recipientInfos SET, authEncryptedContentInfo SEQ, [1] authAttrs, mac, [2]
+        $i = (isset($f[1]) && $f[1]->isContext(0)) ? 2 : 1;
+        if (!isset($f[$i]) || !$f[$i]->isUniversal(Asn1::TAG_SET) || !isset($f[$i + 1]) || !$f[$i + 1]->isUniversal(Asn1::TAG_SEQUENCE)) {
+            throw new ValidationException('malformed', 'CMS: unexpected AuthEnvelopedData layout');
+        }
+        $aeci = $f[$i + 1]->children();
+        $alg = ($aeci[1] ?? throw new ValidationException('malformed', 'CMS: no algorithm'))->children();
+        $icv = null;
+        if (isset($alg[1]) && $alg[1]->isUniversal(Asn1::TAG_SEQUENCE)) {
+            $pc = $alg[1]->children();
+            if (isset($pc[1])) {
+                if (!$pc[1]->isUniversal(Asn1::TAG_INTEGER)) {
+                    throw new ValidationException('malformed', 'CMS: bad aes-ICVlen');
+                }
+                $icv = Asn1::integer($pc[1]);
+            }
+        }
+        for ($j = $i + 2; $j < count($f); $j++) {
+            if ($f[$j]->isUniversal(Asn1::TAG_OCTET_STRING)) {
+                return ['macLength' => strlen($f[$j]->content()), 'icvLength' => $icv];
+            }
+        }
+        throw new ValidationException('malformed', 'CMS: no mac');
+    }
+
+    /**
      * Fix AuthEnvelopedData with AES-GCM whose GCMParameters omit aes-ICVlen (RFC 5084 DEFAULT 12).
      *
      * OpenSSL 3 refuses GCMParameters without the INTEGER, and some Microsoft Exchange components emit

@@ -10,12 +10,32 @@
  * @license GPL-3.0-or-later
  */
 
-define('INSTALL_PATH', realpath(__DIR__ . '/../../../') . '/');
-
-if (!is_file(INSTALL_PATH . 'program/include/clisetup.php')) {
-    fwrite(STDERR, "Roundcube not found: the plugin must be installed as <roundcube>/plugins/mimeshield\n");
+// Roundcube root: $ROUNDCUBE_INSTALL_PATH, or <root>/plugins/mimeshield/bin as invoked (a symlinked
+// plugin directory is resolved by __DIR__, so the invocation path is tried first)
+$candidates = [];
+if (is_string(getenv('ROUNDCUBE_INSTALL_PATH')) && getenv('ROUNDCUBE_INSTALL_PATH') !== '') {
+    $candidates[] = rtrim((string) getenv('ROUNDCUBE_INSTALL_PATH'), '/');
+}
+$invoked = (string) ($_SERVER['SCRIPT_FILENAME'] ?? '');
+if ($invoked !== '') {
+    if ($invoked[0] !== '/') {
+        $invoked = getcwd() . '/' . $invoked;
+    }
+    $candidates[] = dirname($invoked, 4);
+}
+$candidates[] = dirname(__DIR__, 3);
+$root = null;
+foreach ($candidates as $c) {
+    if (is_file($c . '/program/include/clisetup.php')) {
+        $root = $c;
+        break;
+    }
+}
+if ($root === null) {
+    fwrite(STDERR, "Roundcube not found: install the plugin as <roundcube>/plugins/mimeshield or set ROUNDCUBE_INSTALL_PATH\n");
     exit(1);
 }
+define('INSTALL_PATH', $root . '/');
 
 require_once INSTALL_PATH . 'program/include/clisetup.php';
 require_once __DIR__ . '/../lib/autoload.php';

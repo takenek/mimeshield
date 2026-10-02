@@ -224,7 +224,8 @@ final class Tool
         $skipped = 0;
         $failed = 0;
         foreach ($rows as $r) {
-            if ((string) $r['key_kid'] === $active && KeyVault::blobKid((string) $r['key_blob']) === $active) {
+            if ((string) $r['key_kid'] === $active && KeyVault::blobKid((string) $r['key_blob']) === $active
+                && KeyVault::blobVersion((string) $r['key_blob']) === KeyVault::FORMAT_VERSION) {
                 $skipped++;
                 continue;
             }

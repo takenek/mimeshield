@@ -117,7 +117,8 @@ class mimeshield extends rcube_plugin
 
     public function services(): Services
     {
-        return $this->services ??= new Services($this->rc, new Config($this->rc->config));
+        $prefs = !empty($this->rc->user->ID) ? (array) $this->rc->user->get_prefs() : [];
+        return $this->services ??= new Services($this->rc, new Config($this->rc->config, $prefs));
     }
 
     public function config(): Config

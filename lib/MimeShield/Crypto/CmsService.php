@@ -130,16 +130,22 @@ final class CmsService
      */
     public function decrypt(string $der, Certificate $cert, #[\SensitiveParameter] string $privateKeyPem): ?string
     {
+        $type = '';
         try {
-            $info = CmsInspector::envelopedData($der);
-            if ($info['type'] === 'authEnveloped-data'
-                && ($info['macLength'] === null || $info['macLength'] < 12 || $info['macLength'] > 16
-                    || ($info['icvLength'] !== null && $info['icvLength'] !== $info['macLength']))) {
-                // RFC 5084: ICV of 12..16 octets; OpenSSL would accept shorter (forgeable) tags
+            $type = CmsInspector::contentType($der);
+        } catch (ValidationException) {
+            // let OpenSSL reject it
+        }
+        if ($type === CmsInspector::OID_AUTH_ENVELOPED_DATA) {
+            // fail closed: the tag must be verifiable as 12..16 octets (RFC 5084), otherwise refuse
+            try {
+                $tag = CmsInspector::gcmTagInfo($der);
+            } catch (ValidationException $e) {
+                throw new CryptoException('malformed', 'AuthEnvelopedData not inspectable: ' . $e->getMessage());
+            }
+            if ($tag['macLength'] < 12 || $tag['macLength'] > 16 || ($tag['icvLength'] !== null && $tag['icvLength'] !== $tag['macLength'])) {
                 throw new CryptoException('unsupportedalgorithm', 'AuthEnvelopedData with truncated authentication tag');
             }
-        } catch (ValidationException) {
-            // structure not inspectable (exotic encoding): leave the decision to OpenSSL
         }
         $fixed = CmsInspector::fixGcmIcvLength($der);
         if ($fixed !== null) {

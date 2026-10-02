@@ -39,13 +39,14 @@ $config['mimeshield_master_key_active'] = '';
 $config['mimeshield_enable_signing'] = true;
 $config['mimeshield_enable_encryption'] = true;
 
-// Default state of the compose checkboxes (users can change them in Preferences > Encryption
-// unless listed in $config['dont_override']).
+// Default state of the compose checkboxes. Users can choose their own default in
+// Preferences > Encryption (stored as the user preferences 'mimeshield_pref_sign' /
+// 'mimeshield_pref_encrypt'; add those names to $config['dont_override'] to hide the choice).
 $config['mimeshield_sign_default'] = false;
 $config['mimeshield_encrypt_default'] = false;
 
-// Lock compose options to the defaults above: list of 'sign' and/or 'encrypt'. Locked options are
-// enforced server-side.
+// Lock compose options to the ADMINISTRATOR defaults above: list of 'sign' and/or 'encrypt'.
+// Locked options are enforced server-side and cannot be changed by user preferences.
 $config['mimeshield_options_lock'] = [];
 
 // Add the sender's own certificate as an additional recipient of every encrypted message so the

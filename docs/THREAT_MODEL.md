@@ -128,6 +128,8 @@
   it. Errors shown to users are generic labels; OpenSSL details go to the admin log only.
 
 ### T12 Resource exhaustion
+* KDF cost parameters in uploaded PKCS#12 / PKCS#8 files are limited before OpenSSL derives keys
+  (otherwise a 4 KB file with 2^31 iterations keeps a worker busy for minutes).
 * Upload size limits checked before reading; limits on keys/certificates per user, recipients per
   message, message size for S/MIME processing, ASN.1 nodes/depth, certificates per file, CRL size.
 

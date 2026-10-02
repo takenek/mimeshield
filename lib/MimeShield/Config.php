@@ -62,13 +62,50 @@ final class Config
         'mimeshield_debug' => false,
     ];
 
-    public function __construct(private readonly \rcube_config $config)
+    /** Options only the administrator may set: user preferences under these names are ignored */
+    private const ADMIN_ONLY_PREFIX = 'mimeshield_';
+    private const USER_PREFS = ['mimeshield_pref_sign', 'mimeshield_pref_encrypt'];
+
+    /** @var null|array<string, mixed> */
+    private ?array $adminValues = null;
+
+    /**
+     * @param array<string, mixed> $userPrefs the logged-in user's stored preferences
+     */
+    public function __construct(private readonly \rcube_config $config, private readonly array $userPrefs = [])
     {
     }
 
     public function get(string $name): mixed
     {
+        // Roundcube merges user preferences over the configuration; a (stale or injected) user
+        // preference must never change an administrator option of this plugin
+        if (str_starts_with($name, self::ADMIN_ONLY_PREFIX) && !in_array($name, self::USER_PREFS, true)
+            && array_key_exists($name, $this->userPrefs)) {
+            $admin = $this->adminValues();
+            return array_key_exists($name, $admin) ? $admin[$name] : (self::DEFAULTS[$name] ?? null);
+        }
         return $this->config->get($name, self::DEFAULTS[$name] ?? null);
+    }
+
+    /**
+     * Configuration as written by the administrator (fresh load without user preferences).
+     *
+     * @return array<string, mixed>
+     */
+    private function adminValues(): array
+    {
+        if ($this->adminValues === null) {
+            $fresh = new \rcube_config();
+            $dir = defined('RCUBE_PLUGINS_DIR') ? RCUBE_PLUGINS_DIR : (defined('INSTALL_PATH') ? INSTALL_PATH . 'plugins/' : '');
+            if ($dir !== '' && is_file($dir . 'mimeshield/config.inc.php')) {
+                $fresh->load_from_file($dir . 'mimeshield/config.inc.php');
+            } else {
+                $fresh->load_from_file('mimeshield.inc.php');
+            }
+            $this->adminValues = $fresh->all();
+        }
+        return $this->adminValues;
     }
 
     public function bool(string $name): bool

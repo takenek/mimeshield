@@ -593,8 +593,16 @@ final class IncomingProcessor
             $from = (string) $msg->headers->get('from', false);
             $sender = (string) $msg->headers->get('sender', false);
         }
-        $f = AddressMatcher::parseListStrict($from, true);
-        return [$f['valid'], AddressMatcher::parseList($sender, true), $f['invalid']];
+        // parse exactly as Roundcube displays it (header charset) AND without a charset: any
+        // difference between the two readings is treated as an unverifiable sender
+        $charset = (string) ($msg->headers->charset ?? '');
+        $a = AddressMatcher::parseListStrict($from, true, $charset !== '' ? $charset : null);
+        $b = AddressMatcher::parseListStrict($from, true, null);
+        $valid = array_values(array_intersect($a['valid'], $b['valid']));
+        $invalid = array_values(array_unique(array_merge(
+            $a['invalid'], $b['invalid'], array_diff($a['valid'], $b['valid']), array_diff($b['valid'], $a['valid'])
+        )));
+        return [$valid, AddressMatcher::parseList($sender, true), $invalid];
     }
 
     private function storage(): \rcube_storage
