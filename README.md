@@ -78,6 +78,13 @@ chown root:www-data /etc/roundcube/mimeshield.key      # group = the PHP-FPM / w
 chmod 0440 /etc/roundcube/mimeshield.key
 ```
 
+`keygen` does not create a missing parent directory on its own; it stops with a message and an
+example. Create the directory deliberately, e.g.
+`install -d -m 0750 -o root -g www-data /etc/roundcube` (group = the PHP-FPM / web server user),
+or pass `--create-parent`: missing directories are then created with mode 0700 for the user running
+the tool (never through a symbolic link, never inside a directory writable by other users without
+the sticky bit); adjust their group and mode afterwards so the PHP process can read the key.
+
 Back this file up **separately from database backups** (without it stored keys are unusable;
 with it plus a DB dump all keys are exposed). Alternative: provide the key in the environment
 variable `MIMESHIELD_MASTER_KEY` (`kid:base64`) of the PHP-FPM pool.

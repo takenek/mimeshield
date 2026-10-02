@@ -42,7 +42,7 @@ require_once INSTALL_PATH . 'program/include/clisetup.php';
 require_once __DIR__ . '/../lib/autoload.php';
 
 $rcmail = rcube::get_instance();
-$args = rcube_utils::get_opt(['f' => 'file', 'k' => 'kid', 'a' => 'append:bool', 'n' => 'dry-run:bool']);
+$args = rcube_utils::get_opt(['f' => 'file', 'k' => 'kid', 'a' => 'append:bool', 'n' => 'dry-run:bool', 'p' => 'create-parent:bool']);
 
 $tool = new MimeShield\Cli\Tool($rcmail, realpath(__DIR__ . '/..'));
 exit($tool->run($args));

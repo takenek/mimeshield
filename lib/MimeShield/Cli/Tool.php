@@ -27,8 +27,15 @@ final class Tool
 {
     private int $failures = 0;
 
-    public function __construct(private readonly \rcube $rc, private readonly string $pluginDir)
+    /** @var resource */
+    private $output;
+
+    /**
+     * @param resource|null $output stream for the tool output (default STDOUT)
+     */
+    public function __construct(private readonly \rcube $rc, private readonly string $pluginDir, $output = null)
     {
+        $this->output = $output ?? STDOUT;
     }
 
     /**
@@ -41,7 +48,7 @@ final class Tool
             case 'diag':
                 return $this->diag();
             case 'keygen':
-                return $this->keygen((string) ($args['file'] ?? ''), (string) ($args['kid'] ?? ''), !empty($args['append']));
+                return $this->keygen((string) ($args['file'] ?? ''), (string) ($args['kid'] ?? ''), !empty($args['append']), !empty($args['create-parent']));
             case 'rotate':
                 return $this->rotate(!empty($args['dry-run']));
             case 'check-keystore':
@@ -50,7 +57,9 @@ final class Tool
                 $this->out("MIME Shield administration tool\n\n"
                     . "Usage: plugins/mimeshield/bin/mimeshield.sh <command> [options]  (run from the Roundcube directory as the web server user)\n\n"
                     . "  diag                              check the installation (no secrets are shown)\n"
-                    . "  keygen --file=PATH [--kid=ID]     create a new master key file (mode 0400)\n"
+                    . "  keygen --file=PATH [--kid=ID] [--create-parent]\n"
+                    . "                                    create a new master key file (mode 0400); --create-parent\n"
+                    . "                                    also creates missing parent directories (mode 0700)\n"
                     . "  keygen --file=PATH --append [--kid=ID]\n"
                     . "                                    add a new key to an existing file (rotation step 1)\n"
                     . "  rotate [--dry-run]                re-encrypt all private keys with the active master key\n"
@@ -145,10 +154,17 @@ final class Tool
         return $this->failures === 0 ? 0 : 2;
     }
 
-    private function keygen(string $file, string $kid, bool $append): int
+    private function keygen(string $file, string $kid, bool $append, bool $createParent = false): int
     {
         if ($file === '' || !str_starts_with($file, '/')) {
             $this->out("--file=ABSOLUTE_PATH is required\n");
+            return 1;
+        }
+        if ($createParent && $append) {
+            $this->out("--create-parent cannot be combined with --append (the key file must already exist)\n");
+            return 1;
+        }
+        if (!$append && !$this->prepareParentDir(dirname($file), $createParent)) {
             return 1;
         }
         $kid = $kid !== '' ? $kid : 'k' . gmdate('Ymd');
@@ -192,10 +208,12 @@ final class Tool
             }
         } else {
             $old = umask(0o277);
+            error_clear_last();
             $fh = @fopen($file, 'x');
             umask($old);
             if ($fh === false) {
-                $this->out("Cannot create {$file}\n");
+                $err = error_get_last();
+                $this->out("Cannot create {$file}" . (is_array($err) ? ': ' . preg_replace('/^fopen\([^)]*\):\s*/', '', $err['message']) : '') . "\n");
                 return 1;
             }
             $ok = fwrite($fh, "# MIME Shield master key file - keep secret, never commit, back up securely\n" . $line . "\n") !== false;
@@ -213,6 +231,96 @@ final class Tool
             . ($append ? "Set \$config['mimeshield_master_key_active'] = '{$kid}'; and run: plugins/mimeshield/bin/mimeshield.sh rotate\n" : '')
             . "BACK UP THIS FILE: without it no stored private key can be used.\n");
         return 0;
+    }
+
+    /**
+     * The directory for a new key file must exist, be a real directory and be writable. Missing
+     * directories are only created on the administrator's explicit request (--create-parent): one
+     * level at a time with mkdir() (which never follows a symbolic link and fails if the name
+     * exists), mode 0700 for the current user, never below a symbolic link or inside a directory
+     * that other users can modify.
+     */
+    private function prepareParentDir(string $dir, bool $create): bool
+    {
+        if (is_link($dir)) {
+            $this->out("Refusing to write through a symbolic link: {$dir}\n");
+            return false;
+        }
+        if (file_exists($dir)) {
+            if (!is_dir($dir)) {
+                $this->out("Parent path {$dir} exists but is not a directory\n");
+                return false;
+            }
+            if (!is_writable($dir)) {
+                $this->out("Parent directory {$dir} is not writable by the current user ({$this->currentUser()}).\n"
+                    . "Run keygen as a user that may write there (e.g. root) and then adjust ownership of the key file.\n");
+                return false;
+            }
+            return true;
+        }
+
+        if (!$create) {
+            $this->out("Parent directory {$dir} does not exist.\n"
+                . "keygen does not create directories on its own. Create it deliberately with restrictive permissions,\n"
+                . "readable only by the group the PHP process runs as, e.g.:\n"
+                . '  install -d -m 0750 -o root -g PHP_GROUP ' . escapeshellarg($dir) . "\n"
+                . "(PHP_GROUP: the group of the web server / PHP-FPM user, e.g. www-data, apache or nginx)\n"
+                . "and run keygen again, or pass --create-parent to create it with mode 0700 for the current user.\n");
+            return false;
+        }
+
+        // the path is created component by component: no "." / ".." / empty segments
+        $parts = explode('/', substr($dir, 1));
+        foreach ($parts as $p) {
+            if ($p === '' || $p === '.' || $p === '..') {
+                $this->out("--create-parent needs a normalised absolute path (no '.', '..' or '//'): {$dir}\n");
+                return false;
+            }
+        }
+        $missing = [];
+        $base = $dir;
+        while (!file_exists($base) && !is_link($base)) {
+            array_unshift($missing, basename($base));
+            $base = dirname($base);
+        }
+        if (is_link($base) || !is_dir($base)) {
+            $this->out("Refusing to create {$dir}: {$base} is not a real directory\n");
+            return false;
+        }
+        $mode = (int) @fileperms($base);
+        if (($mode & 0o022) !== 0 && ($mode & 0o1000) === 0) {
+            $this->out("Refusing to create {$dir}: {$base} is writable by other users (and not sticky)\n");
+            return false;
+        }
+        $old = umask(0o077);
+        try {
+            foreach ($missing as $name) {
+                $base .= ($base === '/' ? '' : '/') . $name;
+                error_clear_last();
+                if (!@mkdir($base, 0o700)) {
+                    $err = error_get_last();
+                    $this->out("Cannot create directory {$base}" . (is_array($err) ? ': ' . preg_replace('/^mkdir\(\):\s*/', '', $err['message']) : '') . "\n");
+                    return false;
+                }
+                clearstatcache(true, $base);
+                if (is_link($base) || !is_dir($base)) {
+                    $this->out("Refusing to continue: {$base} was replaced while it was being created\n");
+                    return false;
+                }
+            }
+        } finally {
+            umask($old);
+        }
+        $this->out("Created directory {$dir} (mode 0700, owner {$this->currentUser()}).\n"
+            . 'Allow the PHP process to read it, e.g.:  chgrp PHP_GROUP ' . escapeshellarg($dir) . ' && chmod 0750 ' . escapeshellarg($dir) . "\n");
+        return true;
+    }
+
+    private function currentUser(): string
+    {
+        $uid = function_exists('posix_geteuid') ? posix_geteuid() : (int) getmyuid();
+        $pw = function_exists('posix_getpwuid') ? posix_getpwuid($uid) : false;
+        return (is_array($pw) ? $pw['name'] . ', ' : '') . 'uid ' . $uid;
     }
 
     private function rotate(bool $dryRun): int
@@ -293,6 +401,6 @@ final class Tool
 
     private function out(string $s): void
     {
-        fwrite(STDOUT, $s);
+        fwrite($this->output, $s);
     }
 }

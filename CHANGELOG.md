@@ -14,8 +14,16 @@ semantic versioning.
 - Compose: the S/MIME options form their own section with a visible "S/MIME" heading; the
   signing certificate is shown as name / issuer / validity.
 
+### Added
+- `mimeshield.sh keygen --create-parent`: explicitly create missing parent directories of `--file`
+  (mode 0700 for the current user; never through a symbolic link, never in a directory writable by
+  other users without the sticky bit).
+
 ### Fixed
 - Badges in the certificate lists were stretched to the full row width.
+- `mimeshield.sh keygen` reported only "Cannot create PATH" when the parent directory of `--file`
+  was missing; it now names the cause (missing / not a directory / not writable) and shows an
+  `install -d` example.
 
 ## [1.0.0] – 2026-10-02
 

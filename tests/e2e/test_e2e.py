@@ -1415,7 +1415,7 @@ def c46():
         check(not re.search(r'src="http://tracker\.example\.test', g) and '<script>alert(1)' not in g, 'get part %s not sanitised' % part)
 
 
-@case('41 CLI: diag, keygen (no overwrite), master key rotation, check-keystore; mail still decrypts')
+@case('41 CLI: diag, keygen (no overwrite, missing parent dir), master key rotation, check-keystore; mail still decrypts')
 def c41():
     tool = os.path.join(E.rc_dir, 'plugins', 'mimeshield', 'bin', 'mimeshield.sh')
     env = dict(os.environ, ROUNDCUBE_CONFIG_DIR=E.run + '/')
@@ -1428,6 +1428,15 @@ def c41():
     keyfile = os.path.join(E.run, 'keys', 'master.key')
     r = cli('keygen', '--file=' + keyfile)
     check(r.returncode != 0 and 'Refusing to overwrite' in r.stdout, 'keygen must not overwrite')
+    # missing parent directory: precise message, nothing created; explicit --create-parent creates it (0700)
+    newdir = os.path.join(E.run, 'keys', 'new', 'sub')
+    r = cli('keygen', '--file=' + os.path.join(newdir, 'master.key'))
+    check(r.returncode != 0 and 'does not exist' in r.stdout and 'install -d' in r.stdout, 'missing parent: ' + r.stdout)
+    check(not os.path.exists(os.path.join(E.run, 'keys', 'new')), 'keygen created a directory without --create-parent')
+    r = cli('keygen', '--file=' + os.path.join(newdir, 'master.key'), '--create-parent')
+    eq(r.returncode, 0, 'keygen --create-parent: ' + r.stdout)
+    eq(os.stat(newdir).st_mode & 0o7777, 0o700, 'created parent mode')
+    eq(os.stat(os.path.join(newdir, 'master.key')).st_mode & 0o777, 0o400, 'key file mode')
     r = cli('keygen', '--file=' + keyfile, '--append', '--kid=k9')
     eq(r.returncode, 0, 'keygen --append: ' + r.stdout)
     with open(os.path.join(E.run, 'config.inc.php'), 'a') as fh:
