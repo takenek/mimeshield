@@ -65,7 +65,7 @@ class mimeshield extends rcube_plugin
             'missingtitle', 'missingintro', 'sendunencrypted', 'cancel', 'confirmdeletekey', 'confirmdeletecert',
             'confirmreplace', 'saving', 'loading', 'bccwarning', 'forceencryptwarning', 'sendwithoutencrypt',
             'signdisabledidentity', 'importkey', 'importcert', 'certsaved', 'replacetitle', 'replacebutton',
-            'enigmaconflict', 'expiresat', 'encryptlocked',
+            'enigmaconflict', 'expiresat', 'encryptlocked', 'signingcert',
         ]);
 
         $this->schemaOk = $this->checkSchema();

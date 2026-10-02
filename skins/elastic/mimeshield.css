@@ -78,10 +78,38 @@ div.mimeshield-status.mimeshield-level-error:not(.ui) { border-color: #c62828; }
 }
 
 /* ---------------------------------------------------------------- compose */
+/* own section among the core compose options (attachments, receipts, priority, ...) */
+fieldset.mimeshield-compose {
+    margin: 0 0 1rem 0;
+    padding: .25rem 0 .5rem 0;
+    border-top: 1px solid rgba(128, 128, 128, .35);
+    border-bottom: 1px solid rgba(128, 128, 128, .35);
+    min-width: 0;
+}
+fieldset.mimeshield-compose > legend {
+    width: auto;
+    margin: 0;
+    padding: 0 .5rem 0 0;
+    font-size: 1.1em;
+}
 .mimeshield-compose-status,
 .mimeshield-recipients {
     font-size: .9em;
     margin: .25rem 0 .5rem 0;
+}
+.mimeshield-compose .mimeshield-label {
+    font-weight: bold;
+}
+.mimeshield-compose .mimeshield-cert {
+    margin-bottom: .4rem;
+    word-break: break-word;
+}
+.mimeshield-compose .mimeshield-cert .mimeshield-sub {
+    padding-left: 1.2em;
+    opacity: .85;
+}
+.mimeshield-compose-status > .warning {
+    margin-bottom: .4rem;
 }
 .mimeshield-recipients ul {
     list-style: none;
@@ -101,7 +129,7 @@ div.mimeshield-status.mimeshield-level-error:not(.ui) { border-color: #c62828; }
 }
 
 /* ---------------------------------------------------------------- settings */
-.mimeshield-list td.name span {
+.mimeshield-list td.name > span {
     display: block;
 }
 .mimeshield-list .mimeshield-sub {
@@ -127,4 +155,25 @@ div.mimeshield-status.mimeshield-level-error:not(.ui) { border-color: #c62828; }
 }
 .mimeshield-warning {
     margin-bottom: .5rem;
+}
+
+/* identity bindings: "not saved yet" notice next to the Save button */
+.mimeshield-bindings .mimeshield-unsaved {
+    display: none;
+    margin: .75rem 0 0 0;
+}
+.mimeshield-bindings.mimeshield-dirty .mimeshield-unsaved {
+    display: block;
+}
+.mimeshield-bindings .mimeshield-bindbuttons {
+    margin: .75rem 0 0 0;
+    padding: 0;
+}
+.mimeshield-buttons {
+    margin-top: 1.5rem;
+    padding: 0;
+}
+.mimeshield-buttons .btn {
+    margin: 0 .5rem .5rem 0;
+    white-space: normal;
 }

@@ -127,8 +127,9 @@ final class ComposeUi
         $status = \html::div(['id' => 'mimeshield-status', 'class' => 'mimeshield-compose-status', 'aria-live' => 'polite'], '')
             . \html::div(['id' => 'mimeshield-recipients', 'class' => 'mimeshield-recipients', 'aria-live' => 'polite'], '');
 
-        return \html::div(['id' => 'mimeshield-compose', 'class' => 'mimeshield-compose'],
-            \html::tag('h3', ['class' => 'voice'], \rcube::Q($this->plugin->text('smimeoptions'))) . $rows . $status);
+        // a visible, separate "S/MIME" section among the core compose options
+        return \html::tag('fieldset', ['id' => 'mimeshield-compose', 'class' => 'mimeshield-compose', 'aria-label' => $this->plugin->text('smimeoptions')],
+            \html::tag('legend', [], \rcube::Q($this->plugin->text('smimesection'))) . $rows . $status);
     }
 
     private function checkboxRow(string $name, string $id, string $label, bool $checked, bool $locked): string

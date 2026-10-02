@@ -26,7 +26,7 @@ Actalis PKCS#12. See docs/INTEROPERABILITY.md for the manual checklist.
 | PHPUnit (unit + integration) | `MIMESHIELD_RC=/path/to/roundcube vendor/bin/phpunit` | ASN.1, CMS, certificates, PKCS#12/KDF limits, key store, master keys, temp files, logging, trust/chain, revocation/SSRF, verification states, outgoing pipeline (real Mail_mime + Net_SMTP chunking + IMAP normalisation, verified with the openssl CLI), incoming processor (decrypt/verify/inject without IMAP), audit regressions |
 | E2E | `python3 tests/e2e/test_e2e.py --rc <roundcube> --php php8.4 --db sqlite` | 57 cases against a real Roundcube over HTTP (login, settings, compose, send, IMAP), final SMTP DATA verified with the openssl CLI |
 | E2E matrix | `tests/e2e/matrix.sh` | the E2E suite for 16 Roundcube × PHP × DB combinations |
-| Browser UI | `python3 tests/ui/test_ui.py --rc <roundcube release dir> --php php8.4` | 12 cases in headless Chromium (needs the release tarball: git checkouts lack built assets) |
+| Browser UI | `python3 tests/ui/test_ui.py --rc <roundcube release dir> --php php8.4` | 13 cases in headless Chromium (needs the release tarball: git checkouts lack built assets) |
 | Interop | `tests/interop/run.sh php8.4` | bidirectional CMS interop with NSS, gpgsm, OpenSSL |
 | PHPStan | `php -d memory_limit=2G vendor/bin/phpstan analyse -c phpstan.neon.dist` | level 6 |
 | Code style | `vendor/bin/php-cs-fixer fix --dry-run --config=.php-cs-fixer.dist.php` | |
@@ -102,7 +102,7 @@ forces encryption, 33 CSRF, 34 XSS via certificate names, 35 public-only export,
 42 signed+encrypted reply, 43 forward inline/as attachment, 44 contact certificate replacement +
 preferred certificate, 45 "observed" sender certificate, 46 EFAIL/sanitiser for decrypted HTML
 (show, preview, `_safe=1`, get), 47 EFAIL in decrypted HTML drafts; inbound interop I1–I9 (Outlook /
-OWA / Exchange / Thunderbird structures). Browser cases U1–U12 cover the compose, settings and
+OWA / Exchange / Thunderbird structures). Browser cases U1–U13 cover the compose, settings and
 message-view JavaScript.
 
 ## 5. 30-point security audit
@@ -155,3 +155,15 @@ line-wrapped base64 not redacted. E2E: triple-wrapped signed(enveloped(signed)) 
 contact chain re-import not updating trust. Browser tests: compose form permanently "changed"; export
 locking the UI; "send without encryption" not sending (core TypeError); settings list widget not
 loaded; long send-error text used as identity status.
+
+## 7. UX iteration (settings bindings, compose S/MIME section)
+
+Re-run after the UX changes on Roundcube 1.7.4 (official release tarball for the browser suite),
+PHP 8.4.26: PHPUnit 1005 tests / 0 failures / 1 skipped (as above); PHPStan level 6 no errors;
+PHP-CS-Fixer 0 files; `php -l` PHP 8.1/8.4/8.5 0 errors; E2E 57 passed / 0 failed; interop 11
+passed; browser UI 13 passed / 0 failed (new U13: unsaved-changes notice, primary Save, confirmation
+after the list reload, visible compose "S/MIME" section); `mimeshield.sh diag` Result: OK.
+
+Known test-harness flake (also present before the UX changes): in roughly one of three runs of the
+browser suite headless Chromium stops responding at the login of U10 ("Timed out receiving message
+from renderer"), and U10 and every later case fail with that timeout. A re-run passes.

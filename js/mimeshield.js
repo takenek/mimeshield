@@ -62,11 +62,11 @@
         }
 
         // buttons inside the details frame
-        $(document).on('click', 'a.mimeshield-delete', function (e) {
+        $(document).on('click', 'button.mimeshield-delete', function (e) {
             e.preventDefault();
             confirmDelete($(this).data('type'), $(this).data('id'));
         });
-        $(document).on('click', 'a.mimeshield-export', function (e) {
+        $(document).on('click', 'button.mimeshield-export', function (e) {
             e.preventDefault();
             var url = rcmail.url('plugin.mimeshield-export', {
                 _type: String($(this).data('type')), _id: String($(this).data('id')), _token: rcmail.env.request_token
@@ -74,15 +74,21 @@
             // a download does not fire 'load': navigate without the busy lock of location_href(.., true)
             rcmail.location_href(url, window, false);
         });
-        $(document).on('click', 'a.mimeshield-bind', function (e) {
+        $(document).on('click', 'button.mimeshield-bind', function (e) {
             e.preventDefault();
-            var ids = [];
-            $('input[name="_identities[]"]:checked').each(function () {
-                ids.push(this.value);
-            });
-            rcmail.http_post('plugin.mimeshield-bind', { _id: String($(this).data('id')), _identities: ids },
+            rcmail.http_post('plugin.mimeshield-bind', { _id: String($(this).data('id')), _identities: boundIdentities() },
                 rcmail.set_busy(true, 'mimeshield.saving'));
         });
+
+        // identity bindings: show the "not saved yet" notice while the selection differs from the saved one
+        // (after saving, the list and this frame are reloaded with the stored state)
+        var bindings = $('fieldset.mimeshield-bindings');
+        if (bindings.length) {
+            var saved = boundIdentities().join(',');
+            bindings.on('change', 'input[name="_identities[]"]', function () {
+                bindings.toggleClass('mimeshield-dirty', boundIdentities().join(',') !== saved);
+            });
+        }
         $(document).on('click', 'a.mimeshield-prefer', function (e) {
             e.preventDefault();
             rcmail.http_post('plugin.mimeshield-certprefer', { _id: String($(this).data('id')), _email: String($(this).data('email')) },
@@ -92,6 +98,14 @@
         rcmail.addEventListener('plugin.mimeshield_list_reload', function (data) {
             rcmail.mimeshield_list_reload(data && data.id ? data.id : 0);
         });
+    }
+
+    function boundIdentities() {
+        var ids = [];
+        $('input[name="_identities[]"]:checked').each(function () {
+            ids.push(String(this.value));
+        });
+        return ids.sort();
     }
 
     function loadFrame(action, params) {
@@ -242,14 +256,16 @@
                 if (!this.sign.data('locked')) {
                     this.sign.prop('disabled', !canSign || $.inArray('sign', rcmail.env.mimeshield_locks || []) >= 0);
                 }
-                var line = $('<div>');
+                var info = $('<div>');
                 if (canSign) {
-                    line.addClass(ident.soon ? 'warning' : 'ok')
-                        .text('S/MIME: ' + ident.cert + ' (' + ident.issuer + ') ' + label('expiresat', { date: ident.until }));
+                    info.addClass(ident.soon ? 'warning' : 'ok')
+                        .append($('<div>').text((ident.soon ? '⚠ ' : '✔ ') + ident.cert))
+                        .append($('<div class="mimeshield-sub">').text(ident.issuer))
+                        .append($('<div class="mimeshield-sub">').text(label('expiresat', { date: ident.until })));
                 } else {
-                    line.addClass('warning').text('S/MIME: ' + (ident && ident.reason ? ident.reason : label('nocertificate')));
+                    info.addClass('warning').append($('<div>').text('⚠ ' + (ident && ident.reason ? ident.reason : label('nocertificate'))));
                 }
-                box.append(line);
+                box.append($('<div class="mimeshield-cert">').append($('<div class="mimeshield-label">').text(label('signingcert'))).append(info));
             }
 
             if (this.enc.length && this.enc.prop('checked')) {
@@ -348,7 +364,7 @@
                 li.addClass(cls).text(mark + a + ' – ' + label('recipient_' + c.status));
                 ul.append(li);
             });
-            box.append($('<div>').text(label('recipientsstatus'))).append(ul);
+            box.append($('<div class="mimeshield-label">').text(label('recipientsstatus'))).append(ul);
         },
 
         beforeSend: function (props) {

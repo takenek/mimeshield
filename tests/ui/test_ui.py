@@ -262,7 +262,7 @@ def u7(d):
     frame_text = 'var f=document.getElementById("mimeshield-frame"); var t=f && f.contentDocument && f.contentDocument.querySelector(".mimeshield-certtable"); return t ? t.innerText : "";'
     txt = wait(d, lambda x: js(x, frame_text), msg='details frame not loaded')
     check('SHA-256' in txt and 'alice@example.test' in txt, 'details: %r' % txt[:300])
-    js(d, 'document.getElementById("mimeshield-frame").contentDocument.querySelector("a.mimeshield-export").click()')
+    js(d, 'document.getElementById("mimeshield-frame").contentDocument.querySelector(".mimeshield-export").click()')
     time.sleep(1.5)
     check(js(d, 'return !rcmail.busy'), 'UI stays busy after export')
     check(js(d, 'return rcmail.commands["plugin.mimeshield-import"] === true'), 'import command disabled')
@@ -343,6 +343,65 @@ def u12(d):
     check('Encrypted for UI reply test' in js(d, 'return $("#composebody").val()'), 'quoted decrypted text missing')
     js(d, '$("#mimeshield-encrypt").prop("checked", false).trigger("change")')
     check('reveals the quoted content' in d.find_element(By.ID, 'mimeshield-status').text, 'warning not shown')
+
+
+@case('U13 bindings: unsaved-changes notice, primary Save, confirmation after reload; compose S/MIME section')
+def u13(d):
+    login(d, 'alice@example.test')
+    d.get(C.base + '?_task=settings&_action=plugin.mimeshield')
+    wait(d, lambda x: x.find_elements(By.CSS_SELECTOR, '#mimeshield-list tr'), msg='key list empty')
+    js(d, 'rcmail.mimeshield_list.select(rcmail.mimeshield_list.rows[Object.keys(rcmail.mimeshield_list.rows)[0]].uid)')
+    in_frame = 'var f=document.getElementById("mimeshield-frame"); var doc=f && f.contentDocument; '
+    wait(d, lambda x: js(x, in_frame + 'return !!(doc && doc.querySelector(".mimeshield-bind.btn-primary"))'), msg='Save is not a primary button')
+    check(js(d, in_frame + 'return !!doc.querySelector(".mimeshield-delete.btn-danger") && !doc.querySelector(".mimeshield-bind.btn-danger")'),
+          'delete must be danger, save must not')
+    unsaved = in_frame + 'var u=doc.querySelector(".mimeshield-unsaved"); return !!u && u.offsetParent !== null;'
+    check(not js(d, unsaved), 'unsaved notice shown before any change')
+    toggle = in_frame + 'var w=f.contentWindow; w.$("input[name=\'_identities[]\']:enabled").first().prop("checked", arguments[0]).trigger("change");'
+    js(d, toggle, False)
+    check(js(d, unsaved), 'unsaved notice not shown after a change')
+    js(d, toggle, True)
+    check(not js(d, unsaved), 'unsaved notice still shown after reverting the change')
+    js(d, toggle, False)
+    js(d, 'window.__msOld = 1')  # marks the page before the reload
+    js(d, in_frame + 'doc.querySelector(".mimeshield-bind").click()')
+    wait(d, lambda x: js(x, 'return !window.__msOld && document.readyState == "complete" && !!window.rcmail && !!rcmail.mimeshield_list'),
+         timeout=15, msg='list page not reloaded after saving')
+    # on the reloaded page the message can only come from the session flash
+    wait(d, lambda x: 'identities saved' in (js(x, 'return $("#messagestack").text()') or ''), timeout=10,
+         msg='no confirmation after the list reload')
+    wait(d, lambda x: js(x, in_frame + 'return !!(doc && doc.readyState == "complete" && doc.querySelector(".mimeshield-bind") && f.contentWindow.$)'),
+         msg='frame not reloaded')
+    check(not js(d, unsaved), 'unsaved notice shown after saving')
+    check(js(d, in_frame + 'return f.contentWindow.$("input[name=\'_identities[]\']:checked").length') == 0, 'binding not removed')
+    # restore the binding for the other cases
+    js(d, toggle, True)
+    js(d, 'window.__msOld = 1')
+    js(d, in_frame + 'doc.querySelector(".mimeshield-bind").click()')
+    wait(d, lambda x: js(x, 'return !window.__msOld && document.readyState == "complete" && !!window.rcmail && !!rcmail.mimeshield_list'),
+         timeout=15, msg='list page not reloaded after restoring')
+    wait(d, lambda x: js(x, in_frame + 'return !!(doc && doc.querySelector(".mimeshield-bind") && f.contentWindow.$ && f.contentWindow.$("input[name=\'_identities[]\']:checked").length == 1)'),
+         timeout=15, msg='binding not restored')
+    d.set_window_size(420, 900)
+    try:
+        d.get(C.base + '?_task=settings&_action=plugin.mimeshield')
+        wait(d, lambda x: x.find_elements(By.CSS_SELECTOR, '#mimeshield-list tr'), msg='key list empty (phone)')
+        js(d, 'rcmail.mimeshield_list.select(rcmail.mimeshield_list.rows[Object.keys(rcmail.mimeshield_list.rows)[0]].uid)')
+        wait(d, lambda x: js(x, in_frame + 'return !!(doc && doc.querySelector(".mimeshield-bind") && f.contentWindow.UI)'), msg='frame not loaded (phone)')
+        time.sleep(0.5)
+        js(d, 'window.dispatchEvent(new Event("resize"))')
+        time.sleep(0.5)
+        check(not js(d, 'return $(".content-frame-navigation [class*=mimeshield-]").length'), 'frame buttons cloned into the footer')
+        check(js(d, in_frame + 'var b=doc.querySelector(".mimeshield-bind"); return b.offsetParent !== null'), 'Save hidden on a small screen')
+    finally:
+        d.set_window_size(1500, 1100)
+    open_compose(d)
+    legend = d.find_element(By.CSS_SELECTOR, 'fieldset#mimeshield-compose > legend')
+    check(legend.is_displayed() and legend.text.strip() == 'S/MIME', 'S/MIME section heading: %r' % legend.text)
+    check(d.find_elements(By.CSS_SELECTOR, '#mimeshield-compose #mimeshield-sign') and d.find_elements(By.CSS_SELECTOR, '#mimeshield-compose #mimeshield-status'),
+          'S/MIME controls not grouped in the section')
+    errs = js_errors(d)
+    check(not errs, 'JS errors: %r' % errs)
 
 
 def main():

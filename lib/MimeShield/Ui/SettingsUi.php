@@ -226,10 +226,7 @@ final class SettingsUi
         $c = $rec->certificate();
         $html = $this->certTable($c, $rec->chainPems(), ChainValidator::PURPOSE_SIGN);
         $html .= $this->bindingForm($rec);
-        $html .= \html::div('formbuttons mimeshield-buttons',
-            \html::a(['href' => '#', 'class' => 'button mimeshield-export', 'data-type' => 'key', 'data-id' => (string) $rec->id()], \rcube::Q($this->plugin->text('exportpublic')))
-            . ' ' . \html::a(['href' => '#', 'class' => 'button delete mimeshield-delete', 'data-type' => 'key', 'data-id' => (string) $rec->id()], \rcube::Q($this->plugin->text('deletekey')))
-        );
+        $html .= $this->itemButtons('key', $rec->id(), 'deletekey');
         $html .= \html::p('hint mimeshield-hint', \rcube::Q($this->plugin->text('keystorednotice')));
         $this->rc->output->set_env('mimeshield_item', $rec->id());
         $this->sendFrame($this->plugin->text('keyprops'), $html);
@@ -259,7 +256,23 @@ final class SettingsUi
             \html::tag('legend', [], \rcube::Q($this->plugin->text('signidentities')))
             . \html::p('hint', \rcube::Q($this->plugin->text('signidentitieshint')))
             . $rows
-            . \html::p('formbuttons', \html::a(['href' => '#', 'class' => 'button mainaction mimeshield-bind', 'data-id' => (string) $rec->id()], \rcube::Q($this->plugin->text('savebindings')))));
+            // shown by the script while the selection differs from the saved one
+            . \html::div(['class' => 'boxwarning mimeshield-unsaved', 'role' => 'status'],
+                \html::tag('strong', [], \rcube::Q($this->plugin->text('unsavedchanges'))) . ' ' . \rcube::Q($this->plugin->text('unsavedhint')))
+            // not .formbuttons: on small screens Elastic clones the buttons found there into the parent
+            // footer (as inert copies) and hides the originals
+            . \html::p('mimeshield-bindbuttons', \html::tag('button', ['type' => 'button', 'class' => 'button mainaction mimeshield-bind', 'data-id' => (string) $rec->id()], \rcube::Q($this->plugin->text('savebindings')))));
+    }
+
+    /**
+     * "Download public certificate" and "Delete" buttons of the details frame (delete in the danger style).
+     */
+    private function itemButtons(string $type, int $id, string $deleteLabel): string
+    {
+        // not .formbuttons (see bindingForm())
+        return \html::div('mimeshield-buttons',
+            \html::tag('button', ['type' => 'button', 'class' => 'button mimeshield-export', 'data-type' => $type, 'data-id' => (string) $id], \rcube::Q($this->plugin->text('exportpublic')))
+            . ' ' . \html::tag('button', ['type' => 'button', 'class' => 'btn btn-danger delete mimeshield-delete', 'data-type' => $type, 'data-id' => (string) $id], \rcube::Q($this->plugin->text($deleteLabel))));
     }
 
     private function keyImport(): void
@@ -328,7 +341,8 @@ final class SettingsUi
                 $repo->unbind($iid);
             }
         }
-        $this->rc->output->show_message('mimeshield.bindingssaved', 'confirmation');
+        // the list page is reloaded: hand the confirmation over to it (otherwise it disappears with the reload)
+        $this->flash([['bindingssaved', 'confirmation']]);
         $this->rc->output->command('plugin.mimeshield_list_reload', ['id' => $keyId]);
         $this->rc->output->send();
     }
@@ -368,10 +382,7 @@ final class SettingsUi
         $c = $rec->certificate();
         $html = $this->certTable($c, $rec->chainPems(), $c->canEncrypt() ? ChainValidator::PURPOSE_ENCRYPT : ChainValidator::PURPOSE_SIGN, $rec);
         $html .= $this->preferredForm($rec);
-        $html .= \html::div('formbuttons mimeshield-buttons',
-            \html::a(['href' => '#', 'class' => 'button mimeshield-export', 'data-type' => 'cert', 'data-id' => (string) $rec->id()], \rcube::Q($this->plugin->text('exportpublic')))
-            . ' ' . \html::a(['href' => '#', 'class' => 'button delete mimeshield-delete', 'data-type' => 'cert', 'data-id' => (string) $rec->id()], \rcube::Q($this->plugin->text('deletecert')))
-        );
+        $html .= $this->itemButtons('cert', $rec->id(), 'deletecert');
         $this->rc->output->set_env('mimeshield_item', $rec->id());
         $this->sendFrame($this->plugin->text('certprops'), $html);
     }

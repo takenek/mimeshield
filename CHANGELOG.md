@@ -3,6 +3,20 @@
 All notable changes are documented here. The format follows *Keep a Changelog*; versions follow
 semantic versioning.
 
+## [Unreleased]
+
+### Changed
+- Settings > S/MIME certificates: the identity assignment "Save" is a primary button inside the
+  identity section; while the selection differs from the saved one a warning notice ("Changes have
+  not been saved yet. If the configuration is correct, click Save.") is shown; the confirmation
+  ("Certificate assignment to identities saved.") stays visible after the list reload.
+- "Download public certificate" and "Delete" are buttons (delete in the danger style).
+- Compose: the S/MIME options form their own section with a visible "S/MIME" heading; the
+  signing certificate is shown as name / issuer / validity.
+
+### Fixed
+- Badges in the certificate lists were stretched to the full row width.
+
 ## [1.0.0] – 2026-10-02
 
 First release.
