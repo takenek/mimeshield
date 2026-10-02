@@ -69,6 +69,142 @@ final class AuditRegressionTest extends TestCase
         self::assertLessThan(1.0, microtime(true) - $t, 'must not run the KDF');
     }
 
+    /**
+     * Audit MS-05: a shrouded key bag with an excessive iteration count hidden INSIDE an encrypted
+     * SafeContents layer (outer layer: 2048 iterations) is rejected before OpenSSL runs any KDF.
+     */
+    public function testExpensiveKeyBagHiddenInEncryptedLayerIsRejected(): void
+    {
+        $pfx = $this->pfxWithEncryptedKeyBag(2500000, 'outer-pass');
+
+        KdfInspector::check($pfx, 'p12invalid');   // without the password the inner layer is opaque
+        $t = microtime(true);
+        try {
+            KdfInspector::check($pfx, 'p12invalid', 'outer-pass');
+            self::fail('expected rejection');
+        } catch (ValidationException $e) {
+            self::assertSame('p12invalid', $e->getUserLabel());
+            self::assertStringContainsString('KDF', $e->getMessage());
+        }
+        try {
+            (new KeyImporter())->import($pfx, 'outer-pass');
+            self::fail('expected rejection');
+        } catch (ValidationException $e) {
+            self::assertSame('p12invalid', $e->getUserLabel());
+            self::assertStringContainsString('KDF', $e->getMessage());
+        }
+        self::assertLessThan(2.0, microtime(true) - $t, 'the hidden KDF must never run');
+
+        // a wrong password cannot open the layer: reported as such, cheaply
+        try {
+            KdfInspector::check($pfx, 'p12invalid', 'wrong');
+            self::fail('expected rejection');
+        } catch (ValidationException $e) {
+            self::assertSame('badpassword', $e->getUserLabel());
+        }
+    }
+
+    /**
+     * Audit MS-05 (follow-up): the inspector runs the KDF of an encrypted layer itself, so an iteration
+     * count that is not a positive INTEGER (never counted in the budget) must be rejected before the
+     * derivation loop - neither an unbounded loop (PKCS#12 PBE) nor an uncaught error (PBES2).
+     */
+    public function testEncryptedLayerWithNonIntegerIterationCountIsRejected(): void
+    {
+        $seq = static fn (string ...$c): string => Asn1::encode("\x30", implode('', $c));
+        $oid = static function (string $dotted): string {
+            $parts = array_map('intval', explode('.', $dotted));
+            $body = chr(40 * $parts[0] + $parts[1]);
+            foreach (array_slice($parts, 2) as $n) {
+                $enc = chr($n & 0x7F);
+                for ($n >>= 7; $n > 0; $n >>= 7) {
+                    $enc = chr(0x80 | ($n & 0x7F)) . $enc;
+                }
+                $body .= $enc;
+            }
+            return Asn1::encode("\x06", $body);
+        };
+        $octets = static fn (string $c): string => Asn1::encode("\x04", $c);
+        $explicit0 = static fn (string $c): string => Asn1::encode("\xA0", $c);
+        $badIterations = $octets("\x08\x00");   // OCTET STRING instead of INTEGER
+
+        $algorithms = [
+            'pkcs12-pbe' => $seq($oid('1.2.840.113549.1.12.1.3'), $seq($octets('saltsalt'), $badIterations)),
+            'pbes2' => $seq($oid('1.2.840.113549.1.5.13'), $seq(
+                $seq($oid('1.2.840.113549.1.5.12'), $seq($octets('saltsalt'), $badIterations)),
+                $seq($oid('2.16.840.1.101.3.4.1.42'), $octets(str_repeat("\x00", 16))),
+            )),
+        ];
+        foreach ($algorithms as $name => $alg) {
+            $eci = $seq($oid('1.2.840.113549.1.7.1'), $alg, Asn1::encode("\x80", str_repeat("\x11", 32)));
+            $contentInfo = $seq($oid('1.2.840.113549.1.7.6'), $explicit0($seq(Asn1::encode("\x02", "\x00"), $eci)));
+            $pfx = $seq(Asn1::encode("\x02", "\x03"), $seq($oid('1.2.840.113549.1.7.1'), $explicit0($octets($seq($contentInfo)))));
+            $t = microtime(true);
+            try {
+                KdfInspector::check($pfx, 'p12invalid', 'any-password');
+                self::fail($name . ': expected rejection');
+            } catch (ValidationException $e) {
+                self::assertSame('p12invalid', $e->getUserLabel(), $name);
+                self::assertStringContainsString('KDF', $e->getMessage(), $name);
+            }
+            self::assertLessThan(1.0, microtime(true) - $t, $name . ': no key derivation may run');
+        }
+    }
+
+    public function testNormalKeyBagInEncryptedLayerPassesTheInspection(): void
+    {
+        $pfx = $this->pfxWithEncryptedKeyBag(2048, 'outer-pass');
+        KdfInspector::check($pfx, 'p12invalid', 'outer-pass');
+        $this->addToAssertionCount(1);
+    }
+
+    /**
+     * PFX whose only content is an EncryptedData (PBES2: PBKDF2-SHA256 2048 + AES-256-CBC) holding a
+     * SafeContents with one pkcs8ShroudedKeyBag encrypted with $innerIterations (MAC not valid: the
+     * inspection runs before OpenSSL).
+     */
+    private function pfxWithEncryptedKeyBag(int $innerIterations, string $password): string
+    {
+        $k = escapeshellarg(TestPki::path('alice.key'));
+        $f = $this->tmp . '/inner-' . $innerIterations . '.der';
+        $this->sh("openssl pkcs8 -topk8 -v2 aes-256-cbc -v2prf hmacWithSHA256 -iter $innerIterations -in $k -passout pass:inner -outform DER -out " . escapeshellarg($f));
+        $epki = (string) file_get_contents($f);
+
+        $seq = static fn (string ...$c): string => Asn1::encode("\x30", implode('', $c));
+        $oid = static function (string $dotted): string {
+            $parts = array_map('intval', explode('.', $dotted));
+            $body = chr(40 * $parts[0] + $parts[1]);
+            foreach (array_slice($parts, 2) as $n) {
+                $enc = chr($n & 0x7F);
+                for ($n >>= 7; $n > 0; $n >>= 7) {
+                    $enc = chr(0x80 | ($n & 0x7F)) . $enc;
+                }
+                $body .= $enc;
+            }
+            return Asn1::encode("\x06", $body);
+        };
+        $octets = static fn (string $c): string => Asn1::encode("\x04", $c);
+        $int = static fn (int $n): string => Asn1::encode("\x02", ltrim(pack('N', $n), "\x00") === '' ? "\x00" : (ord(ltrim(pack('N', $n), "\x00")[0]) & 0x80 ? "\x00" : '') . ltrim(pack('N', $n), "\x00"));
+        $explicit0 = static fn (string $c): string => Asn1::encode("\xA0", $c);
+
+        $bag = $seq($oid('1.2.840.113549.1.12.10.1.2'), $explicit0($epki));
+        $safeContents = $seq($bag);
+
+        $salt = random_bytes(8);
+        $iv = random_bytes(16);
+        $key = openssl_pbkdf2($password, $salt, 32, 2048, 'sha256');
+        $ct = (string) openssl_encrypt($safeContents, 'aes-256-cbc', (string) $key, OPENSSL_RAW_DATA, $iv);
+        $alg = $seq($oid('1.2.840.113549.1.5.13'), $seq(
+            $seq($oid('1.2.840.113549.1.5.12'), $seq($octets($salt), $int(2048), $seq($oid('1.2.840.113549.2.9'), "\x05\x00"))),
+            $seq($oid('2.16.840.1.101.3.4.1.42'), $octets($iv)),
+        ));
+        $encryptedContentInfo = $seq($oid('1.2.840.113549.1.7.1'), $alg, Asn1::encode("\x80", $ct));
+        $contentInfo = $seq($oid('1.2.840.113549.1.7.6'), $explicit0($seq($int(0), $encryptedContentInfo)));
+        $authSafe = $seq($oid('1.2.840.113549.1.7.1'), $explicit0($octets($seq($contentInfo))));
+        $macData = $seq($seq($seq($oid('2.16.840.1.101.3.4.2.1'), "\x05\x00"), $octets(str_repeat("\x00", 32))), $octets(random_bytes(8)), $int(2048));
+        return $seq($int(3), $authSafe, $macData);
+    }
+
     public function testPkcs8WithExpensiveScryptIsRejected(): void
     {
         $k = escapeshellarg(TestPki::path('alice.key'));
@@ -120,6 +256,63 @@ final class AuditRegressionTest extends TestCase
         self::assertTrue($cfg->optionDefault('encrypt'));
         self::assertFalse($cfg->isLocked('sign'));
         self::assertTrue($cfg->optionDefault('sign'), 'unlocked options follow the user preference');
+    }
+
+    /**
+     * Audit MS-13: trust store and master key source are built from the protected configuration -
+     * a user preference named like the administrator option never changes them.
+     */
+    public function testUserPreferenceCannotChangeTrustAnchorsOrMasterKeySource(): void
+    {
+        $rc = new class () extends \rcube_config {
+            /** @var array<string, mixed> */
+            public array $values = [];
+
+            public function __construct()
+            {
+            }
+
+            public function get($name, $def = null)
+            {
+                return array_key_exists($name, $this->values) ? $this->values[$name] : $def;
+            }
+        };
+        $injected = [
+            'mimeshield_ca_bundle' => [TestPki::path('rogue.crt')],
+            'mimeshield_use_system_ca' => true,
+            'mimeshield_master_key_file' => $this->tmp . '/attacker.key',
+        ];
+        $rc->values = $injected;   // Roundcube merges user preferences over the configuration
+
+        $protected = new Config($rc, $injected);
+        $store = TrustStore::fromConfig($protected);
+        self::assertNotContains(TestPki::path('rogue.crt'), $store->caInfo());
+        self::assertFalse($store->isAnchor(TestPki::cert('rogue')));
+        $mk = \MimeShield\KeyStore\MasterKeyProvider::fromConfig($protected);
+        self::assertStringNotContainsString('attacker.key', (new \ReflectionProperty($mk, 'file'))->getValue($mk));
+
+        // the same values set by the administrator (not a user preference) are used
+        $admin = new Config($rc, []);
+        self::assertContains(TestPki::path('rogue.crt'), TrustStore::fromConfig($admin)->caInfo());
+    }
+
+    /**
+     * Audit MS-07: the system (TLS) CA bundle is not trusted for S/MIME unless configured.
+     */
+    public function testSystemCaStoreIsNotTrustedByDefault(): void
+    {
+        self::assertFalse(Config::DEFAULTS['mimeshield_use_system_ca']);
+        $rc = new class () extends \rcube_config {
+            public function __construct()
+            {
+            }
+
+            public function get($name, $def = null)
+            {
+                return $def;
+            }
+        };
+        self::assertSame([], TrustStore::fromConfig(new Config($rc))->caInfo());
     }
 
     // #25: unparsable From entries never count as verified

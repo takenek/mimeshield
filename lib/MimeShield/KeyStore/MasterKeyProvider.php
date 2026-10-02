@@ -10,6 +10,7 @@ declare(strict_types=1);
 
 namespace MimeShield\KeyStore;
 
+use MimeShield\Config;
 use MimeShield\Exception\ConfigException;
 use MimeShield\Log;
 
@@ -53,9 +54,10 @@ final class MasterKeyProvider
     }
 
     /**
-     * Build from Roundcube configuration.
+     * Build from the plugin configuration (MimeShield\Config: user preferences named like these
+     * administrator options are ignored).
      */
-    public static function fromConfig(\rcube_config $config): self
+    public static function fromConfig(Config $config): self
     {
         $roots = [];
         if (defined('RCUBE_INSTALL_PATH')) {
@@ -67,9 +69,9 @@ final class MasterKeyProvider
         }
 
         return new self(
-            (string) $config->get('mimeshield_master_key_file', ''),
-            (string) $config->get('mimeshield_master_key_env', 'MIMESHIELD_MASTER_KEY'),
-            (string) $config->get('mimeshield_master_key_active', ''),
+            (string) $config->get('mimeshield_master_key_file'),
+            (string) $config->get('mimeshield_master_key_env'),
+            (string) $config->get('mimeshield_master_key_active'),
             $roots,
         );
     }

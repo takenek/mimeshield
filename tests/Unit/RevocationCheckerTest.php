@@ -550,6 +550,26 @@ final class RevocationCheckerTest extends TestCase
         }
     }
 
+    /**
+     * Audit MS-06: an IssuingDistributionPoint whose fullName uses a name form other than URI (e.g.
+     * directoryName) still restricts the scope of the CRL - it must never be treated as "no IDP".
+     */
+    public function testIdpWithDirectoryNameOnlyCannotProveGood(): void
+    {
+        $der = self::opensslCrl('idp_dirname', ['issuingDistributionPoint = critical, @idp'], null, null,
+            "[idp]\nfullname = dirName:idp_dn\n[idp_dn]\nCN = other partition (TEST ONLY)\n");
+        $this->expectException(ValidationException::class);
+        self::checker()->evaluate($der, TestPki::cert('alice'), TestPki::cert('int'), time());
+    }
+
+    public function testIdpWithMatchingUriAndAnotherNameFormIsInScope(): void
+    {
+        // RFC 5280 6.3.3 (b)(2)(i): one matching name is enough; other name forms are only ignored
+        $der = self::opensslCrl('idp_mixed', ['issuingDistributionPoint = critical, @idp'], null, null,
+            "[idp]\nfullname = URI:" . self::URL . ", dirName:idp_dn\n[idp_dn]\nCN = other partition (TEST ONLY)\n");
+        self::assertSame(RevocationResult::GOOD, self::checker()->evaluate($der, TestPki::cert('alice'), TestPki::cert('int'), time())->status);
+    }
+
     // ================================================================== evaluate(): large CRL
 
     public function testLargeCrlWith20000EntriesIsHandledQuickly(): void

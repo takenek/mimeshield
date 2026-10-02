@@ -1,0 +1,8 @@
+# Release archives (git archive / GitHub / Packagist dist) contain only what a Roundcube installation
+# needs: the test suite (incl. the public TEST-ONLY PKI) and developer tooling are excluded (INF-06).
+/tests export-ignore
+/.gitattributes export-ignore
+/.gitignore export-ignore
+/.php-cs-fixer.dist.php export-ignore
+/phpstan.neon.dist export-ignore
+/phpunit.xml.dist export-ignore

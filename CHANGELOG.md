@@ -5,6 +5,54 @@ semantic versioning.
 
 ## [Unreleased]
 
+### Security
+Remediation of the final security report of 2026-10-02 (IDs MS-xx / INF-xx of that report).
+- MS-01: with a missing or outdated plugin database schema, sending or saving a draft that is
+  expected to be signed/encrypted (user request, `mimeshield_*_default`, `mimeshield_options_lock`)
+  is refused instead of being delivered in plaintext.
+- MS-02: content unwrapped from a forwarded opaque-signed message (SignedData inside
+  `message/rfc822`) is no longer treated as the message root: ciphertext nested in it is not
+  decrypted and its signature is labelled "partial".
+- MS-03: EC (keyAgreement) recipients are accepted only if every CA on the path allows e-mail
+  protection (EKU), as OpenSSL already enforces for RSA recipients.
+- MS-04: recipient CRL checks find the issuer also among the configured intermediates and trust
+  anchors (certificates imported without their chain were silently not checked); new option
+  `mimeshield_revocation_unknown` (`warn` default / `block`); compose shows "revocation status could
+  not be checked".
+- MS-05: PKCS#12 import inspects KDF cost parameters inside encrypted layers (decrypted with the
+  entered password) before OpenSSL runs them; key imports are limited per session. The iteration
+  count of an encrypted layer must be a positive INTEGER within the limit before the inspection
+  derives its key (otherwise the file is refused).
+- MS-06: a CRL whose IssuingDistributionPoint uses only non-URI names is no longer treated as
+  unscoped.
+- MS-08: signatures whose digest algorithm cannot be determined are shown with a warning ("algorithm
+  could not be checked") instead of fully valid.
+- MS-09: the certificate of an own key record must match its fingerprint; own certificates are used
+  as encryption recipients only after the key blob authenticated with the master key, and only for
+  the user's identity addresses.
+- MS-10: new option `mimeshield_max_total_envelope_bytes` bounds the memory of separate Bcc
+  envelopes (checked before encryption).
+- MS-11: recipient status checks in compose are limited per session.
+- MS-12: `keygen` checks the directory chain (symlinks, owner, group/other-writable) in every mode,
+  including `--append`, and verifies the temporary file before replacing the key file.
+- MS-13: trust store and master key source ignore user preferences named like administrator options.
+- MS-14/MS-15: `diag` warns for Roundcube older than 1.7.4 and for an OpenSSL library below 3.5.9
+  (CVE-2026-35189, 3.5 branch) and shows the library version loaded by the SAPI.
+- INF-02: the public certificate download uses POST (request token no longer in URLs).
+- INF-03: falling back to the system temp directory is logged and reported by `diag`.
+- INF-05: the legacy PKCS#12 converter writes to the `openssl` process without blocking; the
+  deadline covers the whole conversion.
+- INF-06: `.gitattributes` excludes tests and developer tooling from release archives; README
+  documents web server deny rules.
+
+### Changed (behaviour)
+- **`mimeshield_use_system_ca` now defaults to `false`** (MS-07): the system TLS CA bundle is no
+  longer trusted for S/MIME unless enabled. Configure `mimeshield_ca_bundle` with your S/MIME roots
+  before upgrading, otherwise signatures may show "issuer not trusted" and encryption to such
+  recipients is blocked (policy `block`).
+- **Minimum Roundcube version raised to 1.7.4** (`extra.roundcube.min-version`, MS-14).
+- Wrong PKCS#12 passwords may now be reported before OpenSSL reads the file (same message).
+
 ### Changed
 - Settings > S/MIME certificates: the identity assignment "Save" is a primary button inside the
   identity section; while the selection differs from the saved one a warning notice ("Changes have

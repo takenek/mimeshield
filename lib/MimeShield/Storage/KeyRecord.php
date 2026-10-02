@@ -42,9 +42,20 @@ final class KeyRecord
         return (string) $this->row['fingerprint'];
     }
 
+    /**
+     * Certificate of the record. It must match the record fingerprint, which is bound to the
+     * encrypted private key (AEAD context): a certificate swapped in the database is rejected (MS-09).
+     */
     public function certificate(): Certificate
     {
-        return $this->cert ??= Certificate::fromString((string) $this->row['cert_pem']);
+        if ($this->cert === null) {
+            $c = Certificate::fromString((string) $this->row['cert_pem']);
+            if (!hash_equals($this->fingerprint(), $c->fingerprint)) {
+                throw new ValidationException('keyinvalid', 'certificate does not match the key record');
+            }
+            $this->cert = $c;
+        }
+        return $this->cert;
     }
 
     /**

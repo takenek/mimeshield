@@ -418,13 +418,20 @@ final class SignatureVerifierTest extends TestCase
         self::assertSame(VerificationResult::LEVEL_ERROR, $r->level());
     }
 
-    public function testUninspectableStructureMakesNoAlgorithmDecision(): void
+    /**
+     * Audit MS-08: when the local parser cannot inspect the structure, the digest policy cannot be
+     * applied - the signature is not rejected, but never shown as fully OK either.
+     */
+    public function testUninspectableStructureIsNeverFullyOk(): void
     {
         $check = new SignatureCheck(true, SignatureCheck::FAIL_NONE, [TestPki::read('alice.crt')], [TestPki::read('int.crt')], null, null, false);
         $r = $this->verifier()->evaluate($check, ['alice@example.test'], []);
         self::assertFalse($r->forbiddenDigest);
-        self::assertFalse($r->weakDigest);
-        self::assertSame(VerificationResult::LEVEL_OK, $r->level());
+        self::assertTrue($r->weakDigest);
+        self::assertTrue($r->cryptoValid());
+        self::assertSame(VerificationResult::LEVEL_WARNING, $r->level());
+        self::assertLine($r, 'sig_digestunverified', VerificationResult::LEVEL_WARNING, []);
+        self::assertNoLine($r, 'sig_weakdigest');
     }
 
     public function testModifiedContentIsInvalid(): void

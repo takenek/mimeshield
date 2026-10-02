@@ -68,11 +68,15 @@
         });
         $(document).on('click', 'button.mimeshield-export', function (e) {
             e.preventDefault();
-            var url = rcmail.url('plugin.mimeshield-export', {
-                _type: String($(this).data('type')), _id: String($(this).data('id')), _token: rcmail.env.request_token
+            // POST form: the request token stays out of URLs (server logs, browser history); a download
+            // does not fire 'load', so no busy lock is set
+            var form = $('<form method="post" style="display:none">').attr('action', rcmail.url('plugin.mimeshield-export'));
+            $.each({ _type: String($(this).data('type')), _id: String($(this).data('id')), _token: rcmail.env.request_token }, function (k, v) {
+                form.append($('<input type="hidden">').attr('name', k).val(v));
             });
-            // a download does not fire 'load': navigate without the busy lock of location_href(.., true)
-            rcmail.location_href(url, window, false);
+            form.appendTo(document.body);
+            form.get(0).submit();
+            form.remove();
         });
         $(document).on('click', 'button.mimeshield-bind', function (e) {
             e.preventDefault();
@@ -338,7 +342,7 @@
             var t = Date.now();
             this.pending = null;
             $.each((data && data.recipients) || {}, function (addr, r) {
-                compose.cache[String(addr)] = { status: String(r.status), until: r.until ? String(r.until) : '', time: t };
+                compose.cache[String(addr)] = { status: String(r.status), until: r.until ? String(r.until) : '', revunknown: r.revocation === 'unknown', time: t };
             });
             // addresses as typed (e.g. IDN in Unicode) -> normalised address used by the server
             $.each((data && data.aliases) || {}, function (typed, norm) {
@@ -359,9 +363,11 @@
             $.each(all, function (i, a) {
                 var c = compose.cache[a] || { status: 'checking' };
                 var li = $('<li>');
-                var cls = c.status === 'ok' ? 'ok' : (c.status === 'checking' ? '' : (c.status === 'untrusted' ? 'warning' : 'error'));
-                var mark = c.status === 'ok' ? '✔ ' : (c.status === 'checking' ? '… ' : (c.status === 'untrusted' ? '⚠ ' : '✖ '));
-                li.addClass(cls).text(mark + a + ' – ' + label('recipient_' + c.status));
+                // certificate usable, but its revocation status could not be determined (CRL checking on)
+                var warn = c.status === 'untrusted' || (c.status === 'ok' && c.revunknown);
+                var cls = warn ? 'warning' : (c.status === 'ok' ? 'ok' : (c.status === 'checking' ? '' : 'error'));
+                var mark = warn ? '⚠ ' : (c.status === 'ok' ? '✔ ' : (c.status === 'checking' ? '… ' : '✖ '));
+                li.addClass(cls).text(mark + a + ' – ' + label(c.status === 'ok' && c.revunknown ? 'recipient_revocationunknown' : 'recipient_' + c.status));
                 ul.append(li);
             });
             box.append($('<div class="mimeshield-label">').text(label('recipientsstatus'))).append(ul);

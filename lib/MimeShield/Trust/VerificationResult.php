@@ -157,7 +157,9 @@ final class VerificationResult
         }
 
         if ($this->weakDigest) {
-            $out[] = ['sig_weakdigest', ['digest' => strtoupper($this->check->digest())], self::LEVEL_WARNING];
+            $out[] = $this->check->info === null
+                ? ['sig_digestunverified', [], self::LEVEL_WARNING]
+                : ['sig_weakdigest', ['digest' => strtoupper($this->check->digest())], self::LEVEL_WARNING];
         }
         if ($this->smallKey && $signer !== null) {
             $out[] = ['cert_smallkey', ['bits' => (string) $signer->keyBits], self::LEVEL_WARNING];

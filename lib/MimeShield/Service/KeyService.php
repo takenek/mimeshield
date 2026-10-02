@@ -15,6 +15,7 @@ use MimeShield\Cert\ImportedKey;
 use MimeShield\Cert\KeyImporter;
 use MimeShield\Cert\LegacyPkcs12Converter;
 use MimeShield\Crypto\CmsInspector;
+use MimeShield\Exception\MimeShieldException;
 use MimeShield\Exception\ValidationException;
 use MimeShield\KeyStore\KeyVault;
 use MimeShield\Log;
@@ -186,8 +187,15 @@ final class KeyService
         return $record;
     }
 
+    /** @var array<int, bool> key id => blob authenticated with the master key (per request) */
+    private array $authentic = [];
+
     /**
      * Own certificate usable as encryption recipient for $email (encrypt-to-self / own addresses).
+     *
+     * Only records whose private key blob authenticates under the master key (AEAD over user id +
+     * fingerprint) are used: a row inserted or modified directly in the database cannot redirect
+     * encryption to a foreign certificate (audit MS-09).
      */
     public function encryptionCertFor(string $email, ?int $identityId = null): ?Certificate
     {
@@ -204,11 +212,30 @@ final class KeyService
             } catch (ValidationException) {
                 continue;
             }
-            if ($c->canEncrypt() && $c->isTimeValid() && AddressMatcher::matchesAny($email, $c->emails($this->subjectEmailFallback))) {
+            if ($c->canEncrypt() && $c->isTimeValid() && AddressMatcher::matchesAny($email, $c->emails($this->subjectEmailFallback))
+                && $this->isAuthentic($r)) {
                 return $c;
             }
         }
         return null;
+    }
+
+    /**
+     * The record's key blob decrypts and authenticates for its user and fingerprint.
+     */
+    private function isAuthentic(KeyRecord $r): bool
+    {
+        if (!isset($this->authentic[$r->id()])) {
+            try {
+                $pem = $this->vault->decrypt($r->blob(), $r->blobContext());
+                KeyVault::wipe($pem);
+                $this->authentic[$r->id()] = true;
+            } catch (MimeShieldException $e) {
+                Log::error('keystore', 'own key record failed authentication - not used for encryption', ['key_id' => $r->id(), 'reason' => $e->getUserLabel()]);
+                $this->authentic[$r->id()] = false;
+            }
+        }
+        return $this->authentic[$r->id()];
     }
 
     /**

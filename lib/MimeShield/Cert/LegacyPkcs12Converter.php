@@ -50,20 +50,39 @@ final class LegacyPkcs12Converter
         }
         $out = '';
         $err = '';
+        // input is written non-blocking inside the same select loop as the output: the deadline covers
+        // the whole operation, a child that stops reading can never block the PHP worker (INF-05)
+        $pending = [3 => $password . "\n", 0 => $pkcs12];
         try {
-            fwrite($pipes[3], $password . "\n");
-            fclose($pipes[3]);
-            fwrite($pipes[0], $pkcs12);
-            fclose($pipes[0]);
-            stream_set_blocking($pipes[1], false);
-            stream_set_blocking($pipes[2], false);
+            foreach ($pipes as $p) {
+                stream_set_blocking($p, false);
+            }
             $deadline = microtime(true) + $this->timeout;
             while (true) {
-                $r = [$pipes[1], $pipes[2]];
-                $w = null;
+                $r = array_values(array_filter([$pipes[1], $pipes[2]], static fn ($p) => is_resource($p) && !feof($p)));
+                $w = [];
+                foreach (array_keys($pending) as $i) {
+                    $w[] = $pipes[$i];
+                }
+                if ($r === [] && $w === []) {
+                    break;
+                }
                 $e = null;
                 if (@stream_select($r, $w, $e, 1) === false) {
                     break;
+                }
+                foreach ($w as $s) {
+                    $i = array_search($s, $pipes, true);
+                    $n = @fwrite($s, $pending[$i]);
+                    if ($n === false) {
+                        $pending[$i] = '';
+                    } elseif ($n > 0) {
+                        $pending[$i] = (string) substr($pending[$i], $n);
+                    }
+                    if ($pending[$i] === '') {
+                        unset($pending[$i]);
+                        fclose($s);
+                    }
                 }
                 foreach ($r as $s) {
                     $chunk = fread($s, 65536);
@@ -73,10 +92,7 @@ final class LegacyPkcs12Converter
                         $err .= (string) $chunk;
                     }
                 }
-                if (feof($pipes[1]) && feof($pipes[2])) {
-                    break;
-                }
-                if (microtime(true) > $deadline || strlen($out) > 1048576) {
+                if (microtime(true) > $deadline || strlen($out) > 1048576 || strlen($err) > 65536) {
                     proc_terminate($proc);
                     throw new ValidationException('p12legacy', 'openssl timeout or oversized output');
                 }

@@ -25,6 +25,9 @@ use MimeShield\Trust\TrustStore;
  */
 final class Tool
 {
+    /** oldest Roundcube release without published security fixes the plugin relies on (MS-14) */
+    private const MIN_SECURE_ROUNDCUBE = '1.7.4';
+
     private int $failures = 0;
 
     /** @var resource */
@@ -73,9 +76,17 @@ final class Tool
         $cfg = new Config($this->rc->config);
 
         $this->section('Versions');
-        $this->ok('Roundcube', defined('RCMAIL_VERSION') ? RCMAIL_VERSION : 'unknown');
+        // decrypted mail is rendered by Roundcube core (HTML sanitiser): its security releases matter (MS-14)
+        $rcVersion = defined('RCMAIL_VERSION') ? (string) RCMAIL_VERSION : 'unknown';
+        $rcRelease = preg_match('/^\d+\.\d+\.\d+$/D', $rcVersion) === 1;
+        $rcCurrent = $rcRelease && version_compare($rcVersion, self::MIN_SECURE_ROUNDCUBE, '>=');
+        $this->check($rcCurrent, 'Roundcube', $rcVersion . ($rcCurrent ? '' : ($rcRelease
+            ? ' - older than ' . self::MIN_SECURE_ROUNDCUBE . ' (security releases): update Roundcube'
+            : ' - not a release version: make sure it contains the fixes of ' . self::MIN_SECURE_ROUNDCUBE)), true);
         $this->ok('PHP', PHP_VERSION);
-        $this->ok('OpenSSL (PHP)', OPENSSL_VERSION_TEXT);
+        $this->ok('OpenSSL (PHP build headers)', OPENSSL_VERSION_TEXT);
+        [$libOk, $libText] = self::opensslLibraryStatus();
+        $this->check($libOk, 'OpenSSL library (this PHP SAPI)', $libText . ' - check the PHP-FPM SAPI too (php-fpm -i)', true);
 
         $this->section('PHP extensions');
         foreach (['openssl', 'mbstring'] as $ext) {
@@ -94,6 +105,8 @@ final class Tool
         $this->ok('legacy PKCS#12 CLI conversion', $cfg->bool('mimeshield_pkcs12_legacy_cli') ? 'enabled (' . $cfg->get('mimeshield_openssl_bin') . ')' : 'disabled');
 
         $this->section('Temporary directory');
+        $this->check(!$cfg->tempDirIsFallback(), 'configured temp directory', $cfg->tempDirIsFallback()
+            ? 'NOT USABLE - falling back to ' . sys_get_temp_dir() . ' (set mimeshield_temp_dir, ideally on tmpfs)' : 'usable', true);
         try {
             $dir = SecureTemp::prepareDir($cfg->tempBaseDir());
             $t = new SecureTemp($cfg->tempBaseDir());
@@ -106,16 +119,18 @@ final class Tool
         }
 
         $this->section('Trust store');
-        $store = TrustStore::fromConfig($this->rc->config);
+        $store = TrustStore::fromConfig($cfg);
         $files = $store->caInfo();
         $this->check($files !== [], 'CA bundle files', $files !== [] ? implode(', ', $files) : 'NONE - signatures cannot be verified as trusted');
         $this->ok('trust anchors loaded', (string) count($store->anchors()));
+        $this->check(!$cfg->bool('mimeshield_use_system_ca'), 'system CA bundle as S/MIME anchors',
+            $cfg->bool('mimeshield_use_system_ca') ? 'ENABLED - TLS CAs are trusted for e-mail; configure mimeshield_ca_bundle with S/MIME CAs instead' : 'not used', true);
         $this->ok('configured intermediates', (string) count($store->intermediates()));
         $this->ok('revocation checking', $cfg->revocationMode());
 
         $this->section('Master key');
         try {
-            $mk = MasterKeyProvider::fromConfig($this->rc->config);
+            $mk = MasterKeyProvider::fromConfig($cfg);
             $kid = $mk->activeKid();
             $this->ok('source', $mk->source());
             $this->ok('key ids', implode(', ', $mk->kids()) . ' (active: ' . $kid . ')');
@@ -164,7 +179,8 @@ final class Tool
             $this->out("--create-parent cannot be combined with --append (the key file must already exist)\n");
             return 1;
         }
-        if (!$append && !$this->prepareParentDir(dirname($file), $createParent)) {
+        // the directory chain is verified in every mode, also for --append (audit MS-12)
+        if (!$this->prepareParentDir(dirname($file), $createParent)) {
             return 1;
         }
         $kid = $kid !== '' ? $kid : 'k' . gmdate('Ymd');
@@ -194,6 +210,7 @@ final class Tool
             $fh = @fopen($tmp, 'x');
             umask($old);
             $ok = $fh !== false && fwrite($fh, rtrim($existing, "\n") . "\n" . $line . "\n") !== false && fflush($fh);
+            $written = $fh !== false ? fstat($fh) : false;
             if ($fh !== false) {
                 fclose($fh);
             }
@@ -201,7 +218,16 @@ final class Tool
                 @chown($tmp, (int) fileowner($file));
                 @chgrp($tmp, (int) filegroup($file));
                 @chmod($tmp, $perms);
-                $ok = @rename($tmp, $file);
+                // the file renamed over the key file must still be the one written above
+                clearstatcache(true, $tmp);
+                $now = @lstat($tmp);
+                $ok = is_array($written) && is_array($now) && ($now['mode'] & 0o170000) === 0o100000
+                    && $now['ino'] === $written['ino'] && $now['dev'] === $written['dev'];
+                if (!$ok) {
+                    $this->out("Refusing to continue: {$tmp} was replaced while it was being written\n");
+                } else {
+                    $ok = @rename($tmp, $file);
+                }
             }
             if (!$ok) {
                 @unlink($tmp);
@@ -234,13 +260,13 @@ final class Tool
     }
 
     /**
-     * The directory for a new key file must exist, be a real directory and be writable. Missing
+     * The directory of the key file must exist, be a real directory and be writable. Missing
      * directories are only created on the administrator's explicit request (--create-parent): one
      * level at a time with mkdir() (which fails if the final name exists, also as a symbolic link,
-     * but does follow symbolic links in the ancestor path), mode 0700 for the current user. With
-     * --create-parent every existing component of the path, including an already existing parent
-     * directory, must not be a symbolic link, owned by a user other than root / the current user,
-     * or writable by other users without the sticky bit.
+     * but does follow symbolic links in the ancestor path), mode 0700 for the current user. In every
+     * mode (new file, --append, --create-parent) every existing component of the path, including the
+     * parent directory itself, must not be a symbolic link, owned by a user other than root / the
+     * current user, or writable by other users without the sticky bit (audit MS-12).
      */
     private function prepareParentDir(string $dir, bool $create): bool
     {
@@ -258,13 +284,8 @@ final class Tool
                     . "Run keygen as a user that may write there (e.g. root) and then adjust ownership of the key file.\n");
                 return false;
             }
-            if (!$create) {
-                return true;
-            }
-            // --create-parent: the existing parent goes through the same path-chain check below
-        }
-
-        if (!$create) {
+            // the existing parent goes through the same path-chain check below (in every mode)
+        } elseif (!$create) {
             $this->out("Parent directory {$dir} does not exist.\n"
                 . "keygen does not create directories on its own. Create it deliberately with restrictive permissions,\n"
                 . "readable only by the group the PHP process runs as, e.g.:\n"
@@ -274,11 +295,11 @@ final class Tool
             return false;
         }
 
-        // the path is created component by component: no "." / ".." / empty segments
-        $parts = explode('/', substr($dir, 1));
+        // the path is checked (and created) component by component: no "." / ".." / empty segments
+        $parts = $dir === '/' ? [] : explode('/', substr($dir, 1));
         foreach ($parts as $p) {
             if ($p === '' || $p === '.' || $p === '..') {
-                $this->out("--create-parent needs a normalised absolute path (no '.', '..' or '//'): {$dir}\n");
+                $this->out("keygen needs a normalised absolute path (no '.', '..' or '//'): {$dir}\n");
                 return false;
             }
         }
@@ -301,19 +322,19 @@ final class Tool
                 continue;
             }
             if (($st['mode'] & 0o170000) === 0o120000) {
-                $this->out("Refusing to create {$dir}: {$path} is a symbolic link (use the real path)\n");
+                $this->out("Refusing to use {$dir}: {$path} is a symbolic link (use the real path)\n");
                 return false;
             }
             if (($st['mode'] & 0o170000) !== 0o040000) {
-                $this->out("Refusing to create {$dir}: {$path} is not a directory\n");
+                $this->out("Refusing to use {$dir}: {$path} is not a directory\n");
                 return false;
             }
             if ($st['uid'] !== 0 && $st['uid'] !== $euid) {
-                $this->out("Refusing to create {$dir}: {$path} is owned by uid {$st['uid']} (only root or the current user are trusted)\n");
+                $this->out("Refusing to use {$dir}: {$path} is owned by uid {$st['uid']} (only root or the current user are trusted)\n");
                 return false;
             }
             if (($st['mode'] & 0o022) !== 0 && ($st['mode'] & 0o1000) === 0) {
-                $this->out("Refusing to create {$dir}: {$path} is writable by other users (and not sticky)\n");
+                $this->out("Refusing to use {$dir}: {$path} is writable by other users (and not sticky)\n");
                 return false;
             }
             $base = $path;
@@ -355,8 +376,9 @@ final class Tool
     private function rotate(bool $dryRun): int
     {
         $db = new Database($this->rc->get_dbh());
-        $vault = new KeyVault(MasterKeyProvider::fromConfig($this->rc->config));
-        $active = MasterKeyProvider::fromConfig($this->rc->config)->activeKid();
+        $mk = MasterKeyProvider::fromConfig(new Config($this->rc->config));
+        $vault = new KeyVault($mk);
+        $active = $mk->activeKid();
         $rows = $db->fetchAll('SELECT `key_id`, `user_id`, `fingerprint`, `key_blob`, `key_kid` FROM ' . $db->table('mimeshield_keys'));
         $done = 0;
         $skipped = 0;
@@ -390,7 +412,7 @@ final class Tool
     private function checkKeystore(): int
     {
         $db = new Database($this->rc->get_dbh());
-        $vault = new KeyVault(MasterKeyProvider::fromConfig($this->rc->config));
+        $vault = new KeyVault(MasterKeyProvider::fromConfig(new Config($this->rc->config)));
         $rows = $db->fetchAll('SELECT `key_id`, `user_id`, `fingerprint`, `key_blob`, `cert_pem` FROM ' . $db->table('mimeshield_keys'));
         $bad = 0;
         foreach ($rows as $r) {
@@ -408,6 +430,31 @@ final class Tool
         }
         $this->out(sprintf("%d keys checked, %d failed\n", count($rows), $bad));
         return $bad === 0 ? 0 : 2;
+    }
+
+    /**
+     * Version of the OpenSSL library actually loaded by this PHP SAPI (not the build headers) and
+     * whether it is below a release with a known fix relevant to certificate parsing.
+     *
+     * @return array{0: bool, 1: string}
+     */
+    private static function opensslLibraryStatus(): array
+    {
+        ob_start();
+        try {
+            (new \ReflectionExtension('openssl'))->info();
+        } finally {
+            $info = (string) ob_get_clean();
+        }
+        if (!preg_match('/OpenSSL Library Version\s*(?:=>|<\/td><td[^>]*>)\s*([^\n<]+)/', $info, $m)) {
+            return [false, 'unknown'];
+        }
+        $text = trim($m[1]);
+        // CVE-2026-35189 (CRL distribution point handling): fixed in 3.5.9 for the 3.5 branch
+        if (preg_match('/OpenSSL 3\.5\.(\d+)/', $text, $v) && (int) $v[1] < 9) {
+            return [false, $text . ' - below 3.5.9 (CVE-2026-35189) unless the distribution backported the fix'];
+        }
+        return [true, $text];
     }
 
     private function section(string $title): void

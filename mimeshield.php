@@ -62,6 +62,7 @@ class mimeshield extends rcube_plugin
         $this->add_texts('localization/', [
             'sign', 'encrypt', 'status', 'nocertificate', 'certvalid', 'recipientsstatus', 'recipient_ok',
             'recipient_missing', 'recipient_expired', 'recipient_invalid', 'recipient_untrusted', 'recipient_checking',
+            'recipient_revocationunknown',
             'missingtitle', 'missingintro', 'sendunencrypted', 'cancel', 'confirmdeletekey', 'confirmdeletecert',
             'confirmreplace', 'saving', 'loading', 'bccwarning', 'forceencryptwarning', 'sendwithoutencrypt',
             'signdisabledidentity', 'importkey', 'importcert', 'certsaved', 'replacetitle', 'replacebutton',
@@ -70,6 +71,11 @@ class mimeshield extends rcube_plugin
 
         $this->schemaOk = $this->checkSchema();
         if (!$this->schemaOk) {
+            if ($this->rc->task === 'mail' && (string) $this->rc->action === 'send') {
+                // fail closed without the plugin tables: protection required by the administrator (or
+                // requested by the user) must never silently degrade to a plaintext send (audit MS-01)
+                $this->add_hook('message_ready', [$this, 'message_ready_unavailable']);
+            }
             if ($this->rc->task === 'settings') {
                 $this->add_hook('settings_actions', [$this, 'settings_actions']);
                 $this->register_action('plugin.mimeshield', [$this, 'action_schema_missing']);
@@ -357,6 +363,29 @@ class mimeshield extends rcube_plugin
             $this->abortSend(new \MimeShield\Exception\CryptoException('internalerror', $e->getMessage()), $draft);
         }
 
+        return $p;
+    }
+
+    /**
+     * message_ready while the plugin schema is missing or outdated: S/MIME cannot be applied, so any
+     * send or draft save that is expected to be signed or encrypted is refused.
+     */
+    public function message_ready_unavailable(array $p): array
+    {
+        $cfg = $this->config();   // configuration only, no plugin tables needed
+        $required = (bool) rcube_utils::get_input_value('_mimeshield_sign', rcube_utils::INPUT_POST)
+            || (bool) rcube_utils::get_input_value('_mimeshield_encrypt', rcube_utils::INPUT_POST);
+        foreach (['sign' => 'mimeshield_enable_signing', 'encrypt' => 'mimeshield_enable_encryption'] as $opt => $enabled) {
+            // locked options: administrator value; otherwise the default the compose form would show
+            if ($cfg->bool($enabled) && $cfg->optionDefault($opt)) {
+                $required = true;
+            }
+        }
+        if ($required) {
+            $draft = !empty($_POST['_draft']) && empty($_GET['_saveonly']);
+            Log::error('send', 'S/MIME protection expected but the plugin database schema is missing or outdated - blocking', ['draft' => $draft]);
+            $this->abortSend(new \MimeShield\Exception\ConfigException('protectionunavailable', 'database schema missing or outdated'), $draft);
+        }
         return $p;
     }
 

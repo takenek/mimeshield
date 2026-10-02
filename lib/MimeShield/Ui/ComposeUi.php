@@ -12,6 +12,7 @@ namespace MimeShield\Ui;
 
 use MimeShield\Exception\MimeShieldException;
 use MimeShield\Log;
+use MimeShield\RateLimiter;
 use MimeShield\Service\CertificateService;
 use MimeShield\Service\OutgoingService;
 use MimeShield\Trust\AddressMatcher;
@@ -22,6 +23,9 @@ use MimeShield\Trust\AddressMatcher;
  */
 final class ComposeUi
 {
+    /** recipient status requests per session and minute */
+    private const RECIPIENTS_PER_MINUTE = 30;
+
     /** @var array{restore: ?array{sign: bool, encrypt: bool}, force: bool} */
     private static array $state = ['restore' => null, 'force' => false];
 
@@ -182,6 +186,13 @@ final class ComposeUi
     public function recipientsAction(): void
     {
         $rc = $this->plugin->rcmail();
+        // every address costs a chain validation (and with CRL checking possibly a download): bound
+        // the frequency per session (audit MS-11); the send itself still re-checks every recipient
+        if (!RateLimiter::allow($_SESSION, 'mimeshield_rl_recipients', self::RECIPIENTS_PER_MINUTE, 60)) {
+            Log::info('compose', 'recipient status requests throttled');
+            $rc->output->command('plugin.mimeshield_recipients', ['recipients' => [], 'aliases' => [], 'throttled' => true]);
+            $rc->output->send();
+        }
         $input = self::postedAddresses();
         $max = $this->plugin->config()->int('mimeshield_max_recipients', 1, 1000);
         $emails = [];
@@ -209,6 +220,9 @@ final class ComposeUi
                 }
                 if ($r['status'] === CertificateService::R_INVALID && $r['detail'] !== '') {
                     $entry['detail'] = $r['detail'];
+                }
+                if ($r['detail'] === CertificateService::D_REVOCATION_UNKNOWN) {
+                    $entry['revocation'] = 'unknown';
                 }
                 $result[$email] = $entry;
             }

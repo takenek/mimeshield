@@ -68,7 +68,9 @@ final class Services
 
     public function masterKeys(): MasterKeyProvider
     {
-        return $this->master ??= MasterKeyProvider::fromConfig($this->rc->config);
+        // built from the protected configuration: a user preference named like an administrator
+        // option can never change the master key source or the trust anchors (audit MS-13)
+        return $this->master ??= MasterKeyProvider::fromConfig($this->config);
     }
 
     public function vault(): KeyVault
@@ -83,7 +85,7 @@ final class Services
 
     public function trustStore(): TrustStore
     {
-        return $this->trust ??= TrustStore::fromConfig($this->rc->config);
+        return $this->trust ??= TrustStore::fromConfig($this->config);
     }
 
     public function chains(): ChainValidator
@@ -160,6 +162,12 @@ final class Services
             $this->config->int('mimeshield_max_certs_per_user', 1, 100000),
             $this->config->encryptUntrusted(),
             $this->config->bool('mimeshield_subject_email_fallback'),
+            $this->trustStore(),
+            $this->config->revocationUnknownPolicy(),
+            fn () => array_values(array_filter(array_map(
+                static fn ($i) => (string) ($i['email'] ?? ''),
+                (array) $this->rc->user->list_identities()
+            ))),
         );
     }
 
@@ -175,6 +183,7 @@ final class Services
             $this->config->bccMode(),
             $this->config->int('mimeshield_max_message_size', 65536, PHP_INT_MAX),
             $this->config->int('mimeshield_max_recipients', 1, 1000),
+            $this->config->int('mimeshield_max_total_envelope_bytes', 1048576, PHP_INT_MAX),
         );
     }
 

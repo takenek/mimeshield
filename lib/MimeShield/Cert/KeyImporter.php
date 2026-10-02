@@ -115,8 +115,9 @@ final class KeyImporter
      */
     private function readPkcs12(#[\SensitiveParameter] string $data, #[\SensitiveParameter] string $password): array
     {
-        // reject absurd KDF cost parameters before OpenSSL runs them (CPU DoS)
-        KdfInspector::check($data, 'p12invalid');
+        // reject absurd KDF cost parameters before OpenSSL runs them (CPU DoS), including those
+        // hidden inside encrypted SafeContents (decrypted with the password for inspection, MS-05)
+        KdfInspector::check($data, 'p12invalid', $password);
         $certs = [];
         [$ok, $errors] = OpenSsl::run(static function () use ($data, &$certs, $password) {
             return openssl_pkcs12_read($data, $certs, $password);

@@ -30,9 +30,9 @@ Documentation: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
 
 | Component | Requirement |
 |---|---|
-| Roundcube | 1.7.x (tested: see [Compatibility](#9-compatibility)), Elastic skin |
+| Roundcube | 1.7.4 or later 1.7.x security release (`min-version` 1.7.4: decrypted mail is rendered by the core HTML sanitiser, so its security fixes matter; tested: see [Compatibility](#9-compatibility)), Elastic skin |
 | PHP | 8.1 – 8.5 |
-| PHP extensions | `openssl` (with CMS functions, OpenSSL ≥ 3.0), `mbstring`; recommended: `intl` (internationalised domain names), `sodium` (XChaCha20-Poly1305 key store; otherwise AES-256-GCM), `curl` (only for CRL checks) |
+| PHP extensions | `openssl` (with CMS functions, OpenSSL ≥ 3.0; keep the library loaded by PHP-FPM patched, e.g. ≥ 3.5.9 on the 3.5 branch for CVE-2026-35189 or a distribution backport — `diag` shows the library version), `mbstring`; recommended: `intl` (internationalised domain names), `sodium` (XChaCha20-Poly1305 key store; otherwise AES-256-GCM), `curl` (only for CRL checks) |
 | Database | whatever Roundcube 1.7 supports: MySQL/MariaDB, PostgreSQL, SQLite |
 | OpenSSL CLI | optional, only for converting legacy RC2 PKCS#12 files (`mimeshield_pkcs12_legacy_cli`) |
 
@@ -117,8 +117,14 @@ Minimum settings:
 $config['mimeshield_master_key_file'] = '/etc/roundcube/mimeshield.key';
 // CA certificates you trust for S/MIME (PEM bundle). Distribution bundles contain TLS roots only.
 $config['mimeshield_ca_bundle'] = ['/etc/roundcube/smime-ca-bundle.pem'];
-$config['mimeshield_use_system_ca'] = true;
+// default false: the system (TLS) CA bundle is not trusted for e-mail
+$config['mimeshield_use_system_ca'] = false;
 ```
+
+Build `smime-ca-bundle.pem` from the S/MIME roots your organisation approves (e.g. roots carrying
+the "email" trust bit of a root programme, or the roots of the CAs your correspondents use).
+Enabling `mimeshield_use_system_ca` trusts every public TLS CA for signatures and recipients;
+`diag` warns while it is enabled.
 
 For the Actalis "S/MIME Mailbox Validated" certificates, the bundle should contain the root
 "Actalis Authentication Root CA" (current hierarchy, issuing CA "Actalis Client Authentication
@@ -145,6 +151,16 @@ for the same message.
   recommended (e.g. `$config['mimeshield_temp_dir'] = '/dev/shm/roundcube';`, directory owned by
   the PHP user, mode 0700).
 * Logs: `<log_dir>/mimeshield` (or syslog, depending on `log_driver`).
+* Web server: only `plugins/mimeshield/{js,skins}` need to be reachable over HTTP. Deny HTTP access
+  to `plugins/mimeshield/{bin,lib,SQL,tests,docs,localization}` and the configuration, e.g. for
+  nginx `location ~ ^/plugins/mimeshield/(bin|lib|SQL|tests|docs|localization|config\.inc\.php) { deny all; }`
+  (with Roundcube's `public_html` document root, plugin files are served only through
+  `static.php`, which delivers static asset types; the rule matters for installations whose
+  document root is the Roundcube directory itself). Release archives built
+  with `git archive` leave out `tests/` and developer tooling (`.gitattributes`).
+* `keygen` refuses a key file directory (or any parent) that is a symbolic link, owned by a user
+  other than root / the current user, or writable by group/others without the sticky bit — in
+  every mode, including `--append`.
 
 ### 2.7 Test the installation
 
@@ -152,9 +168,12 @@ for the same message.
 sudo -u www-data plugins/mimeshield/bin/mimeshield.sh diag
 ```
 
-The command checks Roundcube/PHP/OpenSSL versions, extensions, CMS functions, the temp directory
-(0600 files), the CA bundle, the master key (AEAD self-test, never printed), the database schema
-and the configuration. Exit code 0 = OK (warnings such as a missing `intl` do not fail). If the
+The command checks Roundcube/PHP/OpenSSL versions (warning for Roundcube older than 1.7.4 and for
+an OpenSSL library without the CVE-2026-35189 fix; the CLI SAPI may load a different OpenSSL than
+PHP-FPM — compare with `php-fpm -i`), extensions, CMS functions, the temp directory (0600 files;
+warning when the configured directory is not usable), the CA bundle (warning while the system TLS
+bundle is trusted), the master key (AEAD self-test, never printed), the database schema and the
+configuration. Exit code 0 = OK (warnings such as a missing `intl` do not fail). If the
 plugin directory is a symlink, set `ROUNDCUBE_INSTALL_PATH=/var/www/roundcube`.
 
 ## 3. Using it
@@ -230,6 +249,12 @@ Replace the plugin files, then run `bin/updatedb.sh --package=mimeshield
 --dir=plugins/mimeshield/SQL` and `plugins/mimeshield/bin/mimeshield.sh diag`. Read
 `CHANGELOG.md`.
 
+**Always run the schema update.** While the plugin tables are missing or outdated, S/MIME is not
+available: sending (and saving drafts) is **refused** whenever protection is expected — the user
+requested it, or `mimeshield_sign_default` / `mimeshield_encrypt_default` / `mimeshield_options_lock`
+require it — with "S/MIME protection is required for this message, but MIME Shield is not
+available". Messages without expected protection are sent normally.
+
 ## 6. Rollback / uninstall
 
 1. Remove `'mimeshield'` from `$config['plugins']` — Roundcube works normally again; S/MIME mail is
@@ -265,6 +290,9 @@ Replace the plugin files, then run `bin/updatedb.sh --package=mimeshield
 |---|---|
 | "key store is not configured" | master key file missing, unreadable, world-readable or inside the web root – run `diag` |
 | "database schema missing" | run `bin/initdb.sh --dir=plugins/mimeshield/SQL` |
+| "S/MIME protection is required ... MIME Shield is not available" on send | schema missing or outdated after an upgrade: run `bin/updatedb.sh --package=mimeshield --dir=plugins/mimeshield/SQL` |
+| Recipient shown "revocation status could not be checked" | CRL checking is on and no current CRL could be used for that certificate — check egress/proxy, `mimeshield_revocation_allow_hosts`; with `mimeshield_revocation_unknown = 'block'` such recipients are refused |
+| "Too many attempts" | per-session limit of key imports (10 / 5 min) or recipient checks (30 / min); wait and retry |
 | Valid signatures shown as "issuer not trusted" | add the CA root to `mimeshield_ca_bundle` |
 | "chain incomplete" for Outlook on the web mail | OWA does not include intermediates by default – add them to `mimeshield_intermediates` |
 | PFX import "outdated algorithm (RC2)" | see 3.1 |
@@ -281,7 +309,7 @@ controls the web server process can use the keys (inherent to server-side S/MIME
 
 Tested versions and the exact test results are listed in [docs/TESTING.md](docs/TESTING.md):
 Roundcube 1.7.0, 1.7.1, 1.7.2, 1.7.3, 1.7.4 (git tags; 1.7.4 also as the official signed release
-tarball), PHP 8.1, 8.2, 8.3, 8.4, 8.5, OpenSSL 3.5, MariaDB 11.8, PostgreSQL 17, SQLite 3, Chromium
+tarball; since the security remediation of 2026-10-02 the supported minimum is 1.7.4), PHP 8.1, 8.2, 8.3, 8.4, 8.5, OpenSSL 3.5, MariaDB 11.8, PostgreSQL 17, SQLite 3, Chromium
 154 for the browser tests. Interoperability status (NSS = Thunderbird's crypto library, gpgsm,
 OpenSSL) is documented in [docs/INTEROPERABILITY.md](docs/INTEROPERABILITY.md) — Microsoft Outlook
 and the Thunderbird application itself were **not** available in the test environment; a manual
@@ -297,6 +325,8 @@ checklist is provided.
   directory in plaintext (core `filesystem_attachments` behaviour).
 * With `bcc_mode = separate`, if the delivery of the main message fails after Bcc copies were
   accepted, a retry can send duplicate Bcc copies.
+* Rate limits for key import and recipient checks are per session; limits per user/IP belong to
+  the reverse proxy / WAF in front of Roundcube.
 
 ## 11. License
 

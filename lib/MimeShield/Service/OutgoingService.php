@@ -43,6 +43,7 @@ final class OutgoingService
         private readonly string $bccMode,
         private readonly int $maxMessageSize,
         private readonly int $maxRecipients,
+        private readonly int $maxTotalEnvelopeBytes = 268435456,
     ) {
     }
 
@@ -91,6 +92,13 @@ final class OutgoingService
             $content = EntityBuilder::clearSignedEntity($inner, $signedInfo['der'], $signedInfo['micalg']);
         }
 
+        // every separate Bcc envelope is a full base64 copy kept in memory until delivery: check the
+        // total before any encryption work (audit MS-10)
+        $copies = 1 + count($recipientPlan['bcc']);
+        if (self::estimatedEnvelopeBytes(strlen($content)) * $copies > $this->maxTotalEnvelopeBytes) {
+            throw new ValidationException('messagetoolarge', 'total size of the encrypted envelopes (' . $copies . ' copies) exceeds the limit');
+        }
+
         // encrypt (main envelope + optional separate Bcc envelopes)
         $gcm = str_contains($this->cipher, 'gcm');
         $der = $this->cms->encrypt($content, $recipientPlan['main'], $this->cipher);
@@ -109,6 +117,16 @@ final class OutgoingService
             'cipher' => $this->cipher, 'signed' => $sign,
         ]);
         return $out;
+    }
+
+    /**
+     * Upper estimate of one encrypted envelope body: CMS overhead + base64 (4/3) + CRLF every 76 chars.
+     */
+    private static function estimatedEnvelopeBytes(int $contentBytes): int
+    {
+        $der = $contentBytes + 16 + 4096;
+        $b64 = (int) ceil($der / 3) * 4;
+        return $b64 + (int) ceil($b64 / 76) * 2;
     }
 
     /**

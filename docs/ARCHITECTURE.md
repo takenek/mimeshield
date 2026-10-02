@@ -24,7 +24,7 @@ lib/MimeShield/
   Cert/
     Certificate.php            X.509 value object; SAN/KU/EKU/BC/CRLDP/AIA parsed from DER
     KeyImporter.php            PKCS#12 / PEM import with precise error classification
-    KdfInspector.php           PKCS#12/PKCS#8 KDF cost limits, checked before OpenSSL
+    KdfInspector.php           PKCS#12/PKCS#8 KDF cost limits (incl. encrypted layers), checked before OpenSSL
     ImportedKey.php            import result (transient, holds the key in memory only)
     LegacyPkcs12Converter.php  opt-in RC2 PKCS#12 conversion via openssl CLI (no shell, no disk)
     PublicCertImporter.php     PEM / DER / PKCS#7 certs-only
@@ -32,8 +32,8 @@ lib/MimeShield/
     MasterKeyProvider.php      master key(s) from file or environment, rotation (kid)
     KeyVault.php               AEAD blob format v1 (XChaCha20-Poly1305 / AES-256-GCM)
   Trust/
-    TrustStore.php             admin-defined anchors (+ system bundle), intermediates
-    ChainValidator.php         OpenSSL decision + diagnostic path building (reasons)
+    TrustStore.php             admin-defined anchors (+ opt-in system bundle), intermediates, issuer lookup
+    ChainValidator.php         OpenSSL decision + diagnostic path building (reasons), CA EKU for EC recipients
     AddressMatcher.php         e-mail normalisation / comparison
     RevocationChecker.php      opt-in CRL checking (signature, freshness, critical extensions)
     SafeHttpClient.php         SSRF-hardened HTTP GET for CRLs
@@ -53,6 +53,7 @@ lib/MimeShield/
     PartStatus.php             per-part S/MIME state for the UI
   Ui/                          ComposeUi, MessageUi, SettingsUi (all output escaped)
   Cli/Tool.php                 bin/mimeshield.sh: diag, keygen, rotate, check-keystore
+  RateLimiter.php              per-session sliding-window limits (recipient checks, key import)
 SQL/                           mysql / postgres / sqlite schemas (Roundcube conventions)
 skins/elastic/                 templates + CSS
 js/mimeshield.js               compose / settings / message view (no secrets, no innerHTML with data)
@@ -72,7 +73,7 @@ Roundcube requires the class name to equal the directory name
 | mail | `message_part_before` | force remote-content blocking in decrypted HTML |
 | mail show/preview/print | `message_body_prefix`, `template_object_messagebody` | status bar |
 | mail compose | `message_compose_body`, `template_container` (`composeoptions`) | options, env, draft restore |
-| mail send | `message_ready` | sign / encrypt (and abort on error) |
+| mail send | `message_ready` | sign / encrypt (and abort on error); with a missing/outdated plugin schema only `message_ready_unavailable`: refuse sends/drafts that are expected to be protected |
 | mail send | `message_before_send` | fail-closed check, Bcc envelopes, dot guard |
 | mail | `plugin.mimeshield-recipients`, `plugin.mimeshield-savecert` | AJAX |
 | settings | `settings_actions`, `preferences_list`, `preferences_save`, `identity_delete` | settings UI |
@@ -295,7 +296,7 @@ are rewritten by `rcube_db::fix_table_names()`):
 
 | Table | Content |
 |---|---|
-| `mimeshield_keys` | own certificates: metadata, `cert_pem`, `chain_pem`, `key_blob` (AEAD), `key_kid`, `key_format` |
+| `mimeshield_keys` | own certificates: metadata, `cert_pem`, `chain_pem`, `key_blob` (AEAD), `key_kid`, `key_format`; `cert_pem` must match `fingerprint` (bound to `key_blob` by the AEAD context), own certificates are used for encryption only after the blob authenticated |
 | `mimeshield_bindings` | (user_id, identity_id) → key_id used for signing |
 | `mimeshield_certs` | correspondent certificates: metadata, `cert_pem`, `chain_pem`, `source`, `trust` |
 | `mimeshield_cert_emails` | address index of `mimeshield_certs` with the `preferred` flag |
@@ -315,7 +316,7 @@ user id.
 * Every state-changing action requires **POST + request token** compared with `hash_equals`
   (`mimeshield::requirePostToken()`), because Roundcube's global check skips GET requests and POST
   requests with an empty `$_POST` (e.g. a file-only multipart upload; `rcube.php:1052-1056`).
-  The public-certificate download uses `request_security_check(INPUT_GET)`.
+  The public-certificate download is a POST with the token in the body (never in a URL).
 * All output is built with `html::*` and `rcube::Q()`; certificate fields are untrusted.
   Localised strings with variables are escaped after substitution. JS uses `.text()` only.
 * No processing of input in `init()` (it runs before Roundcube's CSRF and auth checks).
@@ -341,6 +342,34 @@ user id.
 * CRL fetching refuses trailing-dot host names and, on PHP ≥ 8.4, verifies the connected address in
   `CURLOPT_PREREQFUNCTION` before the request is sent.
 * Certificate names are neutralised for display (control, line-separator and bidi characters).
+
+## 8b. Remediation of the final security report (2026-10-02)
+
+* MS-01: without a current plugin schema, `init()` registers only a `message_ready` guard (no plugin
+  tables needed) that refuses sends/drafts expected to be protected (request, defaults, locks).
+* MS-02: `IncomingProcessor` keeps the origin of injected parts (`rootIds`) separate from the byte
+  buffer of unwrapped content (`raw`); content unwrapped from a forwarded opaque SignedData never
+  becomes a root, so nested EnvelopedData is not decrypted and signatures stay "partial".
+* MS-03/MS-07: EC recipients (OpenSSL "any" purpose) additionally require e-mail protection in the
+  EKU of every CA on the path; the system TLS bundle is no longer a default trust anchor.
+* MS-04/MS-06: `TrustStore::findIssuer()` is shared by signature and recipient revocation checks;
+  `mimeshield_revocation_unknown` (`warn`/`block`) decides undetermined recipient status (shown in
+  compose); an IDP `fullName` in any name form restricts the CRL scope.
+* MS-05: `KdfInspector` decrypts encrypted PKCS#12 layers with the entered password (PBES2/PBKDF2,
+  PKCS#12-PBE per RFC 7292 B.2) and adds their KDF parameters to the same budget before OpenSSL runs;
+  a layer whose iteration count is not a positive INTEGER within the limit is refused before any key
+  derivation.
+* MS-08: an uninspectable SignedData yields "algorithm could not be checked" (warning, never OK).
+* MS-09: `KeyRecord::certificate()` checks `cert_pem` against `fingerprint`; `KeyService::encryptionCertFor()`
+  authenticates the key blob; the "own" shortcut applies to identity addresses only.
+* MS-10/MS-11: total envelope budget for separate Bcc copies; `RateLimiter` for recipient checks
+  and key imports.
+* MS-12: `keygen` checks the whole directory chain in every mode and verifies the temporary file
+  (inode/device) before the `--append` rename.
+* MS-13: `TrustStore` and `MasterKeyProvider` are built from `MimeShield\Config` (user preferences
+  named like administrator options are ignored).
+* MS-14/MS-15: `min-version` 1.7.4; `diag` reports the Roundcube release and the OpenSSL library
+  loaded by the SAPI (warning below 3.5.9 on the 3.5 branch).
 
 ## 9. Differences from the original requirements (and why)
 

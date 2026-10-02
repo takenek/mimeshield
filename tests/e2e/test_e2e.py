@@ -938,7 +938,7 @@ def c28():
             check('Item not found.' in rr.text and 'deleted' not in rr.text, '%s: keydelete of foreign id %s: %s' % (attacker, kid, rr.text[:300]))
             rr = s.post_action('plugin.mimeshield-bind', {'_id': kid, '_identities[]': ident_id(attacker)}, header=True)
             check('Item not found.' in rr.text and 'Saved.' not in rr.text, '%s: bind of foreign id %s: %s' % (attacker, kid, rr.text[:300]))
-            ex = s.get(_task='settings', _action='plugin.mimeshield-export', _type='key', _id=kid, _token=s.token)
+            ex = s.post_action('plugin.mimeshield-export', {'_type': 'key', '_id': kid})
             check(b'BEGIN CERTIFICATE' not in ex.content, '%s: export of foreign key %s' % (attacker, kid))
         own_certs = s.cert_ids()[0]
         for cid in alice_certs:
@@ -1100,12 +1100,15 @@ def c34():
 @case('35 export returns only the public certificate')
 def c35():
     a = session('alice')
-    r = a.get(_task='settings', _action='plugin.mimeshield-export', _type='key', _id=E.state['alice_key'], _token=a.token)
+    r = a.post_action('plugin.mimeshield-export', {'_type': 'key', '_id': E.state['alice_key']})
     eq(r.status_code, 200, 'export status')
     check(r.content.count(b'-----BEGIN CERTIFICATE-----') == 1 and b'PRIVATE' not in r.content, 'export content')
     eq(cert_fingerprint(r.content), cert_fingerprint(open(os.path.join(PKI, 'alice.crt')).read()), 'exported cert')
-    r2 = a.get(_task='settings', _action='plugin.mimeshield-export', _type='key', _id=E.state['alice_key'])
+    r2 = a.post_action('plugin.mimeshield-export', {'_type': 'key', '_id': E.state['alice_key']}, token=False)
     check(b'BEGIN CERTIFICATE' not in r2.content, 'export without token must be refused')
+    # INF-02: GET (token in the URL) is no longer accepted
+    r3 = a.get(_task='settings', _action='plugin.mimeshield-export', _type='key', _id=E.state['alice_key'], _token=a.token)
+    check(b'BEGIN CERTIFICATE' not in r3.content, 'export via GET must be refused')
 
 
 @case('36 print page shows the S/MIME status')
@@ -1457,6 +1460,59 @@ def c41():
     uid = E.state.get('enc19_uid') or newest_uid('bob', subject=E.state.get('enc19_subject', 'e2e 19 enc'))
     page = session('bob').show(uid)
     check(T_DECRYPTED in status(page)[1], 'decryption after rotation')
+
+
+@case('48 plugin schema outdated + encryption locked by the administrator: send and draft refused (fail closed)')
+def c48():
+    # audit MS-01: without the plugin tables S/MIME cannot be applied; a send or draft that must be
+    # protected is refused instead of being delivered / stored in plaintext
+    env = dict(os.environ, ROUNDCUBE_CONFIG_DIR=E.run + '/')
+    def sql_version(value=None):
+        code = ('define("INSTALL_PATH", %r); require INSTALL_PATH . "program/include/clisetup.php";'
+                '$db = rcmail::get_instance()->get_dbh(); $t = $db->table_name("system", true);'
+                '$v = $argv[1] ?? ""; if ($v !== "") { $db->query("UPDATE $t SET value = ? WHERE name = ?", $v, "mimeshield-version"); }'
+                '$r = $db->fetch_assoc($db->query("SELECT value FROM $t WHERE name = ?", "mimeshield-version")); echo $r["value"] ?? "";'
+                ) % (E.rc_dir + '/')
+        r = subprocess.run([E.args.php, '-r', code, '--'] + ([value] if value else []), cwd=E.rc_dir, env=env, capture_output=True, text=True)
+        eq(r.returncode, 0, 'schema version query: ' + r.stdout + r.stderr)
+        return r.stdout.strip()
+    cfg = os.path.join(E.run, 'config.inc.php')
+    with open(cfg) as fh:
+        orig_cfg = fh.read()
+    orig_version = sql_version()
+    check(orig_version != '', 'schema version not installed')
+    subj = 'e2e 48 must not leave'
+    try:
+        sql_version('2000010100')
+        with open(cfg, 'a') as fh:
+            fh.write("\n$config['mimeshield_encrypt_default'] = true;\n$config['mimeshield_options_lock'] = ['encrypt'];\n")
+        restart_php()          # the built-in server caches compiled files (opcache revalidate_freq)
+        a = relogin('alice')   # new session: the cached positive schema check is gone
+        r, mark = send('alice', to=addr('bob'), subject=subj, body='Plaintext 48 must not leave')
+        check(not Roundcube.sent_ok(r), 'send must be refused: %r' % messages_of(r))
+        check(has_message(r, 'S/MIME protection is required', 'error'), 'missing error message: %r' % messages_of(r))
+        sink_nothing(mark)
+        r = a.send(to=addr('bob'), subject=subj, body='Plaintext 48 draft', draft=True, identity=ident_id('alice'))
+        check(not has_message(r, 'Message saved to Drafts.'), 'draft must not be saved: %r' % messages_of(r))
+        check(not imap_fetch_all('alice', 'Drafts', ('header', 'subject', subj)), 'plaintext draft stored on IMAP')
+        check(not imap_fetch_all('alice', 'Sent', ('header', 'subject', subj)), 'plaintext Sent copy stored on IMAP')
+        # without any expected protection a plain message is still sent (no availability regression);
+        # the plaintext capture is removed again (case 30 requires S/MIME for every suite send)
+        with open(cfg, 'w') as fh:
+            fh.write(orig_cfg)
+        restart_php()
+        relogin('alice')
+        r, mark = send('alice', to=addr('bob'), subject='e2e 48 plain ok', body='plain 48')
+        assert_sent(r)
+        got = sink_one(mark)
+        os.remove(got['path'])
+        os.remove(got['path'][:-4] + '.json')
+    finally:
+        with open(cfg, 'w') as fh:
+            fh.write(orig_cfg)
+        sql_version(orig_version)
+        restart_php()
+        relogin('alice')
 
 
 @case('37 private key material never appears in any HTTP response', always=True)

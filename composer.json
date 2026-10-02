@@ -32,7 +32,7 @@
     },
     "extra": {
         "roundcube": {
-            "min-version": "1.7.0",
+            "min-version": "1.7.4",
             "sql-dir": "SQL"
         }
     },

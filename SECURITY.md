@@ -27,14 +27,20 @@ Only the latest release receives security fixes.
   server document root.
 * Every record has its own random nonce, a 128-bit authentication tag, a key identifier (for
   rotation) and a format version. The ciphertext is bound (associated data) to the user id and the
-  certificate fingerprint; tampering or moving a blob to another row is detected.
+  certificate fingerprint; tampering or moving a blob to another row is detected. The stored
+  certificate must match that fingerprint, and an own certificate is used as an encryption
+  recipient (own addresses, encrypt-to-self) only after its key blob authenticated under the
+  master key — a key row inserted or modified directly in the database cannot redirect encrypted
+  mail to a foreign certificate.
 * Private keys are decrypted only in PHP memory for the duration of one signing/decryption
   operation, handed to OpenSSL as PEM strings (never written to disk), and wiped afterwards (best
   effort — PHP does not guarantee memory erasure).
 * Private keys are never sent to the browser and **cannot be exported** (feature intentionally not
   implemented). Public certificates can be downloaded.
 * PKCS#12 passwords are used once during import and are never stored, logged or kept in the
-  session.
+  session. Before OpenSSL reads an uploaded PKCS#12, the plugin checks every password-based KDF
+  cost parameter, including those inside encrypted layers (decrypted with the entered password for
+  this check); key imports are limited per session.
 
 ## Master key
 
@@ -55,9 +61,17 @@ Only the latest release receives security fixes.
   key. Server-side S/MIME cannot protect against a compromised server. Users who need protection
   against the server operator must keep their keys on their own devices.
 * Trust anchors (CA bundle) are chosen by the administrator. Distribution bundles usually contain
-  TLS roots only; add the S/MIME roots your users need.
+  TLS roots only; add the S/MIME roots your users need. The system (TLS) bundle is **not** trusted
+  by default (`mimeshield_use_system_ca = false`). For EC recipients, every CA on the path must
+  allow e-mail protection (EKU), as OpenSSL enforces for RSA recipients.
 * Revocation is not checked unless `mimeshield_revocation = 'crl'` is configured (the UI says
-  "Revocation status: not checked").
+  "Revocation status: not checked"). With CRL checking on, a recipient whose status cannot be
+  determined is shown with a warning (`mimeshield_revocation_unknown = 'warn'`) or refused
+  (`'block'`).
+* The database schema of the plugin must be current: while it is missing or outdated, sending or
+  saving a draft that is expected to be signed or encrypted is refused (fail closed).
+* Decrypted HTML is rendered by Roundcube core: run a Roundcube release with current security fixes
+  (≥ 1.7.4) and keep the OpenSSL library used by PHP-FPM patched.
 * Subjects and other headers are not encrypted by S/MIME.
 
 See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full threat model and
@@ -69,7 +83,16 @@ See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full threat model and
 * `mimeshield_temp_dir` on a tmpfs (e.g. a dedicated directory under `/dev/shm`) owned by the PHP
   user.
 * Keep `mimeshield_revocation = 'off'` unless outbound HTTP from the web server is acceptable; if
-  enabled, consider `mimeshield_revocation_allow_hosts` and a proxy.
+  enabled, consider `mimeshield_revocation_allow_hosts`, a proxy and `mimeshield_revocation_unknown`.
+* Configure `mimeshield_ca_bundle` with S/MIME roots and keep `mimeshield_use_system_ca = false`.
+* Add rate limits for the Roundcube endpoints at the reverse proxy / WAF (the plugin limits key
+  imports and recipient checks per session only).
+* Deny HTTP access to `plugins/mimeshield/{bin,lib,SQL,tests,docs,localization}` (see README 2.6).
+* Defence in depth for administrator options: the plugin already ignores user preferences named
+  `mimeshield_*` (except `mimeshield_pref_sign|encrypt`); additionally list the security-relevant
+  options in Roundcube's `$config['dont_override']`, e.g. `mimeshield_ca_bundle`,
+  `mimeshield_use_system_ca`, `mimeshield_intermediates`, `mimeshield_master_key_file`,
+  `mimeshield_master_key_env`, `mimeshield_master_key_active`, `mimeshield_options_lock`.
 * Run `plugins/mimeshield/bin/mimeshield.sh diag` after every upgrade.
 * Restrict `log_dir` permissions; the plugin never logs secrets, but logs contain user ids and
   certificate fingerprints.

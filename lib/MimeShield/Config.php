@@ -40,12 +40,14 @@ final class Config
         'mimeshield_max_certs_per_user' => 500,
         'mimeshield_max_message_size' => 52428800,
         'mimeshield_max_recipients' => 100,
+        'mimeshield_max_total_envelope_bytes' => 268435456,
         'mimeshield_min_rsa_bits' => 2048,
         'mimeshield_ca_bundle' => [],
-        'mimeshield_use_system_ca' => true,
+        'mimeshield_use_system_ca' => false,
         'mimeshield_intermediates' => [],
         'mimeshield_subject_email_fallback' => true,
         'mimeshield_revocation' => 'off',
+        'mimeshield_revocation_unknown' => 'warn',
         'mimeshield_revocation_timeout' => 5,
         'mimeshield_revocation_max_bytes' => 10485760,
         'mimeshield_revocation_cache_ttl' => 86400,
@@ -68,6 +70,8 @@ final class Config
 
     /** @var null|array<string, mixed> */
     private ?array $adminValues = null;
+
+    private static bool $tempFallbackLogged = false;
 
     /**
      * @param array<string, mixed> $userPrefs the logged-in user's stored preferences
@@ -142,6 +146,15 @@ final class Config
         return $this->get('mimeshield_revocation') === 'crl' ? 'crl' : 'off';
     }
 
+    /**
+     * Recipient whose revocation status cannot be determined (CRL checking on): 'warn' (encrypt, show
+     * a warning) or 'block' (treat the certificate as not usable).
+     */
+    public function revocationUnknownPolicy(): string
+    {
+        return $this->get('mimeshield_revocation_unknown') === 'block' ? 'block' : 'warn';
+    }
+
     public function encryptUntrusted(): string
     {
         return $this->get('mimeshield_encrypt_untrusted') === 'warn' ? 'warn' : 'block';
@@ -152,15 +165,33 @@ final class Config
      */
     public function tempBaseDir(): string
     {
-        $dir = (string) $this->get('mimeshield_temp_dir');
-        if ($dir === '') {
-            $dir = (string) $this->config->get('temp_dir', '');
-        }
+        $dir = $this->configuredTempDir();
         if ($dir === '' || !is_dir($dir) || !is_writable($dir)) {
+            if ($dir !== '' && !self::$tempFallbackLogged) {
+                // never silent: decrypted content may end up on a non-tmpfs, shared directory (INF-03)
+                self::$tempFallbackLogged = true;
+                Log::warning('config', 'configured temp directory not usable, falling back to the system temp directory', ['dir' => $dir]);
+            }
             $dir = sys_get_temp_dir();
         }
         $real = realpath($dir);
         return $real !== false ? $real : $dir;
+    }
+
+    /**
+     * The configured temp directory (mimeshield_temp_dir, else Roundcube's temp_dir) is unusable and
+     * the system temp directory is used instead.
+     */
+    public function tempDirIsFallback(): bool
+    {
+        $dir = $this->configuredTempDir();
+        return $dir === '' || !is_dir($dir) || !is_writable($dir);
+    }
+
+    private function configuredTempDir(): string
+    {
+        $dir = (string) $this->get('mimeshield_temp_dir');
+        return $dir !== '' ? $dir : (string) $this->config->get('temp_dir', '');
     }
 
     /**

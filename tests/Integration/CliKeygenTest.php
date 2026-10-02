@@ -217,4 +217,46 @@ final class CliKeygenTest extends TestCase
         self::assertSame(1, $code);
         self::assertStringContainsString('Refusing to overwrite', $out);
     }
+
+    /**
+     * Audit MS-12: the directory chain is checked without --create-parent too (new file and --append).
+     */
+    public function testDefaultModeAndAppendRefuseDirectoryWritableByOthers(): void
+    {
+        mkdir($this->base . '/shared', 0o700);
+        $file = $this->base . '/shared/mimeshield.key';
+        [$code, $out] = $this->keygen(['keygen', 'file' => $file, 'kid' => 'k1']);
+        self::assertSame(0, $code, $out);
+
+        chmod($this->base . '/shared', 0o777);
+        [$code, $out] = $this->keygen(['keygen', 'file' => $this->base . '/shared/other.key']);
+        self::assertSame(1, $code);
+        self::assertStringContainsString('writable by other users', $out);
+        self::assertFileDoesNotExist($this->base . '/shared/other.key');
+
+        $before = (string) file_get_contents($file);
+        [$code, $out] = $this->keygen(['keygen', 'file' => $file, 'kid' => 'k2', 'append' => true]);
+        self::assertSame(1, $code);
+        self::assertStringContainsString('writable by other users', $out);
+        self::assertSame($before, (string) file_get_contents($file), 'key file unchanged');
+
+        // the same directory restricted again: --append works and keeps the file mode
+        chmod($this->base . '/shared', 0o700);
+        [$code, $out] = $this->keygen(['keygen', 'file' => $file, 'kid' => 'k2', 'append' => true]);
+        self::assertSame(0, $code, $out);
+        self::assertMatchesRegularExpression('/^k2 /m', (string) file_get_contents($file));
+        self::assertSame(0o400, fileperms($file) & 0o777);
+        self::assertSame([], glob($file . '.new.*') ?: []);
+    }
+
+    public function testDefaultModeRefusesParentReachedThroughSymbolicLinkInThePath(): void
+    {
+        mkdir($this->base . '/real', 0o700);
+        symlink($this->base . '/real', $this->base . '/link');
+        mkdir($this->base . '/real/keys', 0o700);
+        [$code, $out] = $this->keygen(['keygen', 'file' => $this->base . '/link/keys/mimeshield.key']);
+        self::assertSame(1, $code);
+        self::assertStringContainsString('is a symbolic link', $out);
+        self::assertFileDoesNotExist($this->base . '/real/keys/mimeshield.key');
+    }
 }

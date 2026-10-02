@@ -45,8 +45,16 @@ final class IncomingProcessor
     /** @var array<string, PartStatus> */
     private array $status = [];
 
-    /** @var array<string, string> injected root part id => raw (decrypted) MIME entity */
+    /** @var array<string, string> injected part id => raw (decrypted / unwrapped) MIME entity (byte buffer only) */
     private array $raw = [];
+
+    /**
+     * @var array<string, true> injected part ids whose content comes from the message root (or from
+     *                          an S/MIME layer directly at the root). The decision "this part is the
+     *                          message root" depends on this origin, never on the fact that bytes were
+     *                          unwrapped (a forwarded opaque SignedData is unwrapped too, audit MS-02).
+     */
+    private array $rootIds = [];
 
     /** @var array<string, true> part ids of injected (decrypted) content */
     private array $decryptedIds = [];
@@ -200,7 +208,7 @@ final class IncomingProcessor
         $msg = $p['object'];
         return $struct === ($msg->headers->structure ?? null)
             || isset($this->outerChildren[(string) $struct->mime_id])
-            || isset($this->raw[(string) $struct->mime_id])
+            || isset($this->rootIds[(string) $struct->mime_id])
             || ($struct->mime_id === '1' && empty($msg->headers->structure->parts));
     }
 
@@ -268,7 +276,7 @@ final class IncomingProcessor
             $plain = $this->decrypt($der);
             $st->decryption = true;
             $st->unauthenticated = $type === CmsInspector::OID_ENVELOPED_DATA;
-            $p = $this->inject($p, $plain);
+            $p = $this->inject($p, $plain, true); // only reached for $root
             // inner layer (typically a clear-signed message) is processed recursively: the hook is
             // not called by Roundcube for the replaced root node
             $inner = $this->partStructure(['object' => $msg, 'structure' => $p['structure'], 'mimetype' => $p['mimetype'], 'recursive' => true], $depth + 1);
@@ -302,8 +310,9 @@ final class IncomingProcessor
             if (!$root && strtolower((string) $struct->mimetype) !== 'message/rfc822') {
                 return $p;
             }
-            // signed (not encrypted) content: shown also for forwarded messages, labelled partial
-            $p = $this->inject($p, $content);
+            // signed (not encrypted) content: shown also for forwarded messages, labelled partial;
+            // the origin is carried along so that unwrapped forwarded content never becomes a root
+            $p = $this->inject($p, $content, $root);
             $inner = $this->partStructure(['object' => $msg, 'structure' => $p['structure'], 'mimetype' => $p['mimetype'], 'recursive' => true], $depth + 1);
             $p['structure'] = $inner['structure'];
             $p['mimetype'] = $inner['mimetype'];
@@ -530,7 +539,7 @@ final class IncomingProcessor
      *
      * @return array<string, mixed>
      */
-    private function inject(array $p, string $entity): array
+    private function inject(array $p, string $entity, bool $fromRoot): array
     {
         $entity = EntityBuilder::canonicalizeLineEndings($entity);
         if (strlen($entity) > $this->maxSize) {
@@ -555,6 +564,9 @@ final class IncomingProcessor
         $new->size = strlen($entity);
         $this->renumber($new, $msg, $oldId);
         $this->raw[$oldId] = $entity;
+        if ($fromRoot) {
+            $this->rootIds[$oldId] = true;
+        }
         $this->decryptedIds[$oldId] = true;
 
         $p['structure'] = $new;

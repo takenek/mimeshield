@@ -43,7 +43,12 @@
   validity), which identity uses which certificate — these are stored in clear.
 * A DB attacker could insert a rogue *correspondent certificate* for a victim; it would be blocked
   for encryption unless its chain validates to an admin trust anchor (default policy `block`), and
-  the UI always shows trust status. Integrity of the DB is otherwise trusted.
+  the UI always shows trust status.
+* Own key records cannot be used for that either (audit MS-09): the certificate of a key record
+  must match the record fingerprint, and the fingerprint is bound to the key blob (AEAD). An own
+  certificate is used as an encryption recipient only after its blob authenticated under the master
+  key, and only for the user's identity addresses. A row inserted with a foreign certificate and a
+  copied or forged blob is ignored (and logged). Integrity of the DB is otherwise trusted.
 
 ### T3 Stolen file system / backup of the web server
 * If the attacker obtains **both** the master key file and a database dump, all private keys can be
@@ -68,7 +73,9 @@
   valid inner signature is labelled "content may have been altered".
 * Only root-level S/MIME (or S/MIME directly inside another S/MIME layer) is decrypted: an attacker
   cannot embed someone else's ciphertext in a multipart/forwarded message to get it decrypted and
-  quoted back (decryption oracle, cf. CVE-2019-10740). Replies to encrypted mail default to
+  quoted back (decryption oracle, cf. CVE-2019-10740). The "root" decision follows the origin of a
+  part through every unwrapped layer: content unwrapped from a forwarded opaque-signed message stays
+  "forwarded" (partial signature, nested ciphertext not decrypted — audit MS-02). Replies to encrypted mail default to
   encryption and warn when switched off.
 * Partial signatures (signed part inside an unsigned multipart, e.g. list footers) are shown as
   "only part of this message is signed".
@@ -76,7 +83,8 @@
   usage and revocation are evaluated and displayed separately. From/Sender spoofing with a valid
   certificate for another address is shown in red ("certificate does not match the sender").
 * Weak/unsupported algorithms: MD5 rejected, SHA-1 warned, RC2/DES not decrypted unless the admin
-  enables the OpenSSL legacy provider.
+  enables the OpenSSL legacy provider. A signature whose digest algorithm cannot be determined by the
+  plugin's parser is never shown as fully valid ("algorithm could not be checked", audit MS-08).
 
 ### T6 Malicious certificate
 * All certificate strings are escaped (`rcube::Q`, `html::*`, JS `.text()`); subjects are
@@ -89,6 +97,10 @@
   entities are never trust anchors.
 * Certificates from received messages are not trusted automatically (contact store `observed` /
   `verified` flags; encryption to untrusted certificates is blocked by default).
+* Purpose restrictions of CAs: for RSA recipients OpenSSL's S/MIME purpose checks the EKU of every
+  CA; for EC (keyAgreement) recipients, which need OpenSSL's "any" purpose, the plugin checks that
+  every CA on the path allows e-mail protection (audit MS-03). The system TLS CA bundle is not a
+  trust anchor by default (`mimeshield_use_system_ca = false`, audit MS-07).
 
 ### T7 SSRF via CRL / OCSP / AIA URLs
 * Revocation checking is **off by default**; AIA/OCSP URLs are never fetched.
@@ -100,6 +112,11 @@
   checked address (`CURLOPT_RESOLVE`), host names with a trailing dot are refused, and the connected
   address is verified (before the request is sent on PHP >= 8.4, after the transfer on older PHP);
   timeouts and a hard size limit; at most 2 URLs per certificate; results cached.
+* CRL scope: an IssuingDistributionPoint restricts the scope even when it uses name forms other
+  than URI; such a CRL never proves "not revoked" for a certificate it does not name (MS-06). The
+  issuer for recipient CRL checks is resolved like for signatures (stored chain, configured
+  intermediates, anchors); an undetermined status is shown or blocks (`mimeshield_revocation_unknown`,
+  MS-04).
 * When `mimeshield_revocation_proxy` is set, pinning and the connected-address check are performed
   by the proxy, not by the plugin: the proxy must enforce the egress policy (or use
   `mimeshield_revocation_allow_hosts`).
@@ -121,6 +138,9 @@
 * Fail closed: if signing/encryption was requested and anything fails (missing certificate,
   OpenSSL error, key store error, other plugin interference), the request ends with an error before
   delivery; `message_before_send` re-checks that the message actually being sent is protected.
+* Also when the plugin's database schema is missing or outdated (e.g. an upgrade without
+  `updatedb.sh`): a send or draft that is expected to be protected (user request, administrator
+  default or lock) is refused by a guard that needs no plugin tables (audit MS-01).
 * Missing recipient certificates block sending and list the recipients; sending without
   encryption requires an explicit user action ("Send without encryption" switches the option off
   visibly). The plugin never unchecks encryption on its own.
@@ -135,7 +155,12 @@
 
 ### T12 Resource exhaustion
 * KDF cost parameters in uploaded PKCS#12 / PKCS#8 files are limited before OpenSSL derives keys
-  (otherwise a 4 KB file with 2^31 iterations keeps a worker busy for minutes).
+  (otherwise a 4 KB file with 2^31 iterations keeps a worker busy for minutes). Encrypted PKCS#12
+  layers are decrypted with the entered password and inspected as well, within one total budget
+  (audit MS-05; the iteration count of a layer is validated before its key is derived); key imports are limited to 10 per session within 5 minutes.
+* Recipient status checks in compose are limited per session (30 per minute); the total memory of
+  separate Bcc envelopes is bounded (`mimeshield_max_total_envelope_bytes`, audit MS-10/MS-11).
+  Limits per user or IP across sessions belong to the reverse proxy / WAF.
 * Upload size limits checked before reading; limits on keys/certificates per user, recipients per
   message, message size for S/MIME processing, ASN.1 nodes/depth, certificates per file, CRL size.
 

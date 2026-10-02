@@ -104,8 +104,12 @@ $config['mimeshield_min_rsa_bits'] = 2048;
 // roots trusted for TLS; add a bundle with S/MIME (e-mail) roots for your correspondents' CAs.
 $config['mimeshield_ca_bundle'] = [];
 
-// Also trust the OpenSSL default CA bundle of the system.
-$config['mimeshield_use_system_ca'] = true;
+// Also trust the OpenSSL default CA bundle of the system. Default: false (since the security
+// remediation of 2026-10-02). That bundle holds roots trusted for TLS, not for e-mail: enabling it
+// makes signatures and recipients under any public TLS CA "trusted". Prefer a dedicated bundle of
+// S/MIME roots approved by your organisation in mimeshield_ca_bundle (e.g. roots with the "email"
+// trust bit of a root programme). bin/mimeshield.sh diag warns while this option is enabled.
+$config['mimeshield_use_system_ca'] = false;
 
 // PEM file(s) with intermediate CA certificates (NOT trusted, used only to build chains when a
 // message does not include them, e.g. mail from Outlook on the web).
@@ -135,6 +139,14 @@ $config['mimeshield_revocation_allow_hosts'] = [];       // e.g. ['.actalis.it']
 $config['mimeshield_revocation_deny_hosts'] = [];        // always refused
 $config['mimeshield_revocation_proxy'] = '';             // optional HTTP proxy (e.g. 'http://proxy:3128')
 
+// Recipient whose revocation status cannot be determined with 'crl' (CRL unavailable, expired,
+// out of scope, unsupported form):
+//  'warn'  - encryption allowed, compose shows "revocation status could not be checked" (default)
+//  'block' - the certificate is treated as not usable for encryption
+// The issuer for CRL checks is looked up in the stored chain, the configured intermediates and the
+// trust anchors (a contact certificate imported without its chain is checked as well).
+$config['mimeshield_revocation_unknown'] = 'warn';
+
 // ---------------------------------------------------------------------------------------------
 // LIMITS
 // ---------------------------------------------------------------------------------------------
@@ -144,8 +156,15 @@ $config['mimeshield_max_keys_per_user'] = 20;            // 1 .. 1000
 $config['mimeshield_max_certs_per_user'] = 500;          // 1 .. 100000
 $config['mimeshield_max_message_size'] = 52428800;       // bytes, messages signed/encrypted/decrypted (>= 65536)
 $config['mimeshield_max_recipients'] = 100;              // per encrypted message (1 .. 1000)
+// Upper bound for all encrypted envelopes of one message kept in memory until delivery: the main
+// envelope plus one full copy per Bcc recipient in 'separate' Bcc mode (base64 size estimate).
+// Keep it well below PHP's memory_limit (>= 1048576).
+$config['mimeshield_max_total_envelope_bytes'] = 268435456;
 // PKCS#12 / encrypted PKCS#8 uploads whose KDF costs exceed 2 000 000 iterations (scrypt: N > 2^20,
-// r > 32, p > 4) are always refused (CPU denial-of-service protection).
+// r > 32, p > 4) are always refused (CPU denial-of-service protection). The check also covers keys
+// inside encrypted PKCS#12 layers (inspected with the entered password before OpenSSL reads the
+// file). Key imports are limited to 10 attempts per session within 5 minutes and recipient status
+// checks in compose to 30 per session and minute.
 
 // ---------------------------------------------------------------------------------------------
 // FILES
@@ -153,6 +172,8 @@ $config['mimeshield_max_recipients'] = 100;              // per encrypted messag
 // Base directory for temporary files ('' = Roundcube temp_dir). The plugin uses a private
 // "mimeshield" subdirectory (mode 0700). Private keys are never written to disk; message data is
 // (briefly, 0600, removed immediately). A tmpfs (e.g. /dev/shm) avoids writing it to disk.
+// If the configured directory is not usable, the system temp directory is used: this is logged
+// (mimeshield log, "falling back to the system temp directory") and reported by diag.
 $config['mimeshield_temp_dir'] = '';
 
 // Legacy PKCS#12 files (RC2-40, Windows "TripleDES-SHA1" export) cannot be read by OpenSSL 3.

@@ -1119,6 +1119,71 @@ final class IncomingProcessorTest extends TestCase
         self::assertTrue($st->notDecrypted);
     }
 
+    /**
+     * Audit MS-02: unwrapping the opaque SignedData of a forwarded message must not turn its content
+     * into a "root" part - ciphertext nested inside it is never decrypted.
+     */
+    public function testForwardedOpaqueSignedEnvelopeIsNotDecrypted(): void
+    {
+        $b = 'outer-' . bin2hex(random_bytes(4));
+        $enveloped = self::envelopedEntity($this->cms()->encrypt(self::TEXT, [TestPki::cert('alice')]));
+        $embedded = self::headers('Bob <bob@example.test>', null, 'original')
+            . self::pkcs7Entity($this->opaqueSign($enveloped, 'bob'), 'application/pkcs7-mime; smime-type=signed-data; name="smime.p7m"');
+        $raw = self::headers('Mallory <mallory@example.test>', null, 'Fwd: original')
+            . 'Content-Type: multipart/mixed; boundary="' . $b . "\"\r\n\r\n"
+            . '--' . $b . "\r\nContent-Type: text/plain; charset=us-ascii\r\n\r\nplease read the attached message\r\n"
+            . '--' . $b . "\r\nContent-Type: message/rfc822\r\n\r\n"
+            . $embedded
+            . '--' . $b . "--\r\n";
+        $msg = self::message($raw);
+        self::assertSame('message/rfc822', $msg->mime_parts['2']->mimetype);
+        $proc = $this->processor($raw);
+
+        self::walk($proc, $msg);
+
+        self::assertFalse($proc->hasDecrypted());
+        foreach ($msg->mime_parts as $p) {
+            self::assertStringNotContainsString('SECRET-PLAINTEXT-MARKER', (string) $p->body);
+        }
+        $st = self::partStatus($proc, '2');
+        self::assertTrue($st->partial, 'forwarded signature never covers the message');
+        self::assertTrue($st->notDecrypted, 'nested ciphertext is reported as deliberately not decrypted');
+        self::assertNotTrue($st->decryption);
+        self::assertNull($proc->rootSignature());
+        $this->assertNoInternalError($proc);
+    }
+
+    /**
+     * Audit MS-02: a forwarded opaque SignedData wrapping another SignedData keeps the "partial"
+     * label on every unwrapped layer.
+     */
+    public function testForwardedNestedOpaqueSignedStaysPartial(): void
+    {
+        $b = 'outer-' . bin2hex(random_bytes(4));
+        $inner = self::pkcs7Entity($this->opaqueSign(self::TEXT, 'alice'), 'application/pkcs7-mime; smime-type=signed-data; name="smime.p7m"');
+        $embedded = self::headers('Alice <alice@example.test>', null, 'original')
+            . self::pkcs7Entity($this->opaqueSign($inner, 'alice'), 'application/pkcs7-mime; smime-type=signed-data; name="smime.p7m"');
+        $raw = self::headers('Mallory <mallory@example.test>', null, 'Fwd: original')
+            . 'Content-Type: multipart/mixed; boundary="' . $b . "\"\r\n\r\n"
+            . '--' . $b . "\r\nContent-Type: text/plain; charset=us-ascii\r\n\r\nsee below\r\n"
+            . '--' . $b . "\r\nContent-Type: message/rfc822\r\n\r\n"
+            . $embedded
+            . '--' . $b . "--\r\n";
+        $msg = self::message($raw);
+        $proc = $this->processor($raw);
+
+        self::walk($proc, $msg);
+
+        foreach ($proc->statuses() as $id => $st) {
+            if ($st->signature !== null) {
+                self::assertTrue($st->partial, 'signature status of part ' . $id . ' must be partial');
+            }
+        }
+        self::assertNull($proc->rootSignature());
+        self::assertFalse($proc->hasDecrypted());
+        $this->assertNoInternalError($proc);
+    }
+
     public function testOriginalStructureNeverContainsPlaintextAfterFullWalk(): void
     {
         $raw = self::headers() . self::envelopedEntity(

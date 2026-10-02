@@ -11,6 +11,7 @@ declare(strict_types=1);
 namespace MimeShield\Trust;
 
 use MimeShield\Cert\Certificate;
+use MimeShield\Config;
 use MimeShield\Exception\ValidationException;
 use MimeShield\Log;
 
@@ -47,11 +48,15 @@ final class TrustStore
     ) {
     }
 
-    public static function fromConfig(\rcube_config $config): self
+    /**
+     * Build from the plugin configuration (MimeShield\Config: user preferences named like these
+     * administrator options are ignored).
+     */
+    public static function fromConfig(Config $config): self
     {
-        $bundles = array_values(array_filter(array_map('strval', (array) $config->get('mimeshield_ca_bundle', []))));
-        $inter = array_values(array_filter(array_map('strval', (array) $config->get('mimeshield_intermediates', []))));
-        return new self($bundles, (bool) $config->get('mimeshield_use_system_ca', true), $inter);
+        $bundles = array_values(array_filter(array_map('strval', (array) $config->get('mimeshield_ca_bundle'))));
+        $inter = array_values(array_filter(array_map('strval', (array) $config->get('mimeshield_intermediates'))));
+        return new self($bundles, $config->bool('mimeshield_use_system_ca'), $inter);
     }
 
     /**
@@ -140,6 +145,30 @@ final class TrustStore
             }
         }
         return false;
+    }
+
+    /**
+     * Issuer certificate of $cert among the given (untrusted) certificates, the configured
+     * intermediates and the trust anchors. Shared by signature verification and recipient
+     * resolution, so that revocation checking finds the same issuer in both paths (audit MS-04).
+     *
+     * @param list<string> $extraPems e.g. certificates embedded in a message or stored with a record
+     */
+    public function findIssuer(Certificate $cert, array $extraPems = []): ?Certificate
+    {
+        $candidates = [];
+        foreach ($extraPems as $pem) {
+            try {
+                $candidates[] = Certificate::fromString($pem);
+            } catch (ValidationException) {
+            }
+        }
+        foreach (array_merge($candidates, $this->intermediates(), $this->anchors()) as $c) {
+            if ($c->fingerprint !== $cert->fingerprint && $cert->isIssuedBy($c)) {
+                return $c;
+            }
+        }
+        return null;
     }
 
     /**

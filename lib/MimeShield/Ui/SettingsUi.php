@@ -15,6 +15,7 @@ use MimeShield\Exception\ConfigException;
 use MimeShield\Exception\MimeShieldException;
 use MimeShield\KeyStore\KeyVault;
 use MimeShield\Log;
+use MimeShield\RateLimiter;
 use MimeShield\Storage\CertRecord;
 use MimeShield\Storage\KeyRecord;
 use MimeShield\Trust\AddressMatcher;
@@ -29,6 +30,10 @@ use MimeShield\Trust\ChainValidator;
  */
 final class SettingsUi
 {
+    /** key import attempts per session within KEY_IMPORT_WINDOW seconds */
+    private const KEY_IMPORTS_PER_WINDOW = 10;
+    private const KEY_IMPORT_WINDOW = 300;
+
     public const ACTIONS = [
         'plugin.mimeshield' => 'keysPage',
         'plugin.mimeshield-keyinfo' => 'keyInfo',
@@ -285,6 +290,14 @@ final class SettingsUi
         $this->plugin->requirePostToken();
         $password = (string) \rcube_utils::get_input_string('_password', \rcube_utils::INPUT_POST, true);
         unset($_POST['_password'], $_REQUEST['_password']);
+        // each attempt may run password based key derivation: bound the frequency per session (MS-05/MS-11)
+        if (!RateLimiter::allow($_SESSION, 'mimeshield_rl_keyimport', self::KEY_IMPORTS_PER_WINDOW, self::KEY_IMPORT_WINDOW)) {
+            KeyVault::wipe($password);
+            Log::info('import', 'key import attempts throttled');
+            $this->rc->output->show_message('mimeshield.ratelimited', 'error');
+            $this->importForm('key');
+            return;
+        }
         try {
             $data = $this->uploadedFile($this->plugin->config()->int('mimeshield_max_key_upload', 1024, 1048576), ['p12', 'pfx', 'pem', 'key']);
             $identities = array_map(static fn ($i) => ['identity_id' => $i['identity_id'], 'email' => (string) $i['email']], (array) $this->rc->user->list_identities());
@@ -349,12 +362,14 @@ final class SettingsUi
 
     /**
      * Download a PUBLIC certificate (own or contact). Private keys can never be exported.
+     *
+     * POST only: the request token travels in the body, never in a URL (access logs, history, INF-02).
      */
     private function export(): void
     {
-        $this->rc->request_security_check(\rcube_utils::INPUT_GET);
-        $type = (string) \rcube_utils::get_input_string('_type', \rcube_utils::INPUT_GET);
-        $id = (int) \rcube_utils::get_input_string('_id', \rcube_utils::INPUT_GET);
+        $this->plugin->requirePostToken();
+        $type = (string) \rcube_utils::get_input_string('_type', \rcube_utils::INPUT_POST);
+        $id = (int) \rcube_utils::get_input_string('_id', \rcube_utils::INPUT_POST);
         $cert = null;
         if ($type === 'key') {
             $cert = $this->plugin->services()->keys()->repository()->get($id)?->certificate();

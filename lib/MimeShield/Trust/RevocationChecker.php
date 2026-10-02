@@ -120,8 +120,9 @@ final class RevocationChecker
         $crl = $this->parse($crlDer, $issuer);
 
         // RFC 5280 6.3.3 (b)(2): a CRL whose IssuingDistributionPoint names another distribution
-        // point is out of scope for this certificate
-        if ($crl['idpUris'] !== [] && array_intersect($crl['idpUris'], $cert->crlUrls) === []) {
+        // point is out of scope for this certificate. A fullName with only unsupported name forms
+        // (e.g. directoryName) is still a scope restriction, never "no IDP" (audit MS-06).
+        if ($crl['idpScoped'] && array_intersect($crl['idpUris'], $cert->crlUrls) === []) {
             throw new ValidationException('revocationunavailable', 'CRL scope (distribution point) mismatch');
         }
 
@@ -205,7 +206,7 @@ final class RevocationChecker
     /**
      * Parse and verify a CRL against $issuer.
      *
-     * @return array{thisUpdate: int, nextUpdate: ?int, entries: list<array{serial: string, date: ?int, reason: string}>, idpUris: list<string>}
+     * @return array{thisUpdate: int, nextUpdate: ?int, entries: list<array{serial: string, date: ?int, reason: string}>, idpUris: list<string>, idpScoped: bool}
      */
     private function parse(string $der, Certificate $issuer): array
     {
@@ -263,9 +264,9 @@ final class RevocationChecker
         if (isset($fields[$i]) && $fields[$i]->isUniversal(Asn1::TAG_SEQUENCE)) {
             $revoked = $fields[$i++];
         }
-        $idpUris = [];
+        $idp = ['uris' => [], 'scoped' => false];
         if (isset($fields[$i]) && $fields[$i]->isContext(0)) {
-            $idpUris = $this->checkCrlExtensions($fields[$i]);
+            $idp = $this->checkCrlExtensions($fields[$i]);
         }
 
         $entries = [];
@@ -293,17 +294,19 @@ final class RevocationChecker
             }
         }
 
-        return ['thisUpdate' => $thisUpdate, 'nextUpdate' => $nextUpdate, 'entries' => $entries, 'idpUris' => $idpUris];
+        return ['thisUpdate' => $thisUpdate, 'nextUpdate' => $nextUpdate, 'entries' => $entries, 'idpUris' => $idp['uris'], 'idpScoped' => $idp['scoped']];
     }
 
     /**
-     * Validate CRL extensions; returns the URIs of the IssuingDistributionPoint fullName (if any).
+     * Validate CRL extensions; returns the URIs of the IssuingDistributionPoint fullName (if any) and
+     * whether a fullName (in any name form) restricts the scope of the CRL.
      *
-     * @return list<string>
+     * @return array{uris: list<string>, scoped: bool}
      */
     private function checkCrlExtensions(Asn1Node $wrapper): array
     {
         $uris = [];
+        $scoped = false;
         foreach ($wrapper->child(0)->children() as $ext) {
             $x = self::extension($ext);
             $oid = Asn1::oid($x[0]);
@@ -319,6 +322,7 @@ final class RevocationChecker
                             if (!$dpn->isContext(0)) {
                                 throw new ValidationException('revocationunavailable', 'unsupported IDP name form');
                             }
+                            $scoped = true;
                             foreach ($dpn->children() as $gn) {
                                 if ($gn->isContext(6) && !$gn->constructed) {
                                     $uris[] = $gn->content();
@@ -340,7 +344,7 @@ final class RevocationChecker
                 throw new ValidationException('revocationunavailable', 'unknown critical CRL extension');
             }
         }
-        return $uris;
+        return ['uris' => $uris, 'scoped' => $scoped];
     }
 
     /**

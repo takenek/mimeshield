@@ -376,6 +376,26 @@ final class OutgoingPipelineTest extends TestCase
         self::assertNull($this->opensslDecrypt($d['sent'], 'mallory'));
     }
 
+    /**
+     * Audit MS-10: the total size of all separate envelopes is checked before any encryption.
+     */
+    public function testTotalSizeOfSeparateBccEnvelopesIsBounded(): void
+    {
+        $body = str_repeat("Lorem ipsum dolor sit amet 0123456789.\r\n", 3000);   // ~120 kB
+        $headers = $this->headers(['Cc' => null, 'Bcc' => 'Carol <carol@example.test>, mallory@example.test']);
+        $limited = new OutgoingService($this->aliceKeys, $this->aliceCerts, $this->cms, CmsService::CIPHER_AES_256_CBC, true, true, 'separate', 50 * 1024 * 1024, 100, 400 * 1024);
+        try {
+            $limited->process($this->buildMessage($headers, $body, false), $this->aliceIdentity(), false, true, false);
+            self::fail('expected messagetoolarge');
+        } catch (ValidationException $e) {
+            self::assertSame('messagetoolarge', $e->getUserLabel());
+            self::assertStringContainsString('3 copies', $e->getMessage());
+        }
+        // the same message without Bcc (one copy) fits the budget
+        $msg = $limited->process($this->buildMessage($this->headers(['Cc' => null]), $body, false), $this->aliceIdentity(), false, true, false);
+        self::assertInstanceOf(SmimeMessage::class, $msg);
+    }
+
     public function testSingleBccModePutsEveryoneInOneEnvelope(): void
     {
         $m = $this->buildMessage($this->headers(['Cc' => null, 'Bcc' => 'mallory@example.test']), "Jedna koperta.\r\n", false);
@@ -678,6 +698,114 @@ final class OutgoingPipelineTest extends TestCase
         $bobRec = $bobRepo->get($this->bobKeyId);
         self::assertNotNull($bobRec);
         $this->assertLabel('keystorecorrupt', fn () => $this->bobKeys->privateKey($bobRec));
+    }
+
+    // ================================================================== audit MS-09: own key records
+
+    public function testSwappedCertificateInOwnKeyRecordIsRejected(): void
+    {
+        // database write: replace the certificate of alice's key record by bob's
+        $this->db->query('UPDATE ' . $this->db->table('mimeshield_keys') . ' SET `cert_pem` = ? WHERE `key_id` = ?', TestPki::read('bob.crt'), $this->aliceKeyId);
+        [$keys] = $this->servicesFor(self::ALICE);
+        $rec = (new KeyRepository($this->db, self::ALICE))->get($this->aliceKeyId);
+        self::assertNotNull($rec);
+        $this->assertLabel('keyinvalid', fn () => $rec->certificate());
+        self::assertNull($keys->encryptionCertFor('bob@example.test'));
+    }
+
+    public function testInsertedOwnKeyRecordIsNotUsedForEncryption(): void
+    {
+        // database write: a row with a consistent certificate/fingerprint but no valid key blob
+        $evil = TestPki::cert('mallory');
+        $alice = (new KeyRepository($this->db, self::ALICE))->get($this->aliceKeyId);
+        self::assertNotNull($alice);
+        (new KeyRepository($this->db, self::ALICE))->insert($evil, [], $alice->blob(), $alice->kid(), KeyVault::FORMAT_VERSION);
+        [$keys] = $this->servicesFor(self::ALICE);
+        self::assertNull($keys->encryptionCertFor('mallory@example.test'), 'blob does not authenticate for this fingerprint');
+        self::assertNotNull($keys->encryptionCertFor('alice@example.test'), 'genuine record still used');
+    }
+
+    public function testOwnStatusOnlyForIdentityAddresses(): void
+    {
+        $certsWith = fn (array $identities) => new CertificateService(
+            new CertRepository($this->db, self::ALICE),
+            new PublicCertImporter(),
+            new ChainValidator($this->trust, $this->dir),
+            new RevocationChecker(RevocationChecker::MODE_OFF, null, $this->dir . '/crl'),
+            $this->aliceKeys,
+            100,
+            'block',
+            true,
+            $this->trust,
+            'warn',
+            static fn () => $identities,
+        );
+        self::assertSame('own', $certsWith(['Alice@Example.test'])->resolveOne('alice@example.test')['detail']);
+        // the own certificate covers the address, but it is not an identity of the user: no "own"
+        // shortcut (no correspondent certificate either -> missing)
+        $r = $certsWith(['alias@example.test'])->resolveOne('alice@example.test');
+        self::assertNotSame('own', $r['detail']);
+        self::assertSame(CertificateService::R_MISSING, $r['status']);
+    }
+
+    // ================================================================== audit MS-04: recipient revocation
+
+    /**
+     * Correspondent certificate service with CRL checking on, the intermediate configured by the
+     * administrator (not stored with the record) and a pre-seeded CRL cache (no network).
+     */
+    private function revocationCerts(string $unknownPolicy, bool $seedCrl): CertificateService
+    {
+        $cacheDir = $this->dir . '/rev-' . bin2hex(random_bytes(4));
+        if ($seedCrl) {
+            mkdir($cacheDir . '/crl', 0700, true);
+            $file = $cacheDir . '/crl/' . hash('sha256', 'http://crl.example.test/int.crl') . '.crl';
+            file_put_contents($file, TestPki::read('int.crl'));
+        }
+        $trust = new TrustStore([TestPki::path('root.crt')], false, [TestPki::path('int.crt')]);
+        // the CRL host is denied: without a cached CRL the status is "unknown", never a network request
+        $http = new \MimeShield\Trust\SafeHttpClient(1, 1, [80, 443], [], ['crl.example.test']);
+        return new CertificateService(
+            new CertRepository($this->db, self::ALICE),
+            new PublicCertImporter(),
+            new ChainValidator($trust, $this->dir),
+            new RevocationChecker(RevocationChecker::MODE_CRL, $http, $cacheDir),
+            $this->aliceKeys,
+            100,
+            'block',
+            true,
+            $trust,
+            $unknownPolicy,
+        );
+    }
+
+    public function testRevokedRecipientImportedWithoutChainIsBlocked(): void
+    {
+        $certs = $this->revocationCerts('warn', true);
+        $res = $certs->importFile(TestPki::read('revoked.crt'), false);   // end entity only, no chain
+        self::assertCount(1, $res['imported']);
+
+        $r = $certs->resolveOne('revoked@example.test');
+        self::assertSame(CertificateService::R_INVALID, $r['status']);
+        self::assertSame('revoked', $r['detail']);
+
+        // a certificate that is not on the CRL stays usable
+        $r = $certs->resolveOne('bob@example.test');
+        self::assertSame(CertificateService::R_OK, $r['status']);
+        self::assertSame('trusted', $r['detail']);
+    }
+
+    public function testUnknownRecipientRevocationIsSignalledOrBlockedByPolicy(): void
+    {
+        $warn = $this->revocationCerts('warn', false);
+        $r = $warn->resolveOne('bob@example.test');
+        self::assertSame(CertificateService::R_OK, $r['status']);
+        self::assertSame(CertificateService::D_REVOCATION_UNKNOWN, $r['detail']);
+
+        $block = $this->revocationCerts('block', false);
+        $r = $block->resolveOne('bob@example.test');
+        self::assertSame(CertificateService::R_INVALID, $r['status']);
+        self::assertSame('revocationunknown', $r['detail']);
     }
 
     // ================================================================== service graph

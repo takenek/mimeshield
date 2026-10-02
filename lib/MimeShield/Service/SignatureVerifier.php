@@ -60,13 +60,11 @@ final class SignatureVerifier
         }
 
         $digest = strtolower($check->digest());
-        $forbidden = !in_array($digest, $this->allowedDigests, true) && !in_array($digest, $this->legacyDigests, true);
-        $weak = in_array($digest, $this->legacyDigests, true);
-        if ($check->info === null) {
-            // structure could not be inspected (e.g. exotic BER): no algorithm policy decision possible
-            $forbidden = false;
-            $weak = false;
-        }
+        // structure could not be inspected (e.g. exotic BER): the digest policy cannot be applied, so
+        // the signature is never shown as fully OK (warning "policy not verified", audit MS-08)
+        $policyUnknown = $check->info === null;
+        $forbidden = !$policyUnknown && !in_array($digest, $this->allowedDigests, true) && !in_array($digest, $this->legacyDigests, true);
+        $weak = $policyUnknown || in_array($digest, $this->legacyDigests, true);
 
         if ($signer === null) {
             return new VerificationResult($check, null, null, VerificationResult::IDENTITY_NOFROM, VerificationResult::TIME_VALID, false,
@@ -132,18 +130,6 @@ final class SignatureVerifier
      */
     public function findIssuer(Certificate $cert, array $embedded): ?Certificate
     {
-        $candidates = [];
-        foreach ($embedded as $pem) {
-            try {
-                $candidates[] = Certificate::fromString($pem);
-            } catch (ValidationException) {
-            }
-        }
-        foreach (array_merge($candidates, $this->store->intermediates(), $this->store->anchors()) as $c) {
-            if ($c->fingerprint !== $cert->fingerprint && $cert->isIssuedBy($c)) {
-                return $c;
-            }
-        }
-        return null;
+        return $this->store->findIssuer($cert, $embedded);
     }
 }

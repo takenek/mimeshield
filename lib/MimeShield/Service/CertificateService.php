@@ -20,6 +20,7 @@ use MimeShield\Trust\AddressMatcher;
 use MimeShield\Trust\ChainValidator;
 use MimeShield\Trust\RevocationChecker;
 use MimeShield\Trust\RevocationResult;
+use MimeShield\Trust\TrustStore;
 use MimeShield\Trust\VerificationResult;
 
 /**
@@ -34,6 +35,9 @@ final class CertificateService
     public const R_EXPIRED = 'expired';
     public const R_INVALID = 'invalid';       // wrong usage / revoked / untrusted with policy block
 
+    /** detail of an R_OK result whose revocation status could not be determined (CRL checking on) */
+    public const D_REVOCATION_UNKNOWN = 'trusted-revocationunknown';
+
     public function __construct(
         private readonly CertRepository $repo,
         private readonly PublicCertImporter $importer,
@@ -43,6 +47,9 @@ final class CertificateService
         private readonly int $maxCerts,
         private readonly string $untrustedPolicy = 'block',
         private readonly bool $subjectEmailFallback = true,
+        private readonly ?TrustStore $trust = null,
+        private readonly string $revocationUnknownPolicy = 'warn',
+        private readonly ?\Closure $identityEmails = null,
     ) {
     }
 
@@ -166,8 +173,9 @@ final class CertificateService
      */
     public function resolveOne(string $email): array
     {
-        // own addresses: use own certificate
-        $own = $this->keys->encryptionCertFor($email);
+        // own addresses (identities of the user): use own certificate; any other address is resolved
+        // through the correspondent store with chain validation (audit MS-09)
+        $own = $this->isOwnAddress($email) ? $this->keys->encryptionCertFor($email) : null;
         if ($own !== null) {
             return ['status' => self::R_OK, 'cert' => $own, 'detail' => 'own'];
         }
@@ -212,28 +220,60 @@ final class CertificateService
             return ['status' => self::R_INVALID, 'cert' => $cert, 'detail' => 'usage'];
         }
         $chain = $this->chains->validate($cert, $rec->chainPems(), ChainValidator::PURPOSE_ENCRYPT);
+        $revocationUnknown = false;
         if ($chain->isTrusted() && $this->revocation->isEnabled()) {
-            $issuer = null;
-            foreach ($rec->chainPems() as $pem) {
-                try {
-                    $c = Certificate::fromString($pem);
-                } catch (ValidationException) {
-                    continue;
-                }
-                if ($cert->isIssuedBy($c)) {
-                    $issuer = $c;
-                    break;
-                }
-            }
+            // same issuer lookup as signature verification: stored chain + configured intermediates
+            // + trust anchors (a certificate imported without its chain is still checked, audit MS-04)
+            $issuer = $this->findIssuer($cert, $rec->chainPems());
             $rev = $this->revocation->check($cert, $issuer);
             if ($rev->status === RevocationResult::REVOKED) {
                 return ['status' => self::R_INVALID, 'cert' => $cert, 'detail' => 'revoked'];
+            }
+            if ($rev->status === RevocationResult::UNKNOWN) {
+                Log::info('certs', 'recipient revocation status unknown', ['fingerprint' => $cert->fingerprint, 'reason' => $rev->reason]);
+                if ($this->revocationUnknownPolicy === 'block') {
+                    return ['status' => self::R_INVALID, 'cert' => $cert, 'detail' => 'revocationunknown'];
+                }
+                $revocationUnknown = true;
             }
         }
         if (!$chain->isTrusted()) {
             return ['status' => self::R_UNTRUSTED, 'cert' => $cert, 'detail' => $chain->status];
         }
-        return ['status' => self::R_OK, 'cert' => $cert, 'detail' => 'trusted'];
+        return ['status' => self::R_OK, 'cert' => $cert, 'detail' => $revocationUnknown ? self::D_REVOCATION_UNKNOWN : 'trusted'];
+    }
+
+    private function isOwnAddress(string $email): bool
+    {
+        if ($this->identityEmails === null) {
+            return true;
+        }
+        $mine = array_values(array_filter(array_map(
+            static fn ($e) => AddressMatcher::normalize((string) $e),
+            (array) ($this->identityEmails)()
+        )));
+        return AddressMatcher::matchesAny($email, $mine);
+    }
+
+    /**
+     * @param list<string> $chainPems
+     */
+    private function findIssuer(Certificate $cert, array $chainPems): ?Certificate
+    {
+        if ($this->trust !== null) {
+            return $this->trust->findIssuer($cert, $chainPems);
+        }
+        foreach ($chainPems as $pem) {
+            try {
+                $c = Certificate::fromString($pem);
+            } catch (ValidationException) {
+                continue;
+            }
+            if ($c->fingerprint !== $cert->fingerprint && $cert->isIssuedBy($c)) {
+                return $c;
+            }
+        }
+        return null;
     }
 
     /**

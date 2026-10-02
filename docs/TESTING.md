@@ -167,3 +167,53 @@ after the list reload, visible compose "S/MIME" section); `mimeshield.sh diag` R
 Known test-harness flake (also present before the UX changes): in roughly one of three runs of the
 browser suite headless Chromium stops responding at the login of U10 ("Timed out receiving message
 from renderer"), and U10 and every later case fail with that timeout. A re-run passes.
+
+## 8. Security remediation run (final security report, 2026-10-02)
+
+Re-run after the remediation of findings MS-01 – MS-15 / INF-02, -03, -05, -06 (see CHANGELOG
+"Security"). Only the combinations below were run; the full E2E matrix (MariaDB, PostgreSQL,
+`db_prefix`, Roundcube 1.7.0–1.7.3) was **not** re-run. Since this change the supported minimum is
+Roundcube 1.7.4 (`min-version`); the older tags remain in section 3 as historical results.
+
+| Suite | Environment | Result |
+|---|---|---|
+| PHPUnit | PHP 8.4.26, Roundcube 1.7.4 git library (PHPUnit 11.5) | Tests: 1036, Assertions: 11496, Failures: 0, Skipped: 1 |
+| PHPUnit | PHP 8.2, 8.3 (same library) | Tests: 1036, Failures: 0, Skipped: 1 |
+| PHPUnit | PHP 8.5 (same library) | Tests: 1038, Failures: 0, Skipped: 1 (AES-GCM cases) |
+| PHPUnit | PHP 8.1.34, official 1.7.4 release library (PHPUnit 10.5) | Tests: 1036, Assertions: 11496, Failures: 0, Skipped: 1 |
+| PHPStan level 6 | PHP 8.4 | No errors |
+| PHP-CS-Fixer | dry run | 0 of 85 files need changes |
+| E2E | Roundcube 1.7.4 git × PHP 8.4 × SQLite | 58 passed / 0 failed / 0 skipped (new case 48) |
+| Browser UI | official 1.7.4 release × PHP 8.4, Chromium headless | 13 passed / 0 failed |
+| Interop | PHP 8.4 | 11 passed / 0 failed |
+| `mimeshield.sh diag` | E2E instance | Result: OK (warnings: `1.7-git` is not a release version; OpenSSL 3.5.7 below 3.5.9 on the test machine) |
+
+New regression tests: `IncomingProcessorTest::testForwardedOpaqueSignedEnvelopeIsNotDecrypted`,
+`::testForwardedNestedOpaqueSignedStaysPartial` (MS-02); `ChainValidatorTest::testEcRecipientUnderTlsOnlyIntermediateHasBadPurpose`,
+`::testRsaRecipientUnderTlsOnlyIntermediateIsStillRejectedByOpenssl` (MS-03);
+`OutgoingPipelineTest::testRevokedRecipientImportedWithoutChainIsBlocked`,
+`::testUnknownRecipientRevocationIsSignalledOrBlockedByPolicy` (MS-04),
+`::testSwappedCertificateInOwnKeyRecordIsRejected`, `::testInsertedOwnKeyRecordIsNotUsedForEncryption`,
+`::testOwnStatusOnlyForIdentityAddresses` (MS-09), `::testTotalSizeOfSeparateBccEnvelopesIsBounded` (MS-10);
+`AuditRegressionTest::testExpensiveKeyBagHiddenInEncryptedLayerIsRejected`,
+`::testNormalKeyBagInEncryptedLayerPassesTheInspection` (MS-05),
+`::testUserPreferenceCannotChangeTrustAnchorsOrMasterKeySource` (MS-13), `::testSystemCaStoreIsNotTrustedByDefault` (MS-07);
+`RevocationCheckerTest::testIdpWithDirectoryNameOnlyCannotProveGood`,
+`::testIdpWithMatchingUriAndAnotherNameFormIsInScope` (MS-06); `SignatureVerifierTest::testUninspectableStructureIsNeverFullyOk` (MS-08,
+replaces `testUninspectableStructureMakesNoAlgorithmDecision`); `RateLimiterTest` (MS-11);
+`CliKeygenTest::testDefaultModeAndAppendRefuseDirectoryWritableByOthers`,
+`::testDefaultModeRefusesParentReachedThroughSymbolicLinkInThePath` (MS-12); E2E case 48 (MS-01:
+outdated schema + encryption lock → send and draft refused, plain send still possible) and E2E 35
+(INF-02: export only via POST). The MS-01, MS-02, MS-03, MS-05 and MS-06 tests were also run against the
+code before the fix and failed there (the defects were reproducible).
+
+Remediation verification run (same day, after the follow-up fix in `KdfInspector`: the iteration
+count of an encrypted PKCS#12 layer is validated before the inspection derives its key — new test
+`AuditRegressionTest::testEncryptedLayerWithNonIntegerIterationCountIsRejected`, MS-05): PHPUnit
+PHP 8.4.26 / Roundcube 1.7.4 git library 1037 tests / 0 failures / 1 skipped; PHP 8.5 1039 / 0 / 1;
+PHP 8.1.34 with the official 1.7.4 release library (PHPUnit 10.5) 1037 / 0 / 1; PHPStan level 6
+(`phpstan.neon.dist`, without the strict-rules extension) no errors; PHP-CS-Fixer 0 of 85 files;
+`php -l` 0 errors; E2E 1.7.4 git × PHP 8.4 × SQLite 58 passed / 0 failed; interop 11 passed. The
+browser UI suite and the full E2E matrix were not re-run. Before the fix, the same synthetic layer
+structures made the inspection loop without bound (PKCS#12 PBE) or end with an uncaught `ValueError`
+(PBES2).

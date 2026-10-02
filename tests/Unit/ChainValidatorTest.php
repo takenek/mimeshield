@@ -197,6 +197,38 @@ final class ChainValidatorTest extends TestCase
         self::assertSame(ChainResult::TRUSTED, $r->status);
     }
 
+    /**
+     * Audit MS-03: the "any" purpose used for EC recipients must not drop the EKU restrictions of the
+     * CA certificates on the path (OpenSSL enforces them for RSA recipients with SMIME_ENCRYPT).
+     */
+    public function testEcRecipientUnderTlsOnlyIntermediateHasBadPurpose(): void
+    {
+        $tlsCa = $this->makeCa('tls-only', 'serverAuth, clientAuth');
+        $ec = $this->makeEcCert($tlsCa, null, null);
+        $r = $this->validator()->validate($ec, [(string) file_get_contents($tlsCa . '.crt')], ChainValidator::PURPOSE_ENCRYPT);
+        self::assertSame(ChainResult::BAD_PURPOSE, $r->status);
+        self::assertFalse($r->isTrusted());
+        self::assertSame(['ec runtime (TEST ONLY)', 'tls-only (TEST ONLY)', self::ROOT_SUBJECT], array_map(
+            static fn (string $s) => str_starts_with($s, 'CN=') ? substr($s, 3) : $s,
+            $r->path
+        ));
+
+        // same CA restricted to e-mail protection: accepted
+        $mailCa = $this->makeCa('mail-only', 'emailProtection');
+        $ec = $this->makeEcCert($mailCa, null, null);
+        $r = $this->validator()->validate($ec, [(string) file_get_contents($mailCa . '.crt')], ChainValidator::PURPOSE_ENCRYPT);
+        self::assertSame(ChainResult::TRUSTED, $r->status);
+    }
+
+    public function testRsaRecipientUnderTlsOnlyIntermediateIsStillRejectedByOpenssl(): void
+    {
+        // reference behaviour the EC path is aligned with
+        $tlsCa = $this->makeCa('tls-only', 'serverAuth');
+        $rsa = $this->makeLeaf($tlsCa, 'rsa');
+        $r = $this->validator()->validate($rsa, [(string) file_get_contents($tlsCa . '.crt')], ChainValidator::PURPOSE_ENCRYPT);
+        self::assertFalse($r->isTrusted());
+    }
+
     public function testNoTrustStore(): void
     {
         $alice = TestPki::cert('alice');
@@ -247,15 +279,53 @@ final class ChainValidatorTest extends TestCase
 
     // --- helpers -------------------------------------------------------------------------------
 
+    /**
+     * Runtime intermediate CA (signed by the test root) with the given extendedKeyUsage.
+     *
+     * @return string path prefix of "<prefix>.crt" / "<prefix>.key"
+     */
+    private function makeCa(string $name, string $eku): string
+    {
+        $d = $this->tmp . '/ca-' . bin2hex(random_bytes(4));
+        mkdir($d, 0700);
+        file_put_contents($d . '/ext.cnf', "[e]\nbasicConstraints = critical, CA:TRUE, pathlen:0\nkeyUsage = critical, keyCertSign, cRLSign\n"
+            . 'extendedKeyUsage = ' . $eku . "\nsubjectKeyIdentifier = hash\nauthorityKeyIdentifier = keyid:always\n");
+        self::sh(['/usr/bin/openssl', 'genpkey', '-algorithm', 'EC', '-pkeyopt', 'ec_paramgen_curve:P-256', '-out', $d . '/ca.key']);
+        self::sh(['/usr/bin/openssl', 'req', '-new', '-key', $d . '/ca.key', '-subj', '/CN=' . $name . ' (TEST ONLY)', '-out', $d . '/r.csr']);
+        self::sh(['/usr/bin/openssl', 'x509', '-req', '-in', $d . '/r.csr', '-CA', TestPki::path('root.crt'), '-CAkey', TestPki::path('root.key'),
+            '-set_serial', '0x' . bin2hex(random_bytes(8)), '-extfile', $d . '/ext.cnf', '-extensions', 'e', '-days', '30', '-out', $d . '/ca.crt']);
+        return $d . '/ca';
+    }
+
+    private function makeLeaf(string $caPrefix, string $type): Certificate
+    {
+        $d = $this->tmp . '/leaf-' . bin2hex(random_bytes(4));
+        mkdir($d, 0700);
+        $ku = $type === 'rsa' ? 'digitalSignature, keyEncipherment' : 'digitalSignature, keyAgreement';
+        file_put_contents($d . '/ext.cnf', "[e]\nbasicConstraints = critical, CA:FALSE\nkeyUsage = critical, " . $ku . "\n"
+            . "extendedKeyUsage = emailProtection\nsubjectKeyIdentifier = hash\nauthorityKeyIdentifier = keyid:always\nsubjectAltName = email:leaf@example.test\n");
+        $gen = $type === 'rsa' ? ['-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:2048'] : ['-algorithm', 'EC', '-pkeyopt', 'ec_paramgen_curve:P-256'];
+        self::sh(array_merge(['/usr/bin/openssl', 'genpkey'], $gen, ['-out', $d . '/k.pem']));
+        self::sh(['/usr/bin/openssl', 'req', '-new', '-key', $d . '/k.pem', '-subj', '/CN=leaf runtime (TEST ONLY)', '-out', $d . '/r.csr']);
+        self::sh(['/usr/bin/openssl', 'x509', '-req', '-in', $d . '/r.csr', '-CA', $caPrefix . '.crt', '-CAkey', $caPrefix . '.key',
+            '-set_serial', '0x' . bin2hex(random_bytes(8)), '-extfile', $d . '/ext.cnf', '-extensions', 'e', '-days', '30', '-out', $d . '/c.pem']);
+        return Certificate::fromString((string) file_get_contents($d . '/c.pem'));
+    }
+
+    /**
+     * @param string $ca fixture name ("int") or a runtime CA path prefix from makeCa()
+     */
     private function makeEcCert(string $ca, ?string $notBefore, ?string $notAfter): Certificate
     {
+        $caCrt = str_starts_with($ca, '/') ? $ca . '.crt' : TestPki::path($ca . '.crt');
+        $caKey = str_starts_with($ca, '/') ? $ca . '.key' : TestPki::path($ca . '.key');
         $d = $this->tmp . '/ec-' . bin2hex(random_bytes(4));
         mkdir($d, 0700);
         file_put_contents($d . '/ext.cnf', "[e]\nbasicConstraints = critical, CA:FALSE\nkeyUsage = critical, digitalSignature, keyAgreement\n"
             . "extendedKeyUsage = emailProtection\nsubjectKeyIdentifier = hash\nauthorityKeyIdentifier = keyid:always\nsubjectAltName = email:ec@example.test\n");
         self::sh(['/usr/bin/openssl', 'genpkey', '-algorithm', 'EC', '-pkeyopt', 'ec_paramgen_curve:P-256', '-out', $d . '/k.pem']);
         self::sh(['/usr/bin/openssl', 'req', '-new', '-key', $d . '/k.pem', '-subj', '/CN=ec runtime (TEST ONLY)', '-out', $d . '/r.csr']);
-        $cmd = ['/usr/bin/openssl', 'x509', '-req', '-in', $d . '/r.csr', '-CA', TestPki::path($ca . '.crt'), '-CAkey', TestPki::path($ca . '.key'),
+        $cmd = ['/usr/bin/openssl', 'x509', '-req', '-in', $d . '/r.csr', '-CA', $caCrt, '-CAkey', $caKey,
             '-set_serial', '0x' . bin2hex(random_bytes(8)), '-extfile', $d . '/ext.cnf', '-extensions', 'e', '-out', $d . '/c.pem'];
         if ($notBefore !== null && $notAfter !== null) {
             array_push($cmd, '-not_before', $notBefore, '-not_after', $notAfter);
