@@ -1,0 +1,1 @@
+Schema updates for sqlite go here as YYYYMMDDNN.sql (bin/updatedb.sh --package=mimeshield).

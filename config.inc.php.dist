@@ -1,0 +1,169 @@
+<?php
+
+/*
+ * MIME Shield (mimeshield) - S/MIME for Roundcube - configuration
+ *
+ * Copy this file to config.inc.php (same directory) or to <roundcube>/config/mimeshield.inc.php
+ * and adjust the values. NEVER put a real secret into this .dist file.
+ *
+ * Every option shown here has the same default built into the plugin (lib/MimeShield/Config.php),
+ * so you only need to set what you want to change.
+ */
+
+// ---------------------------------------------------------------------------------------------
+// MASTER KEY (required for storing private keys)
+// ---------------------------------------------------------------------------------------------
+// Users' private keys are stored in the database encrypted (XChaCha20-Poly1305, AES-256-GCM
+// fallback) with a key derived from an installation master key. The master key is NOT stored in
+// the database and must NOT be inside the web root or the plugin directory.
+//
+// Generate it once:   plugins/mimeshield/bin/mimeshield.sh keygen --file=/etc/roundcube/mimeshield.key
+// then make it readable only by the PHP user:  chown root:www-data FILE; chmod 0440 FILE
+//
+// Absolute path of the key file ('' = not used). The plugin refuses files that are world-readable
+// or located under public_html/ or plugins/.
+$config['mimeshield_master_key_file'] = '';
+
+// Alternatively the key can be provided in this environment variable (takes precedence over the
+// file): "kid:base64key[,kid:base64key...]". Set it in the PHP-FPM pool / web server environment.
+$config['mimeshield_master_key_env'] = 'MIMESHIELD_MASTER_KEY';
+
+// Key id used for NEW encryptions. '' = the last key listed. Used during key rotation, see
+// README ("Master key rotation").
+$config['mimeshield_master_key_active'] = '';
+
+// ---------------------------------------------------------------------------------------------
+// FEATURES AND DEFAULTS
+// ---------------------------------------------------------------------------------------------
+// Offer signing / encryption in compose.
+$config['mimeshield_enable_signing'] = true;
+$config['mimeshield_enable_encryption'] = true;
+
+// Default state of the compose checkboxes. Users can choose their own default in
+// Preferences > Encryption (stored as the user preferences 'mimeshield_pref_sign' /
+// 'mimeshield_pref_encrypt'; add those names to $config['dont_override'] to hide the choice).
+$config['mimeshield_sign_default'] = false;
+$config['mimeshield_encrypt_default'] = false;
+
+// Lock compose options to the ADMINISTRATOR defaults above: list of 'sign' and/or 'encrypt'.
+// Locked options are enforced server-side and cannot be changed by user preferences.
+$config['mimeshield_options_lock'] = [];
+
+// Add the sender's own certificate as an additional recipient of every encrypted message so the
+// copy in "Sent" stays readable (RFC 8551 3.3: "SHOULD").
+$config['mimeshield_encrypt_to_self'] = true;
+
+// When "Encrypt" is checked, drafts are stored encrypted to the sender's own certificate only.
+// Drafts are never signed (the signature is created only when the message is finally sent).
+// WARNING: with false, drafts of messages marked for encryption are stored on the IMAP server in
+// plaintext.
+$config['mimeshield_encrypt_drafts'] = true;
+
+// How encrypted messages to Bcc recipients are built:
+//  'separate' - every Bcc recipient gets a separately encrypted copy (default; To/Cc recipients
+//               cannot see that Bcc recipients exist)
+//  'single'   - one encrypted message for everybody (smaller, but each recipient can see the
+//               certificate identifiers of all recipients, including Bcc)
+$config['mimeshield_bcc_mode'] = 'separate';
+
+// Decrypt encrypted messages when replying/forwarding/editing (needed to quote them).
+$config['mimeshield_decrypt_in_compose'] = true;
+
+// ---------------------------------------------------------------------------------------------
+// ALGORITHMS
+// ---------------------------------------------------------------------------------------------
+// Content encryption for new messages. 'aes-256-cbc' (default): verified with NSS (Thunderbird's
+// crypto library) and gpgsm in tests/interop; per vendor documentation also supported by Outlook and
+// Apple Mail (not tested, see docs/INTEROPERABILITY.md). 'aes-128-cbc' also allowed.
+// 'aes-256-gcm' / 'aes-128-gcm' (AuthEnvelopedData, RFC 5083/5084) require PHP >= 8.5 (on older PHP
+// such a setting falls back to aes-256-cbc) and are NOT decryptable by Thunderbird before 154 (and
+// are undocumented for Outlook). RC2, DES and 3DES are never used for new messages.
+// Signatures always use SHA-256 (OpenSSL default for RSA/EC keys).
+$config['mimeshield_cipher'] = 'aes-256-cbc';
+
+// Digest algorithms accepted without a warning when verifying signatures. MD5 is always rejected.
+$config['mimeshield_allowed_digests'] = ['sha256', 'sha384', 'sha512'];
+
+// Legacy digests accepted WITH a visible warning (Outlook on the web signs with SHA-1 by default).
+// Set to [] to reject them.
+$config['mimeshield_legacy_digests'] = ['sha1'];
+
+// Include the S/MIME Capabilities attribute in signatures. OpenSSL's default list advertises
+// RC2/DES, which OpenSSL 3 cannot decrypt, so it is omitted by default.
+$config['mimeshield_smime_capabilities'] = false;
+
+// Minimum RSA key size for imported keys; smaller signer keys are shown with a warning.
+$config['mimeshield_min_rsa_bits'] = 2048;
+
+// ---------------------------------------------------------------------------------------------
+// TRUST (certificate chain validation)
+// ---------------------------------------------------------------------------------------------
+// PEM bundle file(s) with trusted root CAs for S/MIME. Only administrators can define trust
+// anchors; certificates received in messages are never trusted automatically.
+// NOTE: distribution CA bundles (e.g. Debian /etc/ssl/certs/ca-certificates.crt) contain only
+// roots trusted for TLS; add a bundle with S/MIME (e-mail) roots for your correspondents' CAs.
+$config['mimeshield_ca_bundle'] = [];
+
+// Also trust the OpenSSL default CA bundle of the system.
+$config['mimeshield_use_system_ca'] = true;
+
+// PEM file(s) with intermediate CA certificates (NOT trusted, used only to build chains when a
+// message does not include them, e.g. mail from Outlook on the web).
+$config['mimeshield_intermediates'] = [];
+
+// Use the legacy emailAddress attribute of the subject when a certificate has no rfc822Name in
+// its subjectAltName (RFC 8550: receivers MUST recognise it). Shown as "legacy" in the UI.
+$config['mimeshield_subject_email_fallback'] = true;
+
+// Encryption to recipients whose certificate chain does not validate to a trust anchor:
+//  'block' - not allowed (default)
+//  'warn'  - allowed, compose shows "issuer not trusted"
+$config['mimeshield_encrypt_untrusted'] = 'block';
+
+// ---------------------------------------------------------------------------------------------
+// REVOCATION (CRL)
+// ---------------------------------------------------------------------------------------------
+// 'off' (default): revocation is not checked and the UI says "Revocation status: not checked".
+// 'crl': download CRLs (http/https distribution points only) for certificates whose chain is
+//        already trusted. Requests are protected against SSRF (public IPs only, DNS pinning, no
+//        redirects, ports 80/443, size and time limits). OCSP is not implemented.
+$config['mimeshield_revocation'] = 'off';
+$config['mimeshield_revocation_timeout'] = 5;            // seconds per request
+$config['mimeshield_revocation_max_bytes'] = 10485760;   // maximum CRL size
+$config['mimeshield_revocation_cache_ttl'] = 86400;      // maximum cache age (seconds); also bounded by nextUpdate
+$config['mimeshield_revocation_allow_hosts'] = [];       // e.g. ['.actalis.it'] - if set, only these hosts
+$config['mimeshield_revocation_deny_hosts'] = [];        // always refused
+$config['mimeshield_revocation_proxy'] = '';             // optional HTTP proxy (e.g. 'http://proxy:3128')
+
+// ---------------------------------------------------------------------------------------------
+// LIMITS
+// ---------------------------------------------------------------------------------------------
+$config['mimeshield_max_key_upload'] = 102400;           // bytes, PKCS#12/PEM upload (1024 .. 1048576)
+$config['mimeshield_max_cert_upload'] = 65536;           // bytes, public certificate upload (1024 .. 1048576)
+$config['mimeshield_max_keys_per_user'] = 20;            // 1 .. 1000
+$config['mimeshield_max_certs_per_user'] = 500;          // 1 .. 100000
+$config['mimeshield_max_message_size'] = 52428800;       // bytes, messages signed/encrypted/decrypted (>= 65536)
+$config['mimeshield_max_recipients'] = 100;              // per encrypted message (1 .. 1000)
+// PKCS#12 / encrypted PKCS#8 uploads whose KDF costs exceed 2 000 000 iterations (scrypt: N > 2^20,
+// r > 32, p > 4) are always refused (CPU denial-of-service protection).
+
+// ---------------------------------------------------------------------------------------------
+// FILES
+// ---------------------------------------------------------------------------------------------
+// Base directory for temporary files ('' = Roundcube temp_dir). The plugin uses a private
+// "mimeshield" subdirectory (mode 0700). Private keys are never written to disk; message data is
+// (briefly, 0600, removed immediately). A tmpfs (e.g. /dev/shm) avoids writing it to disk.
+$config['mimeshield_temp_dir'] = '';
+
+// Legacy PKCS#12 files (RC2-40, Windows "TripleDES-SHA1" export) cannot be read by OpenSSL 3.
+// When enabled, the plugin converts them with the openssl binary below (proc_open without a
+// shell; file on stdin, password on a pipe - nothing on disk or on the command line).
+$config['mimeshield_pkcs12_legacy_cli'] = false;
+$config['mimeshield_openssl_bin'] = '/usr/bin/openssl';
+
+// ---------------------------------------------------------------------------------------------
+// LOGGING
+// ---------------------------------------------------------------------------------------------
+// Log to <log_dir>/mimeshield (via Roundcube's log driver). Secrets are never logged.
+// Debug adds more detail (still without secrets).
+$config['mimeshield_debug'] = false;

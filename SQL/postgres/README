@@ -1,0 +1,1 @@
+Schema updates for postgres go here as YYYYMMDDNN.sql (bin/updatedb.sh --package=mimeshield).

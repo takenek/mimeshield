@@ -1,0 +1,1 @@
+Schema updates for mysql go here as YYYYMMDDNN.sql (bin/updatedb.sh --package=mimeshield).
