@@ -1,0 +1,130 @@
+/**
+ * MIME Shield - S/MIME for Roundcube (Elastic skin)
+ *
+ * @license GPL-3.0-or-later
+ */
+
+/* settings menu icons */
+.listing.iconized li.mimeshield-keys > a:before {
+    content: "\f084"; /* key */
+}
+.listing.iconized li.mimeshield-contacts > a:before {
+    content: "\f2bb"; /* address card */
+}
+
+/* ---------------------------------------------------------------- message status bar */
+.mimeshield-status {
+    margin: 0 0 .75rem 0;
+    line-height: 1.4;
+}
+.mimeshield-status .mimeshield-headline {
+    display: block;
+    margin-bottom: .25rem;
+}
+.mimeshield-status ul.mimeshield-lines {
+    list-style: none;
+    margin: 0 0 .25rem 0;
+    padding: 0;
+}
+.mimeshield-status li.mimeshield-line {
+    margin: .1rem 0;
+}
+.mimeshield-status .mimeshield-mark {
+    display: inline-block;
+    width: 1.2em;
+    font-weight: bold;
+}
+.mimeshield-status li.mimeshield-ok .mimeshield-mark { color: #2e7d32; }
+.mimeshield-status li.mimeshield-warning .mimeshield-mark { color: #9a6700; }
+.mimeshield-status li.mimeshield-error .mimeshield-mark { color: #c62828; }
+
+.mimeshield-status details.mimeshield-details {
+    margin-top: .25rem;
+}
+.mimeshield-status details.mimeshield-details summary {
+    cursor: pointer;
+}
+.mimeshield-status details.mimeshield-details dl {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: .1rem .75rem;
+    margin: .4rem 0 0 0;
+    font-size: .9em;
+}
+.mimeshield-status details.mimeshield-details dt {
+    font-weight: bold;
+}
+.mimeshield-status details.mimeshield-details dd {
+    margin: 0;
+    word-break: break-all;
+}
+.mimeshield-status .mimeshield-actions {
+    margin: .4rem 0 0 0;
+}
+
+/* fallback (print / when the skin script did not convert the box) */
+div.mimeshield-status:not(.ui) {
+    border: 1px solid #ccc;
+    border-left-width: 4px;
+    padding: .5rem .75rem;
+}
+div.mimeshield-status.mimeshield-level-ok:not(.ui) { border-color: #2e7d32; }
+div.mimeshield-status.mimeshield-level-warning:not(.ui) { border-color: #9a6700; }
+div.mimeshield-status.mimeshield-level-error:not(.ui) { border-color: #c62828; }
+
+@media print {
+    .mimeshield-status details.mimeshield-details[open] summary,
+    .mimeshield-status .mimeshield-actions { display: none; }
+}
+
+/* ---------------------------------------------------------------- compose */
+.mimeshield-compose-status,
+.mimeshield-recipients {
+    font-size: .9em;
+    margin: .25rem 0 .5rem 0;
+}
+.mimeshield-recipients ul {
+    list-style: none;
+    margin: .25rem 0 0 0;
+    padding: 0;
+}
+.mimeshield-recipients li {
+    word-break: break-all;
+}
+.mimeshield-recipients .ok, .mimeshield-compose-status .ok { color: #2e7d32; }
+.mimeshield-recipients .warning, .mimeshield-compose-status .warning { color: #9a6700; }
+.mimeshield-recipients .error, .mimeshield-compose-status .error { color: #c62828; }
+
+.mimeshield-dialog ul {
+    margin: .5rem 0;
+    padding-left: 1.2rem;
+}
+
+/* ---------------------------------------------------------------- settings */
+.mimeshield-list td.name span {
+    display: block;
+}
+.mimeshield-list .mimeshield-sub {
+    font-size: .85em;
+    opacity: .85;
+}
+.mimeshield-badge {
+    display: inline-block;
+    padding: 0 .4em;
+    border-radius: .25em;
+    font-size: .8em;
+    border: 1px solid currentColor;
+}
+.mimeshield-badge-ok { color: #2e7d32; }
+.mimeshield-badge-warning { color: #9a6700; }
+.mimeshield-badge-error { color: #c62828; }
+
+.mimeshield-certtable td.mimeshield-value {
+    word-break: break-all;
+}
+.mimeshield-bindings, .mimeshield-preferred {
+    margin-top: 1rem;
+}
+.mimeshield-warning {
+    margin-bottom: .5rem;
+}

@@ -1,0 +1,61 @@
+[ca_root]
+basicConstraints = critical, CA:TRUE
+keyUsage = critical, keyCertSign, cRLSign
+subjectKeyIdentifier = hash
+
+[ca_int]
+basicConstraints = critical, CA:TRUE, pathlen:0
+keyUsage = critical, keyCertSign, cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+
+[smime_rsa]
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = emailProtection, clientAuth
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+subjectAltName = email:${ENV::SAN_EMAIL}
+crlDistributionPoints = URI:http://crl.example.test/int.crl, URI:ldap://ldap.example.test/int
+authorityInfoAccess = OCSP;URI:http://ocsp.example.test/, caIssuers;URI:http://ca.example.test/int.crt
+
+[smime_ec]
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature, keyAgreement
+extendedKeyUsage = emailProtection
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+subjectAltName = email:${ENV::SAN_EMAIL}
+
+[server]
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = email:${ENV::SAN_EMAIL}
+
+[signonly]
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature
+extendedKeyUsage = emailProtection
+subjectAltName = email:${ENV::SAN_EMAIL}
+
+[legacyemail]
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = emailProtection
+
+[evil]
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = emailProtection
+subjectAltName = @evil_san
+
+[evil_san]
+# ONE rfc822Name whose value contains ", email:" - openssl_x509_parse() renders it ambiguously
+email.1 = victim@example.test, email:attacker@evil.test
+
+[selfsigned]
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature, keyEncipherment
+extendedKeyUsage = emailProtection
+subjectAltName = email:alice@example.test

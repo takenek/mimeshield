@@ -1,0 +1,37 @@
+<roundcube:include file="includes/layout.html" />
+<roundcube:include file="includes/menu.html" />
+<roundcube:include file="includes/settings-menu.html" />
+
+<h1 class="voice"><roundcube:label name="settings" /> : <roundcube:object name="plugin.mimeshieldtitle" /></h1>
+
+<!-- certificate list -->
+<div id="layout-list" class="listbox selected" aria-labelledby="aria-label-mimeshieldlist">
+	<div class="header">
+		<a class="button icon back-sidebar-button" href="#sidebar"><span class="inner"><roundcube:label name="settings" /></span></a>
+		<span id="aria-label-mimeshieldlist" class="header-title"><roundcube:object name="plugin.mimeshieldtitle" /></span>
+		<a class="button icon toolbar-menu-button" href="#list-menu"><span class="inner"><roundcube:label name="menu" /></span></a>
+	</div>
+	<div class="scroller">
+		<roundcube:object name="plugin.mimeshieldlist" id="mimeshield-list" class="listing" />
+	</div>
+</div>
+
+<!-- details frame -->
+<div id="layout-content" role="main">
+	<h2 id="aria-label-toolbar" class="voice"><roundcube:label name="arialabeltoolbar" /></h2>
+	<div class="header" role="toolbar" aria-labelledby="aria-label-toolbar">
+		<a class="button icon back-list-button" href="#back"><span class="inner"><roundcube:label name="back" /></span></a>
+		<span class="header-title"></span>
+		<div id="mimeshieldtoolbar" class="toolbar menu">
+			<roundcube:button command="plugin.mimeshield-import" type="link" class="import disabled" classAct="import"
+				label="import" title="mimeshield.importtitle" innerClass="inner" />
+			<roundcube:button command="plugin.mimeshield-delete" type="link" class="delete disabled" classAct="delete"
+				label="delete" title="delete" innerClass="inner" />
+		</div>
+	</div>
+	<div class="iframe-wrapper">
+		<roundcube:object name="contentframe" id="mimeshield-frame" src="env:blankpage" />
+	</div>
+</div>
+
+<roundcube:include file="includes/footer.html" />

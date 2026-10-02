@@ -1,0 +1,44 @@
+{
+    "name": "takenek/mimeshield",
+    "type": "roundcube-plugin",
+    "description": "MIME Shield - S/MIME for Roundcube 1.7: sign, verify, encrypt, decrypt, PKCS#12 import, encrypted private key store, recipient certificate store, trust validation, multiple identities.",
+    "keywords": ["roundcube", "plugin", "s/mime", "smime", "cms", "pkcs12", "encryption", "signature"],
+    "license": "GPL-3.0-or-later",
+    "homepage": "https://github.com/takenek/mimeshield",
+    "require": {
+        "php": ">=8.1 <8.6",
+        "ext-openssl": "*",
+        "ext-mbstring": "*",
+        "roundcube/plugin-installer": "~0.3.5"
+    },
+    "suggest": {
+        "ext-sodium": "XChaCha20-Poly1305 for the private key store (AES-256-GCM is used otherwise)",
+        "ext-intl": "Internationalised domain names in certificate e-mail addresses",
+        "ext-curl": "Required only for CRL revocation checking"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.5 || ^11.5"
+    },
+    "autoload": {
+        "psr-4": {
+            "MimeShield\\": "lib/MimeShield/"
+        },
+        "classmap": ["mimeshield.php"]
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "MimeShield\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "roundcube": {
+            "min-version": "1.7.0",
+            "sql-dir": "SQL"
+        }
+    },
+    "config": {
+        "allow-plugins": {
+            "roundcube/plugin-installer": true
+        }
+    }
+}

@@ -1,0 +1,17 @@
+# local configuration (may reference secrets)
+/config.inc.php
+# never commit master keys or private material
+*.key.local
+/mimeshield.key
+/master.key
+# tooling
+/vendor/
+/composer.lock
+/.phpunit.cache/
+/.phpunit.result.cache
+/.php-cs-fixer.cache
+/tmp/
+/build/
+/tests/e2e/run/
+/tests/e2e/*.log
+# NOTE: tests/fixtures/pki/ IS committed on purpose: TEST-ONLY keys (see tests/fixtures/pki/README.txt)
