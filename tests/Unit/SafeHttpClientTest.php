@@ -305,8 +305,9 @@ final class SafeHttpClientTest extends TestCase
     }
 
     /**
-     * A fully-qualified host name with a trailing dot designates the same host, but bypasses the
-     * deny-list (and the localhost/.local/.internal name filter).
+     * A fully-qualified host name with a trailing dot designates the same host; it must not bypass
+     * the deny-list or the localhost/.local/.internal name filter (such names are refused outright,
+     * because curl would also resolve them outside the CURLOPT_RESOLVE pin).
      */
     public function testDenyListCannotBeBypassedWithTrailingDot(): void
     {
@@ -316,7 +317,7 @@ final class SafeHttpClientTest extends TestCase
                 $r = $client->checkUrl($url);
                 self::fail($url . ' passed the deny-list as host ' . $r[0]);
             } catch (ValidationException $e) {
-                self::assertSame('host denied', $e->getMessage());
+                self::assertContains($e->getMessage(), ['host denied', 'invalid host']);
             }
         }
     }
@@ -329,7 +330,7 @@ final class SafeHttpClientTest extends TestCase
                 $r = $client->checkUrl($url);
                 self::fail($url . ' passed the name filter as host ' . $r[0]);
             } catch (ValidationException $e) {
-                self::assertSame('host not allowed', $e->getMessage());
+                self::assertContains($e->getMessage(), ['host not allowed', 'invalid host']);
             }
         }
     }

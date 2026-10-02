@@ -45,8 +45,9 @@ final class SignatureVerifier
     /**
      * @param list<string> $fromAddresses   normalised From addresses
      * @param list<string> $senderAddresses normalised Sender addresses
+     * @param list<string> $invalidFrom     From entries that are not acceptable mailboxes (never "covered")
      */
-    public function evaluate(SignatureCheck $check, array $fromAddresses, array $senderAddresses, bool $partial = false, ?int $now = null): VerificationResult
+    public function evaluate(SignatureCheck $check, array $fromAddresses, array $senderAddresses, bool $partial = false, ?int $now = null, array $invalidFrom = []): VerificationResult
     {
         $now ??= time();
         $signer = null;
@@ -94,8 +95,12 @@ final class SignatureVerifier
                     break;
                 }
             }
-            if ($allFromMatch) {
+            if ($allFromMatch && $invalidFrom === []) {
                 $identity = VerificationResult::IDENTITY_MATCH;
+            } elseif ($invalidFrom !== []) {
+                // an extra (unparsable) sender must never be shown as verified
+                $identity = VerificationResult::IDENTITY_MISMATCH;
+                $fromAddresses = array_merge($fromAddresses, $invalidFrom);
             } else {
                 $senderMatch = false;
                 foreach ($senderAddresses as $s) {

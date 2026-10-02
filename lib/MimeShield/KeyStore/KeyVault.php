@@ -54,11 +54,11 @@ final class KeyVault
     /**
      * Encrypt $plaintext for $context. Returns base64 blob.
      */
-    public function encrypt(string $plaintext, string $context): string
+    public function encrypt(#[\SensitiveParameter] string $plaintext, string $context): string
     {
         $alg = $this->forceAlg ?? self::preferredAlgorithm();
         $kid = $this->keys->activeKid();
-        $key = $this->deriveKey($kid);
+        $key = $this->deriveKey($kid, $alg);
         $header = self::MAGIC . chr(self::FORMAT_VERSION) . chr($alg) . chr(strlen($kid)) . $kid;
         $aad = $this->aad($header, $context);
 
@@ -117,7 +117,7 @@ final class KeyVault
             Log::error('keystore', 'private key blob references an unknown master key id', ['kid' => $kid]);
             throw new CryptoException('keystorecorrupt', 'key blob: unknown master key id');
         }
-        $key = $this->deriveKey($kid);
+        $key = $this->deriveKey($kid, $alg);
 
         try {
             if ($alg === self::ALG_XCHACHA20POLY1305) {
@@ -188,7 +188,7 @@ final class KeyVault
      *
      * @param-out string $secret
      */
-    public static function wipe(string &$secret): void
+    public static function wipe(#[\SensitiveParameter] string &$secret): void
     {
         if (function_exists('sodium_memzero')) {
             sodium_memzero($secret);
@@ -199,9 +199,13 @@ final class KeyVault
         $secret = '';
     }
 
-    private function deriveKey(string $kid): string
+    /**
+     * Data key per master key AND algorithm (domain separation: XChaCha20-Poly1305 and AES-GCM never
+     * share a key).
+     */
+    private function deriveKey(string $kid, int $alg): string
     {
-        return hash_hkdf('sha256', $this->keys->key($kid), 32, self::HKDF_INFO, 'kid:' . $kid);
+        return hash_hkdf('sha256', $this->keys->key($kid), 32, self::HKDF_INFO . '|alg:' . $alg, 'kid:' . $kid);
     }
 
     private function aad(string $header, string $context): string

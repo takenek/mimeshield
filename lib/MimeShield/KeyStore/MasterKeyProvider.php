@@ -177,14 +177,21 @@ final class MasterKeyProvider
         }
         foreach ($this->forbiddenRoots as $root) {
             $r = realpath($root);
-            if ($r !== false && ($real === $r || str_starts_with($real, rtrim($r, '/') . '/'))) {
+            if ($r === false) {
+                continue;
+            }
+            // check the resolved file AND the configured path (a symlink inside the web root that
+            // points elsewhere is refused as well)
+            $configuredDir = realpath(dirname($path));
+            $inside = static fn (string $p): bool => $p === $r || str_starts_with($p, rtrim($r, '/') . '/');
+            if ($inside($real) || ($configuredDir !== false && $inside($configuredDir . '/' . basename($path)))) {
                 Log::error('masterkey', 'master key file is inside a web-accessible or plugin directory - refusing');
                 throw new ConfigException('keystoreunavailable', 'master key file inside forbidden directory');
             }
         }
         $perms = fileperms($real);
-        if ($perms !== false && ($perms & 0o007) !== 0) {
-            Log::error('masterkey', 'master key file is world-accessible - refusing (chmod 0400/0440)');
+        if ($perms !== false && ($perms & 0o027) !== 0) {
+            Log::error('masterkey', 'master key file is group-writable or world-accessible - refusing (chmod 0400/0440)');
             throw new ConfigException('keystoreunavailable', 'master key file permissions too open');
         }
         $size = filesize($real);
@@ -213,7 +220,7 @@ final class MasterKeyProvider
     /**
      * @param array<string, string> $keys
      */
-    private static function addKey(array &$keys, string $kid, string $b64): void
+    private static function addKey(array &$keys, string $kid, #[\SensitiveParameter] string $b64): void
     {
         $kid = trim($kid);
         if (!preg_match('/^[a-z0-9]{1,16}$/D', $kid)) {

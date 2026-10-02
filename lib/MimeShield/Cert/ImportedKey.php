@@ -22,6 +22,7 @@ final class ImportedKey
      */
     public function __construct(
         public readonly Certificate $certificate,
+        #[\SensitiveParameter]
         private string $privateKeyPem,
         public readonly array $chain,
     ) {

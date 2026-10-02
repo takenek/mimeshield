@@ -36,7 +36,7 @@ final class LegacyPkcs12Converter
     /**
      * Convert a legacy PKCS#12 into an unencrypted PEM bundle (in memory).
      */
-    public function toPem(string $pkcs12, string $password): string
+    public function toPem(#[\SensitiveParameter] string $pkcs12, #[\SensitiveParameter] string $password): string
     {
         if (!self::isAvailable($this->opensslBinary)) {
             throw new ValidationException('p12legacy', 'legacy converter not available');

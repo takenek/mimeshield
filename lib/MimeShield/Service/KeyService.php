@@ -49,7 +49,7 @@ final class KeyService
      *
      * @return array{id: int, certificate: Certificate, bound: list<int>, warnings: list<string>}
      */
-    public function import(string $data, string $password, array $identities): array
+    public function import(#[\SensitiveParameter] string $data, #[\SensitiveParameter] string $password, array $identities): array
     {
         if ($this->repo->count() >= $this->maxKeys) {
             throw new ValidationException('toomanykeys', 'key limit reached', ['max' => (string) $this->maxKeys]);

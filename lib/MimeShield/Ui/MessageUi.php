@@ -225,7 +225,8 @@ final class MessageUi
                 $rc->output->command('plugin.mimeshield_savecert_done', ['trust' => $r['trust']]);
             }
         } catch (MimeShieldException $e) {
-            $rc->output->show_message('mimeshield.' . $e->getUserLabel(), 'error', $e->getVars());
+            $label = $rc->text_exists('mimeshield.' . $e->getUserLabel()) ? $e->getUserLabel() : 'internalerror';
+            $rc->output->show_message('mimeshield.' . $label, 'error', $e->getVars());
         } catch (\Throwable $e) {
             Log::error('savecert', get_class($e) . ': ' . $e->getMessage());
             $rc->output->show_message('mimeshield.internalerror', 'error');

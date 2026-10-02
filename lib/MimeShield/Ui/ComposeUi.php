@@ -46,7 +46,9 @@ final class ComposeUi
         $restore = null;
         $mode = (string) ($p['mode'] ?? '');
         $message = $p['message'] ?? null;
-        if (($mode === 'draft' || $mode === 'edit') && $message instanceof \rcube_message && $message->uid) {
+        // only the user's own drafts carry trusted options (an "edit as new" of received mail could
+        // contain an attacker-supplied X-MimeShield-Options header)
+        if ($mode === 'draft' && $message instanceof \rcube_message && $message->uid) {
             try {
                 $raw = $rc->storage->get_raw_headers($message->uid);
                 if (is_string($raw) && preg_match('/^' . preg_quote(OutgoingService::DRAFT_HEADER, '/') . ':\s*sign=([01]);\s*encrypt=([01])/mi', $raw, $m)) {
@@ -86,8 +88,8 @@ final class ComposeUi
         $state = self::$state;
 
         $locks = $cfg->optionsLock();
-        $signDefault = (bool) $rc->config->get('mimeshield_sign_default', false);
-        $encDefault = (bool) $rc->config->get('mimeshield_encrypt_default', false) || !empty($state['force']);
+        $signDefault = $cfg->optionDefault('sign');
+        $encDefault = $cfg->optionDefault('encrypt') || (!empty($state['force']) && !$cfg->isLocked('encrypt'));
         if (is_array($state['restore'] ?? null)) {
             $signDefault = !in_array('sign', $locks, true) ? $state['restore']['sign'] : $signDefault;
             $encDefault = !in_array('encrypt', $locks, true) ? ($state['restore']['encrypt'] || !empty($state['force'])) : $encDefault;
@@ -187,16 +189,6 @@ final class ComposeUi
         }
 
         $rc->output->command('plugin.mimeshield_recipients', ['recipients' => $result]);
-        $rc->output->send();
-    }
-
-    /**
-     * AJAX: refreshed identity map (e.g. after importing a certificate in another tab).
-     */
-    public function identitiesAction(): void
-    {
-        $rc = $this->plugin->rcmail();
-        $rc->output->command('plugin.mimeshield_identities', ['identities' => $this->identityMap()]);
         $rc->output->send();
     }
 

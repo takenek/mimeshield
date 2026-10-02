@@ -107,6 +107,14 @@ final class SafeHttpClient
             $opts[CURLOPT_NOPROXY] = '*';
             $opts[CURLOPT_RESOLVE] = [sprintf('%s:%d:%s', $host, $port, str_contains($ip, ':') ? '[' . $ip . ']' : $ip)];
         }
+        if ($this->proxy === '' && defined('CURLOPT_PREREQFUNCTION')) {
+            // PHP >= 8.4: verify the connected address after connect and BEFORE the request is sent
+            $opts[CURLOPT_PREREQFUNCTION] = static function ($ch, string $primaryIp) use ($ip): int {
+                return @inet_pton($primaryIp) === @inet_pton($ip) && self::isPublicIp($primaryIp)
+                    ? CURL_PREREQFUNC_OK
+                    : CURL_PREREQFUNC_ABORT;
+            };
+        }
         if ($scheme === 'https') {
             $opts[CURLOPT_SSL_VERIFYPEER] = true;
             $opts[CURLOPT_SSL_VERIFYHOST] = 2;
@@ -160,9 +168,9 @@ final class SafeHttpClient
             throw new ValidationException('revocationunavailable', 'port not allowed');
         }
         $host = strtolower(trim($p['host'], '[]'));
-        // "host." is the same host as "host": normalise before deny/allow/name checks
-        $host = rtrim($host, '.');
-        if ($host === '' || str_contains($host, '..')) {
+        // "host." resolves like "host" but would not match the CURLOPT_RESOLVE pin entry nor the
+        // deny/allow lists: refuse such names outright
+        if ($host === '' || str_ends_with($host, '.') || str_contains($host, '..')) {
             throw new ValidationException('revocationunavailable', 'invalid host');
         }
         foreach ($this->denyHosts as $d) {

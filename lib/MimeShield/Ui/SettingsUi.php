@@ -641,11 +641,11 @@ final class SettingsUi
         $cfg = $this->plugin->config();
         $noOverride = array_flip((array) $this->rc->config->get('dont_override', []));
         $opts = [];
-        if ($cfg->bool('mimeshield_enable_signing') && !isset($noOverride['mimeshield_sign_default']) && !in_array('sign', $cfg->optionsLock(), true)) {
-            $opts['mimeshield_sign_default'] = 'prefsigndefault';
+        if ($cfg->bool('mimeshield_enable_signing') && !isset($noOverride['mimeshield_pref_sign']) && !$cfg->isLocked('sign')) {
+            $opts['sign'] = 'prefsigndefault';
         }
-        if ($cfg->bool('mimeshield_enable_encryption') && !isset($noOverride['mimeshield_encrypt_default']) && !in_array('encrypt', $cfg->optionsLock(), true)) {
-            $opts['mimeshield_encrypt_default'] = 'prefencryptdefault';
+        if ($cfg->bool('mimeshield_enable_encryption') && !isset($noOverride['mimeshield_pref_encrypt']) && !$cfg->isLocked('encrypt')) {
+            $opts['encrypt'] = 'prefencryptdefault';
         }
         if ($opts === []) {
             return $p;
@@ -655,12 +655,13 @@ final class SettingsUi
             return $p;
         }
         $p['blocks']['mimeshield']['name'] = \rcube::Q($this->plugin->text('smimeprefs'));
-        foreach ($opts as $name => $label) {
+        foreach ($opts as $opt => $label) {
+            $name = 'mimeshield_pref_' . $opt;
             $id = 'rcmfd_' . $name;
-            $cb = new \html_checkbox(['name' => '_' . $name, 'id' => $id, 'value' => 1]);
+            $cb = new \html_checkbox(['name' => '_' . $name, 'id' => $id, 'value' => '1']);
             $p['blocks']['mimeshield']['options'][$name] = [
                 'title' => \html::label($id, \rcube::Q($this->plugin->text($label))),
-                'content' => $cb->show((int) $this->rc->config->get($name, false)),
+                'content' => $cb->show($cfg->optionDefault($opt) ? '1' : ''),
             ];
         }
         return $p;
@@ -676,7 +677,12 @@ final class SettingsUi
         if (($p['section'] ?? '') !== 'encryption') {
             return $p;
         }
-        foreach (['mimeshield_sign_default', 'mimeshield_encrypt_default'] as $name) {
+        $cfg = $this->plugin->config();
+        foreach (['sign', 'encrypt'] as $opt) {
+            if ($cfg->isLocked($opt)) {
+                continue; // never store a user value for a locked option
+            }
+            $name = 'mimeshield_pref_' . $opt;
             $p['prefs'][$name] = (bool) \rcube_utils::get_input_value('_' . $name, \rcube_utils::INPUT_POST);
         }
         return $p;

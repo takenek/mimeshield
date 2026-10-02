@@ -57,12 +57,19 @@ final class Asn1Node
      * Content octets. For BER constructed strings (OCTET STRING split into chunks) the chunks are
      * concatenated.
      */
-    public function content(): string
+    public function content(int $depth = 0): string
     {
         if ($this->constructed && $this->class === Asn1::CLASS_UNIVERSAL && $this->tag === Asn1::TAG_OCTET_STRING && $this->ber) {
+            if ($depth > 8) {
+                // X.690 permits nesting, real encoders use one level; deep nesting is a DoS vector
+                throw new ValidationException('malformed', 'ASN.1: constructed string nested too deeply');
+            }
             $out = '';
             foreach ($this->children() as $c) {
-                $out .= $c->content();
+                if (!$c->isUniversal(Asn1::TAG_OCTET_STRING)) {
+                    throw new ValidationException('malformed', 'ASN.1: bad constructed string segment');
+                }
+                $out .= $c->content($depth + 1);
             }
             return $out;
         }

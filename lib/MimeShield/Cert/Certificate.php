@@ -258,7 +258,9 @@ final class Certificate
         if ($this->sanEmails !== []) {
             return $this->sanEmails;
         }
-        return $allowSubjectFallback ? $this->subjectEmails : [];
+        // RFC 8550: the subject attribute is only a fallback for certificates WITHOUT rfc822Name;
+        // when SAN rfc822Names exist but were rejected, do not silently use the subject instead
+        return $allowSubjectFallback && $this->rejectedEmails === [] ? $this->subjectEmails : [];
     }
 
     /**
@@ -266,7 +268,7 @@ final class Certificate
      */
     public function usesLegacySubjectEmail(): bool
     {
-        return $this->sanEmails === [] && $this->subjectEmails !== [];
+        return $this->sanEmails === [] && $this->rejectedEmails === [] && $this->subjectEmails !== [];
     }
 
     public function isTimeValid(?int $now = null): bool
@@ -436,12 +438,24 @@ final class Certificate
         $out = [];
         foreach ($parts as $k => $v) {
             if (is_array($v)) {
-                $out[(string) $k] = array_values(array_map('strval', $v));
+                $out[self::displaySafe((string) $k)] = array_values(array_map(static fn ($x) => self::displaySafe((string) $x), $v));
             } else {
-                $out[(string) $k] = (string) $v;
+                $out[self::displaySafe((string) $k)] = self::displaySafe((string) $v);
             }
         }
         return $out;
+    }
+
+    /**
+     * Neutralise characters in certificate names that could spoof the display: control characters
+     * (incl. CR/LF), Unicode line/paragraph separators and bidirectional overrides/isolates.
+     */
+    public static function displaySafe(string $s): string
+    {
+        if (!preg_match('//u', $s)) {
+            $s = mb_convert_encoding($s, 'UTF-8', 'UTF-8');
+        }
+        return (string) preg_replace('/[\x00-\x1F\x7F\x{0080}-\x{009F}\x{2028}\x{2029}\x{200E}\x{200F}\x{202A}-\x{202E}\x{2066}-\x{2069}\x{061C}]/u', "\u{FFFD}", $s);
     }
 
     /**

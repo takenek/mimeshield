@@ -56,7 +56,7 @@ final class CmsService
      *
      * @return string DER SignedData
      */
-    public function signDetached(string $content, Certificate $signer, string $privateKeyPem, array $chainPems = []): string
+    public function signDetached(string $content, Certificate $signer, #[\SensitiveParameter] string $privateKeyPem, array $chainPems = []): string
     {
         $tmp = new SecureTemp($this->tempBaseDir);
         try {
@@ -128,8 +128,19 @@ final class CmsService
      *
      * @return null|string Plaintext MIME entity, or null when the message is not decryptable with this key
      */
-    public function decrypt(string $der, Certificate $cert, string $privateKeyPem): ?string
+    public function decrypt(string $der, Certificate $cert, #[\SensitiveParameter] string $privateKeyPem): ?string
     {
+        try {
+            $info = CmsInspector::envelopedData($der);
+            if ($info['type'] === 'authEnveloped-data'
+                && ($info['macLength'] === null || $info['macLength'] < 12 || $info['macLength'] > 16
+                    || ($info['icvLength'] !== null && $info['icvLength'] !== $info['macLength']))) {
+                // RFC 5084: ICV of 12..16 octets; OpenSSL would accept shorter (forgeable) tags
+                throw new CryptoException('unsupportedalgorithm', 'AuthEnvelopedData with truncated authentication tag');
+            }
+        } catch (ValidationException) {
+            // structure not inspectable (exotic encoding): leave the decision to OpenSSL
+        }
         $fixed = CmsInspector::fixGcmIcvLength($der);
         if ($fixed !== null) {
             Log::debug('decrypt', 'patched GCMParameters missing aes-ICVlen');

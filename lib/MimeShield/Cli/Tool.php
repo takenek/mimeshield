@@ -152,6 +152,10 @@ final class Tool
         }
         $kid = $kid !== '' ? $kid : 'k' . gmdate('Ymd');
         $line = MasterKeyProvider::generateLine($kid);
+        if (is_link($file) || is_link(dirname($file))) {
+            $this->out("Refusing to write through a symbolic link: {$file}\n");
+            return 1;
+        }
         if (file_exists($file) && !$append) {
             $this->out("Refusing to overwrite existing file {$file} (use --append to add a new key for rotation)\n");
             return 1;
@@ -166,10 +170,25 @@ final class Tool
                 $this->out("Key id {$kid} already exists in {$file}\n");
                 return 1;
             }
+            // atomic: write a new file next to the old one, then rename (never truncate the only copy)
             $perms = fileperms($file) & 0o777;
-            @chmod($file, 0o600);
-            $ok = file_put_contents($file, rtrim($existing, "\n") . "\n" . $line . "\n", LOCK_EX) !== false;
-            @chmod($file, $perms);
+            $tmp = $file . '.new.' . bin2hex(random_bytes(4));
+            $old = umask(0o277);
+            $fh = @fopen($tmp, 'x');
+            umask($old);
+            $ok = $fh !== false && fwrite($fh, rtrim($existing, "\n") . "\n" . $line . "\n") !== false && fflush($fh);
+            if ($fh !== false) {
+                fclose($fh);
+            }
+            if ($ok) {
+                @chown($tmp, (int) fileowner($file));
+                @chgrp($tmp, (int) filegroup($file));
+                @chmod($tmp, $perms);
+                $ok = @rename($tmp, $file);
+            }
+            if (!$ok) {
+                @unlink($tmp);
+            }
         } else {
             $old = umask(0o277);
             $fh = @fopen($file, 'x');

@@ -110,6 +110,35 @@ final class AddressMatcher
         return array_values(array_unique($out));
     }
 
+    /**
+     * Like parseList(), but also reports address-list entries that are not acceptable mailboxes
+     * (so callers can fail closed instead of silently ignoring them).
+     *
+     * @return array{valid: list<string>, invalid: list<string>}
+     */
+    public static function parseListStrict(string $header, bool $decode = false): array
+    {
+        $valid = [];
+        $invalid = [];
+        if (class_exists('rcube_mime')) {
+            foreach ((array) \rcube_mime::decode_address_list($header, null, $decode, null, false) as $entry) {
+                $addr = is_array($entry) ? (string) ($entry['mailto'] ?? '') : (string) $entry;
+                if ($addr === '' && is_array($entry) && isset($entry['string']) && str_contains((string) $entry['string'], ':;')) {
+                    continue; // empty group such as "undisclosed-recipients:;"
+                }
+                $n = self::normalize($addr);
+                if ($n === null) {
+                    $invalid[] = $addr !== '' ? $addr : (is_array($entry) ? (string) ($entry['string'] ?? '') : '');
+                } else {
+                    $valid[] = $n;
+                }
+            }
+        } else {
+            $valid = self::parseList($header, $decode);
+        }
+        return ['valid' => array_values(array_unique($valid)), 'invalid' => array_values(array_unique($invalid))];
+    }
+
     private static function idnToAscii(string $domain): ?string
     {
         if (class_exists('rcube_utils')) {

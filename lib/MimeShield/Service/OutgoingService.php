@@ -143,8 +143,8 @@ final class OutgoingService
      */
     private function assertFromMatchesIdentity(array $headers, array $identity): void
     {
-        $from = AddressMatcher::parseList((string) ($headers['From'] ?? ''));
-        if (count($from) !== 1 || !AddressMatcher::equals($from[0], (string) $identity['email'])) {
+        $from = AddressMatcher::parseListStrict((string) ($headers['From'] ?? ''));
+        if (count($from['valid']) !== 1 || $from['invalid'] !== [] || !AddressMatcher::equals($from['valid'][0], (string) $identity['email'])) {
             throw new ValidationException('fromidentitymismatch', 'From header does not match the selected identity');
         }
     }
@@ -181,11 +181,20 @@ final class OutgoingService
      */
     private function planRecipients(array $headers, array $identity): array
     {
-        $to = array_merge(
-            AddressMatcher::parseList((string) ($headers['To'] ?? '')),
-            AddressMatcher::parseList((string) ($headers['Cc'] ?? ''))
-        );
-        $bcc = AddressMatcher::parseList((string) ($headers['Bcc'] ?? ''));
+        // every recipient Roundcube will deliver to must be covered: an address the plugin cannot
+        // interpret blocks encryption instead of being silently left out (fail closed)
+        $invalid = [];
+        $lists = [];
+        foreach (['To', 'Cc', 'Bcc'] as $h) {
+            $r = AddressMatcher::parseListStrict((string) ($headers[$h] ?? ''));
+            $lists[$h] = $r['valid'];
+            $invalid = array_merge($invalid, $r['invalid']);
+        }
+        if ($invalid !== []) {
+            throw new MissingCertificatesException(array_fill_keys(array_values(array_unique($invalid)), 'invalid:address'));
+        }
+        $to = array_merge($lists['To'], $lists['Cc']);
+        $bcc = $lists['Bcc'];
         $to = array_values(array_unique($to));
         $bcc = array_values(array_diff(array_unique($bcc), $to));
 

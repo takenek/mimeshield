@@ -99,7 +99,6 @@ class mimeshield extends rcube_plugin
             }
 
             $this->register_action('plugin.mimeshield-recipients', [$this, 'action_recipients']);
-            $this->register_action('plugin.mimeshield-identities', [$this, 'action_identities']);
             $this->register_action('plugin.mimeshield-savecert', [$this, 'action_savecert']);
         } elseif ($this->rc->task === 'settings') {
             $this->add_hook('settings_actions', [$this, 'settings_actions']);
@@ -202,7 +201,15 @@ class mimeshield extends rcube_plugin
         if (!$this->services()->hasIncoming() || empty($p['object'])) {
             return $p;
         }
-        $hidden = $this->services()->incoming(false)->hiddenParts();
+        $incoming = $this->services()->incoming(false);
+        if ($incoming->hasDecrypted()) {
+            // EFAIL hardening for every path that washes decrypted HTML outside print_body() (get
+            // action, HTML reply/forward): never treat a message with decrypted content as "safe"
+            $p['object']->is_safe = false;
+            $this->rc->config->set('show_images', 0);
+            unset($_GET['_safe'], $_REQUEST['_safe']);
+        }
+        $hidden = $incoming->hiddenParts();
         if ($hidden !== [] && is_array($p['object']->attachments)) {
             $p['object']->attachments = array_values(array_filter(
                 $p['object']->attachments,
@@ -272,12 +279,6 @@ class mimeshield extends rcube_plugin
         (new ComposeUi($this))->recipientsAction();
     }
 
-    public function action_identities(): void
-    {
-        $this->requirePostToken();
-        (new ComposeUi($this))->identitiesAction();
-    }
-
     public function action_savecert(): void
     {
         $this->requirePostToken();
@@ -294,12 +295,12 @@ class mimeshield extends rcube_plugin
 
         $sign = (bool) rcube_utils::get_input_value('_mimeshield_sign', rcube_utils::INPUT_POST);
         $encrypt = (bool) rcube_utils::get_input_value('_mimeshield_encrypt', rcube_utils::INPUT_POST);
-        $locks = $cfg->optionsLock();
-        if (in_array('sign', $locks, true)) {
-            $sign = $cfg->bool('mimeshield_sign_default');
+        // locked options are enforced server-side with the ADMINISTRATOR value
+        if ($cfg->isLocked('sign')) {
+            $sign = $cfg->optionDefault('sign');
         }
-        if (in_array('encrypt', $locks, true)) {
-            $encrypt = $cfg->bool('mimeshield_encrypt_default');
+        if ($cfg->isLocked('encrypt')) {
+            $encrypt = $cfg->optionDefault('encrypt');
         }
 
         try {
@@ -386,6 +387,15 @@ class mimeshield extends rcube_plugin
             // main delivery without the Bcc recipients (they got their own envelopes); the Sent copy
             // (original object) keeps the Bcc header
             $p['message'] = $msg->variant();
+            $mainRecipients = \MimeShield\Trust\AddressMatcher::parseList(implode(', ', array_filter([
+                is_array($p['mailto'] ?? null) ? implode(', ', $p['mailto']) : (string) ($p['mailto'] ?? ''),
+                (string) ($p['message']->headers()['Cc'] ?? ''),
+            ])), true);
+            if ($mainRecipients === []) {
+                // Bcc-only message: every recipient already got an envelope; report success so that
+                // Roundcube stores the Sent copy instead of attempting an SMTP transaction without recipients
+                return ['abort' => true, 'result' => true] + $p;
+            }
         }
 
         return $p;
@@ -478,7 +488,11 @@ class mimeshield extends rcube_plugin
 
     public function identity_delete(array $p): array
     {
-        // identities are soft-deleted (del=1): remove the signing bindings explicitly
+        // identities are soft-deleted (del=1): remove the signing bindings explicitly. Roundcube
+        // refuses to delete the last identity (rcube_user::delete_identity), so keep its binding.
+        if (count((array) $this->rc->user->list_identities()) <= 1) {
+            return $p;
+        }
         try {
             $repo = $this->services()->keys()->repository();
             foreach (explode(',', (string) ($p['id'] ?? '')) as $iid) {

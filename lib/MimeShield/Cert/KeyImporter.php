@@ -27,7 +27,7 @@ final class KeyImporter
     {
     }
 
-    public function import(string $data, string $password): ImportedKey
+    public function import(#[\SensitiveParameter] string $data, #[\SensitiveParameter] string $password): ImportedKey
     {
         if ($data === '') {
             throw new ValidationException('importempty', 'empty upload');
@@ -113,8 +113,10 @@ final class KeyImporter
     /**
      * @return array{0: list<string>, 1: string}
      */
-    private function readPkcs12(string $data, string $password): array
+    private function readPkcs12(#[\SensitiveParameter] string $data, #[\SensitiveParameter] string $password): array
     {
+        // reject absurd KDF cost parameters before OpenSSL runs them (CPU DoS)
+        KdfInspector::check($data, 'p12invalid');
         $certs = [];
         [$ok, $errors] = OpenSsl::run(static function () use ($data, &$certs, $password) {
             return openssl_pkcs12_read($data, $certs, $password);
@@ -151,7 +153,7 @@ final class KeyImporter
     /**
      * @return array{0: list<string>, 1: string}
      */
-    private function readPem(string $data, string $password): array
+    private function readPem(#[\SensitiveParameter] string $data, #[\SensitiveParameter] string $password): array
     {
         $certPems = Certificate::splitPemBundle($data, 16);
         if (!preg_match('/-----BEGIN ((?:ENCRYPTED |RSA |EC )?PRIVATE KEY)-----.+?-----END \1-----/s', $data, $m)) {
@@ -159,6 +161,9 @@ final class KeyImporter
         }
         $keyPem = $m[0];
         $isEncrypted = str_contains($keyPem, 'ENCRYPTED');
+        foreach (KdfInspector::encryptedPkcs8Blocks($keyPem) as $der) {
+            KdfInspector::check($der, 'keyinvalid');
+        }
         $pw = $isEncrypted ? $password : null;
         [$key, $errors] = OpenSsl::run(static fn () => openssl_pkey_get_private($keyPem, $pw));
         if (!$key instanceof \OpenSSLAsymmetricKey) {

@@ -145,6 +145,28 @@ final class Config
     }
 
     /**
+     * Default state of a compose option ('sign' | 'encrypt').
+     *
+     * The administrator default lives in mimeshield_<opt>_default; the user's own choice is stored
+     * as the separate preference mimeshield_pref_<opt> (never under the admin key), so a locked
+     * option always uses the administrator value and cannot be overridden by user preferences.
+     */
+    public function optionDefault(string $opt): bool
+    {
+        $admin = $this->bool('mimeshield_' . $opt . '_default');
+        if (in_array($opt, $this->optionsLock(), true)) {
+            return $admin;
+        }
+        $pref = $this->config->get('mimeshield_pref_' . $opt, null);
+        return $pref === null ? $admin : (bool) $pref;
+    }
+
+    public function isLocked(string $opt): bool
+    {
+        return in_array($opt, $this->optionsLock(), true);
+    }
+
+    /**
      * @return list<string>
      */
     public function optionsLock(): array

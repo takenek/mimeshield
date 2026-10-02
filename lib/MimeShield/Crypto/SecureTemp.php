@@ -192,6 +192,27 @@ final class SecureTemp
         }
 
         $real = realpath($dir);
-        return $real === false ? $dir : $real;
+        $real = $real === false ? $dir : $real;
+        self::gc($real);
+        return $real;
+    }
+
+    /**
+     * Remove files left behind by killed workers (normal operation removes them in `finally`).
+     * Roundcube's own temp GC does not descend into subdirectories.
+     */
+    private static function gc(string $dir, int $maxAge = 3600): void
+    {
+        $now = time();
+        foreach (@scandir($dir) ?: [] as $f) {
+            if (!str_starts_with($f, 'RCMTEMPms')) {
+                continue;
+            }
+            $path = $dir . '/' . $f;
+            $st = @lstat($path);
+            if ($st !== false && ($now - $st['mtime']) > $maxAge && is_file($path) && !is_link($path)) {
+                @unlink($path);
+            }
+        }
     }
 }

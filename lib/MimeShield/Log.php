@@ -113,7 +113,7 @@ final class Log
             $s = '[BINARY-REDACTED]';
         }
         // control characters (CR/LF/TAB/ESC ...) -> log injection protection
-        $s = (string) preg_replace('/[\x00-\x1F\x7F]/', ' ', $s);
+        $s = (string) preg_replace('/[\x00-\x1F\x7F]|\x{0085}|[\x{2028}\x{2029}\x{200E}\x{200F}\x{202A}-\x{202E}\x{2066}-\x{2069}]/u', ' ', $s);
 
         if (mb_strlen($s) > self::MAX_VALUE) {
             $s = mb_substr($s, 0, self::MAX_VALUE) . '...';

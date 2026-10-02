@@ -424,7 +424,10 @@ final class Asn1
         $node = new Asn1Node($this->data, $class, $constructed, $tag, $start, $pos, $len, false, $this->ber);
 
         // validate constructed children eagerly (bounded) so malformed input fails early
-        if ($this->eager && $constructed && $depth < self::MAX_DEPTH) {
+        if ($this->eager && $constructed && $len > 0) {
+            if ($depth >= self::MAX_DEPTH) {
+                throw new ValidationException('malformed', 'ASN.1: nesting too deep');
+            }
             $p = $pos;
             $end = $pos + $len;
             while ($p < $end) {

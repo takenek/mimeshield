@@ -304,11 +304,14 @@ final class Asn1Test extends TestCase
      * Definite-length nesting: eager validation is bounded (MAX_DEPTH) and never recurses unboundedly,
      * while elements deeper than the bound are validated as soon as they are traversed.
      */
+    /**
+     * Definite-length nesting deeper than the limit is rejected up front (it must never be left
+     * unvalidated for later lazy traversal, which used to allow memory/recursion bombs).
+     */
     public function testDefiniteNestingDepthBounded(): void
     {
         $levels = 5000;
-        $inner = "\x04\x05abc"; // malformed: length exceeds parent
-        // build nested SEQUENCEs without quadratic concatenation
+        $inner = "\x05\x00";
         $headers = [];
         $len = strlen($inner);
         for ($i = 0; $i < $levels; $i++) {
@@ -319,22 +322,15 @@ final class Asn1Test extends TestCase
         $der = implode('', array_reverse($headers)) . $inner;
 
         $t = microtime(true);
-        $root = Asn1::parse($der); // bounded eager validation does not reach the bad leaf
-        self::assertSame(strlen($der), $root->end());
+        self::assertRejects(static fn () => Asn1::parse($der), 'nesting too deep');
+        self::assertLessThan(2.0, microtime(true) - $t);
 
-        // walking down validates; the malformed leaf is reported as ValidationException
-        $node = $root;
-        $caught = null;
-        try {
-            for ($i = 0; $i < $levels; $i++) {
-                $node = $node->child(0);
-            }
-        } catch (ValidationException $e) {
-            $caught = $e;
+        // 20 levels are fine
+        $ok = "\x05\x00";
+        for ($i = 0; $i < 20; $i++) {
+            $ok = "\x30" . self::len(strlen($ok)) . $ok;
         }
-        self::assertNotNull($caught, 'malformed deep leaf must be rejected on traversal');
-        self::assertStringContainsString('length exceeds buffer', $caught->getMessage());
-        self::assertLessThan(10.0, microtime(true) - $t);
+        self::assertSame(strlen($ok), Asn1::parse($ok)->end());
     }
 
     public function testMalformedLeafWithinDepthBoundRejectedAtParse(): void

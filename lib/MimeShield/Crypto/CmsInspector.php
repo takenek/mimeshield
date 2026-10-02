@@ -158,7 +158,7 @@ final class CmsInspector
     /**
      * Inspect EnvelopedData / AuthEnvelopedData.
      *
-     * @return array{type: string, cipher: string, recipients: list<array<string, string>>}
+     * @return array{type: string, cipher: string, recipients: list<array<string, string>>, macLength: ?int, icvLength: ?int}
      */
     public static function envelopedData(string $der): array
     {
@@ -212,11 +212,30 @@ final class CmsInspector
         }
         $eci = $f[$i + 1] ?? throw new ValidationException('malformed', 'CMS: no encryptedContentInfo');
         $alg = Asn1::oid($eci->child(1)->child(0));
+        $macLength = null;
+        $icvLength = null;
+        if ($type === self::OID_AUTH_ENVELOPED_DATA) {
+            $params = $eci->child(1)->children()[1] ?? null;
+            if ($params !== null && $params->isUniversal(Asn1::TAG_SEQUENCE)) {
+                $pc = $params->children();
+                if (isset($pc[1]) && $pc[1]->isUniversal(Asn1::TAG_INTEGER)) {
+                    $icvLength = Asn1::integer($pc[1]);
+                }
+            }
+            for ($j = $i + 2; $j < count($f); $j++) {
+                if ($f[$j]->isUniversal(Asn1::TAG_OCTET_STRING)) {
+                    $macLength = strlen($f[$j]->content());
+                    break;
+                }
+            }
+        }
 
         return [
             'type' => self::contentTypeName($type),
             'cipher' => self::CIPHERS[$alg] ?? $alg,
             'recipients' => $recipients,
+            'macLength' => $macLength,
+            'icvLength' => $icvLength,
         ];
     }
 

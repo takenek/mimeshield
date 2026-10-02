@@ -229,17 +229,16 @@ final class IncomingProcessor
         $root = $this->isRoot($p, $struct);
         $st = $this->statusOf($id);
 
-        if (strtolower((string) $struct->mimetype) === 'message/rfc822' && !$root) {
-            // S/MIME inside a forwarded message: never decrypted/unwrapped (EFAIL, decryption oracle)
-            $st->notDecrypted = true;
-            return $p;
-        }
-
-        if ((int) $struct->size > $this->maxSize) {
+        if ((int) $struct->size > $this->maxSize || (int) ($msg->headers->size ?? 0) > $this->maxSize) {
             throw new ValidationException('messagetoolarge', 'S/MIME part too large');
         }
 
-        $der = $this->partBytes($struct, $msg);
+        if (strtolower((string) $struct->mimetype) === 'message/rfc822' && !$root) {
+            // S/MIME forwarded as message/rfc822: BODY[id] is the whole embedded message
+            $der = $this->embeddedMessageBody($struct, $msg);
+        } else {
+            $der = $this->partBytes($struct, $msg);
+        }
         if ($der === '') {
             throw new ValidationException('malformed', 'empty S/MIME part');
         }
@@ -286,8 +285,8 @@ final class IncomingProcessor
                 $check = $this->cms->verifyOpaque($der);
                 $content = $check->content ?? $this->cms->extractOpaqueContent($der);
                 if ($this->verifier !== null) {
-                    [$from, $sender] = $this->senderAddresses($struct, $msg);
-                    $st->signature = $this->verifier->evaluate($check, $from, $sender, !$root);
+                    [$from, $sender, $badFrom] = $this->senderAddresses($struct, $msg);
+                    $st->signature = $this->verifier->evaluate($check, $from, $sender, !$root, null, $badFrom);
                     $st->partial = !$root;
                 } elseif (!$check->valid) {
                     $st->signatureError = 'sig_modified';
@@ -300,9 +299,10 @@ final class IncomingProcessor
                 $st->signatureError ??= 'sig_malformed';
                 return $p;
             }
-            if (!$root) {
+            if (!$root && strtolower((string) $struct->mimetype) !== 'message/rfc822') {
                 return $p;
             }
+            // signed (not encrypted) content: shown also for forwarded messages, labelled partial
             $p = $this->inject($p, $content);
             $inner = $this->partStructure(['object' => $msg, 'structure' => $p['structure'], 'mimetype' => $p['mimetype'], 'recursive' => true], $depth + 1);
             $p['structure'] = $inner['structure'];
@@ -329,7 +329,8 @@ final class IncomingProcessor
     {
         $id = (string) $struct->mime_id;
         $st = $this->statusOf($id);
-        $root = $this->isRoot($p, $struct) || strtolower((string) $struct->mimetype) === 'message/rfc822';
+        // a signed forwarded message (message/rfc822) is a separate origin: never "covers" the message
+        $root = $this->isRoot($p, $struct);
         if (isset($struct->parts[1])) {
             $this->hidden[(string) $struct->parts[1]->mime_id] = true;
         }
@@ -354,9 +355,9 @@ final class IncomingProcessor
         [$content, $sigPart] = self::splitSigned($body, $boundary);
         $sigDer = self::decodeSignaturePart($sigPart);
         $check = $this->cms->verifyDetached($content, $sigDer);
-        [$from, $sender] = $this->senderAddresses($struct, $msg);
+        [$from, $sender, $badFrom] = $this->senderAddresses($struct, $msg);
         $st->partial = !$root;
-        $st->signature = $this->verifier->evaluate($check, $from, $sender, !$root);
+        $st->signature = $this->verifier->evaluate($check, $from, $sender, !$root, null, $badFrom);
     }
 
     /**
@@ -401,7 +402,8 @@ final class IncomingProcessor
         if ($this->isDecryptedPart($id)) {
             return null; // nested deeper inside decrypted content: raw bytes not available
         }
-        if ((int) $struct->size > $this->maxSize) {
+        // IMAP reports size 0 for multipart nodes: bound the fetch by the message size
+        if ((int) $struct->size > $this->maxSize || (int) ($msg->headers->size ?? 0) > $this->maxSize) {
             throw new ValidationException('messagetoolarge', 'signed part too large');
         }
         $storage = $this->storage();
@@ -478,6 +480,21 @@ final class IncomingProcessor
         $storage->set_folder($msg->folder);
         $data = $storage->get_message_part($msg->uid, (string) $struct->mime_id, $struct, null, null, true, 0, false);
         return is_string($data) ? $data : '';
+    }
+
+    /**
+     * Transfer-decoded body of the S/MIME entity inside a forwarded message/rfc822 part.
+     */
+    private function embeddedMessageBody(\rcube_message_part $struct, \rcube_message $msg): string
+    {
+        $storage = $this->storage();
+        $storage->set_folder($msg->folder);
+        $raw = $storage->get_raw_body($msg->uid, null, (string) $struct->mime_id);
+        if (!is_string($raw) || $raw === '' || strlen($raw) > $this->maxSize) {
+            return '';
+        }
+        $part = \rcube_mime::parse_message(EntityBuilder::canonicalizeLineEndings($raw));
+        return $part instanceof \rcube_message_part && is_string($part->body) ? $part->body : '';
     }
 
     private function decrypt(string $der): string
@@ -565,7 +582,7 @@ final class IncomingProcessor
     /**
      * From and Sender addresses for the message (or nested message) containing $struct.
      *
-     * @return array{0: list<string>, 1: list<string>}
+     * @return array{0: list<string>, 1: list<string>, 2: list<string>} from, sender, invalid From entries
      */
     private function senderAddresses(\rcube_message_part $struct, \rcube_message $msg): array
     {
@@ -576,7 +593,8 @@ final class IncomingProcessor
             $from = (string) $msg->headers->get('from', false);
             $sender = (string) $msg->headers->get('sender', false);
         }
-        return [AddressMatcher::parseList($from, true), AddressMatcher::parseList($sender, true)];
+        $f = AddressMatcher::parseListStrict($from, true);
+        return [$f['valid'], AddressMatcher::parseList($sender, true), $f['invalid']];
     }
 
     private function storage(): \rcube_storage

@@ -153,7 +153,7 @@ final class RevocationChecker
         if ($cacheFile !== null && is_file($cacheFile) && !is_link($cacheFile)) {
             $age = $now - (int) @filemtime($cacheFile);
             if ($age >= 0 && $age < $this->maxCacheAge) {
-                $der = (string) @file_get_contents($cacheFile);
+                $der = (string) @file_get_contents($cacheFile, false, null, 0, $this->maxCrlBytes + 1);
                 try {
                     $crl = $this->parse($der, $issuer);
                     if ($crl['nextUpdate'] !== null && $crl['nextUpdate'] >= $now) {

@@ -812,6 +812,28 @@ def c22():
     check(T_DECRYPTED in status(page)[1] and 'Bcc test 22' in page, 'carol UI decrypt of Bcc copy')
 
 
+@case('39 Bcc-only encrypted message (separate mode): delivered to the Bcc recipient, Sent copy stored')
+def c39():
+    subj = 'e2e 39 bcc only'
+    r, mark = send('alice', to='', bcc=addr('carol'), subject=subj, body='Bcc only 39', encrypt=True)
+    assert_sent(r)
+    got = sink_new(mark, 1)
+    eq([g['rcpt'] for g in got], [[addr('carol')]], 'exactly one envelope, to the Bcc recipient')
+    check(decryptable_by(got[0]['data'], 'carol'), 'carol cannot decrypt')
+    sent = [raw for _, raw in imap_fetch_all('alice', 'Sent', ('header', 'subject', subj))]
+    check(sent and decryptable_by(sent[-1], 'alice'), 'Sent copy missing or not decryptable by the sender')
+
+
+@case('40 recipient address the plugin cannot verify blocks encryption (fail closed)')
+def c40():
+    subj = 'e2e 40 odd address'
+    r, mark = send('alice', to=addr('bob') + ', "x y"@example.test', subject=subj, body='x', encrypt=True)
+    check(not Roundcube.sent_ok(r), 'message must not be sent')
+    msgs = ' '.join(m for m, _ in Roundcube.messages(r.text))
+    check('NOT' in msgs or 'nie' in msgs.lower(), 'error message expected: %r' % msgs)
+    eq(sink_new(mark, 0, timeout=1), [], 'nothing delivered')
+
+
 @case('23 decrypt message in UI')
 def c23():
     uid = newest_uid('bob', subject=E.state.get('enc19_subject', 'e2e 19 enc'))
@@ -1082,7 +1104,7 @@ def c36():
     check('mimeshield-savecert' not in page, 'no save action in print view')
 
 
-@case('38 re-importing a contact certificate together with its chain makes it usable [bug]')
+@case('38 re-importing a contact certificate together with its chain makes it usable')
 def c38():
     c = session('carol')
     r = c.import_cert(os.path.join(PKI, 'mallory.crt'))
@@ -1155,7 +1177,7 @@ def ci4():
     check('Enveloped opaque I4' in page, 'body')
 
 
-@case('I5 triple wrap: signed(enveloped(signed)) [bug]')
+@case('I5 triple wrap: signed(enveloped(signed))')
 def ci5():
     inner = smime_sign(inner_text('Triple wrapped I5'), 'bob')
     env = smime_encrypt(inner, ['alice'])
