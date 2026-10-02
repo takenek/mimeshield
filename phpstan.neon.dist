@@ -1,0 +1,61 @@
+# MIME Shield - PHPStan configuration
+#
+# Run (PHPStan 2.x):
+#   php -d memory_limit=2G vendor/bin/phpstan analyse -c phpstan.neon.dist
+#
+# Roundcube is not a Composer dependency of the plugin; its classes are resolved from a Roundcube
+# 1.7.x installation via scanDirectories (hard-coded below: adjust the paths, or symlink
+# /opt/rcrun/1.7.4, when your Roundcube lives elsewhere). Run PHPStan on PHP >= 8.3 so that
+# curl constants added in 8.3 (CURLOPT_*_PROTOCOLS_STR, used behind defined()) are known.
+
+parameters:
+    level: 6
+    phpVersion:
+        min: 80100
+        max: 80599
+    paths:
+        - lib
+        - mimeshield.php
+        - bin/mimeshield.sh
+    fileExtensions:
+        - php
+        - sh
+    bootstrapFiles:
+        - tests/phpstan-bootstrap.php
+    scanDirectories:
+        - /opt/rcrun/1.7.4/program/lib
+        - /opt/rcrun/1.7.4/program/include
+        - /opt/rcrun/1.7.4/program/actions
+        - /opt/rcrun/1.7.4/vendor/pear
+    treatPhpDocTypesAsCertain: false
+    reportUnmatchedIgnoredErrors: true
+    tmpDir: tmp/phpstan
+
+    # Every ignore below is a false positive caused by Roundcube's (or bundled PEAR's) untyped or
+    # mis-documented API. Do NOT add ignores for real issues; fix the code instead.
+    ignoreErrors:
+        # Plugin hook handlers: rcube_plugin_api::exec_hook() passes an untyped array whose shape
+        # differs per hook and per Roundcube version; the handler signature is dictated by Roundcube.
+        -
+            identifier: missingType.iterableValue
+            path: mimeshield.php
+        # Mail_mime::setParam() is documented "@param string $value" but build parameters are mixed;
+        # Mail_mime's own default for 'delay_file_io' is the boolean false (vendor/pear/mail_mime/Mail/mime.php).
+        -
+            message: '#^Parameter \#2 \$value of method Mail_mime::setParam\(\) expects string, false given\.$#'
+            identifier: argument.type
+            path: lib/MimeShield/Mime/EntityBuilder.php
+            count: 1
+        # html_checkbox::show() is documented "@param string" but compares (string) $value === (string) attrib['value'].
+        -
+            message: '#^Parameter \#1 \$value of method html_checkbox::show\(\) expects string, int given\.$#'
+            identifier: argument.type
+            path: lib/MimeShield/Ui/SettingsUi.php
+            count: 1
+        # sodium_memzero()'s stub declares @param-out null; KeyVault::wipe() assigns '' immediately
+        # afterwards, so the by-ref parameter is a string on exit (memzero must act on the caller's
+        # variable itself - copying it first would zero a copy only).
+        -
+            identifier: paramOut.type
+            path: lib/MimeShield/KeyStore/KeyVault.php
+            count: 1

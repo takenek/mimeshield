@@ -231,7 +231,7 @@ final class CmsInspector
     public static function fixGcmIcvLength(string $der): ?string
     {
         try {
-            $root = Asn1::parse($der);
+            $root = Asn1::parse($der, false, true);
             if (Asn1::oid($root->child(0)) !== self::OID_AUTH_ENVELOPED_DATA) {
                 return null;
             }

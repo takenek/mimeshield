@@ -15,3 +15,4 @@
 /tests/e2e/run/
 /tests/e2e/*.log
 # NOTE: tests/fixtures/pki/ IS committed on purpose: TEST-ONLY keys (see tests/fixtures/pki/README.txt)
+__pycache__/

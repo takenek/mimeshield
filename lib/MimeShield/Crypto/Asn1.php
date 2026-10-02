@@ -233,19 +233,23 @@ final class Asn1
     public static function time(Asn1Node $node): int
     {
         $s = $node->content();
-        if ($node->tag === self::TAG_UTCTIME && preg_match('/^(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z$/', $s, $m)) {
+        if ($node->tag === self::TAG_UTCTIME && preg_match('/^(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z$/D', $s, $m)) {
             $year = (int) $m[1];
             $year += $year < 50 ? 2000 : 1900;
-        } elseif ($node->tag === self::TAG_GENTIME && preg_match('/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(?:\.\d+)?Z$/', $s, $m)) {
+        } elseif ($node->tag === self::TAG_GENTIME && preg_match('/^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(?:\.\d+)?Z$/D', $s, $m)) {
             $year = (int) $m[1];
         } else {
             throw new ValidationException('malformed', 'ASN.1: bad time');
         }
-        $ts = gmmktime((int) $m[4], (int) $m[5], (int) $m[6], (int) $m[2], (int) $m[3], $year);
-        if ($ts === false) {
+        [$mon, $day, $hour, $min, $sec] = [(int) $m[2], (int) $m[3], (int) $m[4], (int) $m[5], (int) $m[6]];
+        if ($year < 1000 || !checkdate($mon, $day, $year) || $hour > 23 || $min > 59 || $sec > 59) {
+            throw new ValidationException('malformed', 'ASN.1: time out of range');
+        }
+        $dt = \DateTimeImmutable::createFromFormat('!Y-m-d H:i:s', sprintf('%04d-%02d-%02d %02d:%02d:%02d', $year, $mon, $day, $hour, $min, $sec), new \DateTimeZone('UTC'));
+        if ($dt === false) {
             throw new ValidationException('malformed', 'ASN.1: bad time value');
         }
-        return $ts;
+        return $dt->getTimestamp();
     }
 
     /**
@@ -327,9 +331,8 @@ final class Asn1
         if ($path === []) {
             return $newTlv;
         }
-        if ($root->indefinite) {
-            throw new ValidationException('malformed', 'ASN.1: cannot rewrite indefinite length');
-        }
+        // indefinite-length (BER) ancestors are re-encoded with definite lengths (still valid BER,
+        // accepted by OpenSSL); untouched siblings are copied verbatim
         $idx = array_shift($path);
         $children = $root->children();
         if (!isset($children[$idx])) {
@@ -368,8 +371,14 @@ final class Asn1
                     throw new ValidationException('malformed', 'ASN.1: bad tag');
                 }
                 $t = ord($this->data[$pos++]);
+                if ($n === 1 && $t === 0x80) {
+                    throw new ValidationException('malformed', 'ASN.1: non-minimal tag'); // X.690 8.1.2.4.2 c)
+                }
                 $tag = ($tag << 7) | ($t & 0x7F);
             } while ($t & 0x80);
+            if ($tag < 31) {
+                throw new ValidationException('malformed', 'ASN.1: high-tag form for a low tag number');
+            }
         }
         if ($pos >= $limit) {
             throw new ValidationException('malformed', 'ASN.1: truncated length');

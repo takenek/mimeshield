@@ -42,7 +42,7 @@ class mimeshield extends rcube_plugin
     private bool $schemaOk = false;
 
     #[\Override]
-    public function init()
+    public function init(): void
     {
         require_once __DIR__ . '/lib/autoload.php';
 

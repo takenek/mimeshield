@@ -102,6 +102,10 @@ final class RevocationChecker
             } catch (ValidationException $e) {
                 $lastReason = $e->getUserLabel();
                 Log::info('revocation', 'CRL check failed: ' . $e->getMessage(), ['fingerprint' => $cert->fingerprint]);
+            } catch (\TypeError | \ValueError $e) {
+                // malformed (but validly signed) CRL structures must never break message display
+                $lastReason = 'revocationunavailable';
+                Log::info('revocation', 'malformed CRL: ' . $e->getMessage(), ['fingerprint' => $cert->fingerprint]);
             }
         }
 
@@ -114,6 +118,12 @@ final class RevocationChecker
     public function evaluate(string $crlDer, Certificate $cert, Certificate $issuer, int $now): RevocationResult
     {
         $crl = $this->parse($crlDer, $issuer);
+
+        // RFC 5280 6.3.3 (b)(2): a CRL whose IssuingDistributionPoint names another distribution
+        // point is out of scope for this certificate
+        if ($crl['idpUris'] !== [] && array_intersect($crl['idpUris'], $cert->crlUrls) === []) {
+            throw new ValidationException('revocationunavailable', 'CRL scope (distribution point) mismatch');
+        }
 
         if ($crl['thisUpdate'] > $now + self::CLOCK_SKEW) {
             throw new ValidationException('revocationunavailable', 'CRL not yet valid');
@@ -195,7 +205,7 @@ final class RevocationChecker
     /**
      * Parse and verify a CRL against $issuer.
      *
-     * @return array{thisUpdate: int, nextUpdate: ?int, entries: list<array{serial: string, date: ?int, reason: string}>}
+     * @return array{thisUpdate: int, nextUpdate: ?int, entries: list<array{serial: string, date: ?int, reason: string}>, idpUris: list<string>}
      */
     private function parse(string $der, Certificate $issuer): array
     {
@@ -253,8 +263,9 @@ final class RevocationChecker
         if (isset($fields[$i]) && $fields[$i]->isUniversal(Asn1::TAG_SEQUENCE)) {
             $revoked = $fields[$i++];
         }
+        $idpUris = [];
         if (isset($fields[$i]) && $fields[$i]->isContext(0)) {
-            $this->checkCrlExtensions($fields[$i]);
+            $idpUris = $this->checkCrlExtensions($fields[$i]);
         }
 
         $entries = [];
@@ -266,11 +277,11 @@ final class RevocationChecker
                 $reason = 'unspecified';
                 if (isset($e[2])) {
                     foreach ($e[2]->children() as $ext) {
-                        $x = $ext->children();
+                        $x = self::extension($ext);
                         $oid = Asn1::oid($x[0]);
-                        $critical = isset($x[2]) && $x[1]->isUniversal(Asn1::TAG_BOOLEAN) && $x[1]->content() !== "\x00";
+                        $critical = count($x) === 3 && $x[1]->isUniversal(Asn1::TAG_BOOLEAN) && $x[1]->content() !== "\x00";
                         if ($oid === self::OID_REASON) {
-                            $reason = self::reasonName(Asn1::parseContent(end($x))->content());
+                            $reason = self::reasonName(Asn1::parseContent($x[count($x) - 1])->content());
                         } elseif ($oid === self::OID_CERT_ISSUER) {
                             throw new ValidationException('revocationunavailable', 'indirect CRL not supported');
                         } elseif ($critical && $oid !== self::OID_INVALIDITY) {
@@ -282,25 +293,44 @@ final class RevocationChecker
             }
         }
 
-        return ['thisUpdate' => $thisUpdate, 'nextUpdate' => $nextUpdate, 'entries' => $entries];
+        return ['thisUpdate' => $thisUpdate, 'nextUpdate' => $nextUpdate, 'entries' => $entries, 'idpUris' => $idpUris];
     }
 
-    private function checkCrlExtensions(Asn1Node $wrapper): void
+    /**
+     * Validate CRL extensions; returns the URIs of the IssuingDistributionPoint fullName (if any).
+     *
+     * @return list<string>
+     */
+    private function checkCrlExtensions(Asn1Node $wrapper): array
     {
+        $uris = [];
         foreach ($wrapper->child(0)->children() as $ext) {
-            $x = $ext->children();
+            $x = self::extension($ext);
             $oid = Asn1::oid($x[0]);
             $critical = count($x) === 3 && $x[1]->isUniversal(Asn1::TAG_BOOLEAN) && $x[1]->content() !== "\x00";
             if ($oid === self::OID_DELTA_CRL) {
                 throw new ValidationException('revocationunavailable', 'delta CRL not supported');
             }
             if ($oid === self::OID_IDP) {
-                // IssuingDistributionPoint: reject indirect CRLs and attribute-cert-only CRLs
-                foreach (Asn1::parseContent(end($x))->children() as $f) {
-                    if (($f->isContext(4) || $f->isContext(5)) && $f->content() !== "\x00") {
+                foreach (Asn1::parseContent($x[count($x) - 1])->children() as $f) {
+                    if ($f->isContext(0)) {
+                        // distributionPoint: fullName [0] GeneralNames | nameRelativeToCRLIssuer [1]
+                        foreach ($f->children() as $dpn) {
+                            if (!$dpn->isContext(0)) {
+                                throw new ValidationException('revocationunavailable', 'unsupported IDP name form');
+                            }
+                            foreach ($dpn->children() as $gn) {
+                                if ($gn->isContext(6) && !$gn->constructed) {
+                                    $uris[] = $gn->content();
+                                }
+                            }
+                        }
+                    } elseif ($f->isContext(3)) {
+                        // onlySomeReasons: a reason-partitioned CRL cannot prove "not revoked"
+                        throw new ValidationException('revocationunavailable', 'partitioned CRL (onlySomeReasons) not supported');
+                    } elseif (($f->isContext(4) || $f->isContext(5)) && $f->content() !== "\x00") {
                         throw new ValidationException('revocationunavailable', 'indirect or attribute CRL not supported');
-                    }
-                    if ($f->isContext(2) && $f->content() !== "\x00") {
+                    } elseif ($f->isContext(2) && $f->content() !== "\x00") {
                         throw new ValidationException('revocationunavailable', 'CA-only CRL');
                     }
                 }
@@ -310,6 +340,23 @@ final class RevocationChecker
                 throw new ValidationException('revocationunavailable', 'unknown critical CRL extension');
             }
         }
+        return $uris;
+    }
+
+    /**
+     * Children of an Extension SEQUENCE { extnID, critical BOOLEAN OPTIONAL, extnValue OCTET STRING }.
+     *
+     * @return list<Asn1Node>
+     */
+    private static function extension(Asn1Node $ext): array
+    {
+        $x = $ext->children();
+        $n = count($x);
+        if (($n !== 2 && $n !== 3) || !$x[0]->isUniversal(Asn1::TAG_OID) || !$x[$n - 1]->isUniversal(Asn1::TAG_OCTET_STRING)
+            || ($n === 3 && !$x[1]->isUniversal(Asn1::TAG_BOOLEAN))) {
+            throw new ValidationException('revocationunavailable', 'malformed CRL extension');
+        }
+        return $x;
     }
 
     private static function reasonName(string $enumerated): string

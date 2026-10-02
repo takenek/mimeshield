@@ -205,7 +205,7 @@ final class MessageUi
         $mbox = (string) \rcube_utils::get_input_string('_mbox', \rcube_utils::INPUT_POST, true);
         $confirm = (bool) \rcube_utils::get_input_value('_confirm', \rcube_utils::INPUT_POST);
 
-        if (!preg_match('/^[0-9]+$/', $uid) || $mbox === '') {
+        if (!preg_match('/^[0-9]+$/D', $uid) || $mbox === '') {
             $rc->output->show_message('mimeshield.invalidrequest', 'error');
             $rc->output->send();
         }

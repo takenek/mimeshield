@@ -66,7 +66,6 @@ final class Tool
         $this->section('Versions');
         $this->ok('Roundcube', defined('RCMAIL_VERSION') ? RCMAIL_VERSION : 'unknown');
         $this->ok('PHP', PHP_VERSION);
-        $this->check(PHP_VERSION_ID >= 80100, 'PHP >= 8.1', PHP_VERSION);
         $this->ok('OpenSSL (PHP)', OPENSSL_VERSION_TEXT);
 
         $this->section('PHP extensions');

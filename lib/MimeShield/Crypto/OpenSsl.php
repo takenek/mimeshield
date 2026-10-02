@@ -87,7 +87,8 @@ final class OpenSsl
     /**
      * Log OpenSSL errors (redacted) and throw a user-safe exception.
      *
-     * @param list<string> $errors
+     * @param list<string>         $errors
+     * @param array<string, mixed> $context
      */
     public static function fail(string $operation, string $userLabel, array $errors, array $context = []): never
     {

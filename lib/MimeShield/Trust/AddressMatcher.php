@@ -39,7 +39,7 @@ final class AddressMatcher
         $local = substr($address, 0, $at);
         $domain = substr($address, $at + 1);
 
-        if (strlen($local) > 64 || !preg_match('/^[A-Za-z0-9!#$%&\'*+\/=?^_`{|}~-]+(\.[A-Za-z0-9!#$%&\'*+\/=?^_`{|}~-]+)*$/', $local)) {
+        if (strlen($local) > 64 || !preg_match('/^[A-Za-z0-9!#$%&\'*+\/=?^_`{|}~-]+(\.[A-Za-z0-9!#$%&\'*+\/=?^_`{|}~-]+)*$/D', $local)) {
             return null;
         }
 
@@ -51,7 +51,7 @@ final class AddressMatcher
             $domain = $ascii;
         }
         $domain = strtolower(rtrim($domain, '.'));
-        if (!preg_match('/^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/', $domain)) {
+        if (!preg_match('/^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9-]{2,63}$/D', $domain)) {
             return null;
         }
 
@@ -98,9 +98,9 @@ final class AddressMatcher
             }
         } else {
             // fallback used in unit tests without Roundcube: take <...> or bare tokens with @
-            if (preg_match_all('/<([^<>\s]+@[^<>\s]+)>|([^\s,<>;:"]+@[^\s,<>;:"]+)/', $header, $m, PREG_SET_ORDER)) {
+            if (preg_match_all('/<([^<>\s]+@[^<>\s]+)>|([^\s,<>;:"]+@[^\s,<>;:"]+)/', $header, $m, PREG_SET_ORDER | PREG_UNMATCHED_AS_NULL)) {
                 foreach ($m as $hit) {
-                    $addr = $hit[1] !== '' ? $hit[1] : ($hit[2] ?? '');
+                    $addr = $hit[1] ?? $hit[2] ?? '';
                     if (($n = self::normalize($addr)) !== null) {
                         $out[] = $n;
                     }

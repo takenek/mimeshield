@@ -86,17 +86,25 @@ final class EntityBuilder
         $lines = explode("\r\n", $entity);
         $state = 'headers';
         $hdr = '';
+        $boundaries = []; // boundaries declared by enclosing multipart Content-Type headers
         foreach ($lines as $i => $line) {
             if ($state === 'headers') {
                 if ($line === '') {
-                    $state = preg_match('/^content-transfer-encoding:\s*quoted-printable\s*$/im', $hdr) ? 'qp' : 'body';
+                    // unfold header lines and remember a declared boundary
+                    $unfolded = (string) preg_replace('/\n[ \t]+/', ' ', $hdr);
+                    if (preg_match('/^content-type:\s*multipart\/[^\n]*?boundary=(?:"([^"\n]+)"|([^\s;"]+))/im', $unfolded, $m)) {
+                        $boundaries[] = $m[1] !== '' ? $m[1] : ($m[2] ?? '');
+                    }
+                    $state = preg_match('/^content-transfer-encoding:\s*quoted-printable\s*$/imD', $unfolded) ? 'qp' : 'body';
                     $hdr = '';
                 } else {
                     $hdr .= $line . "\n";
                 }
                 continue;
             }
-            if (str_starts_with($line, '--')) {
+            // leave a body only on a real delimiter line ("--b" or "--b--" of an enclosing boundary);
+            // a "-- " signature separator or any other line starting with "--" stays body content
+            if (str_starts_with($line, '--') && self::isDelimiter($line, $boundaries)) {
                 $state = 'headers';
                 $hdr = '';
                 continue;
@@ -106,6 +114,20 @@ final class EntityBuilder
             }
         }
         return implode("\r\n", $lines);
+    }
+
+    /**
+     * @param list<string> $boundaries
+     */
+    private static function isDelimiter(string $line, array $boundaries): bool
+    {
+        $line = rtrim($line, " \t");
+        foreach ($boundaries as $b) {
+            if ($b !== '' && ($line === '--' . $b || $line === '--' . $b . '--')) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

@@ -55,6 +55,11 @@ final class ChainValidator
         }
 
         // diagnostics
+        if ($path['anchored'] && !$path['anchorIsRoot']) {
+            // the reached anchor is an intermediate CA: OpenSSL requires a chain up to a self-signed
+            // root (no partial-chain trust) - the CA bundle must contain the root certificate
+            return new ChainResult(ChainResult::INCOMPLETE, $path['subjects']);
+        }
         if ($path['anchored']) {
             foreach ($path['certs'] as $c) {
                 if ($c->isExpired($now)) {
@@ -140,7 +145,7 @@ final class ChainValidator
      *
      * @param list<Certificate> $pool
      *
-     * @return array{certs: list<Certificate>, subjects: list<string>, anchored: bool, selfSigned: bool}
+     * @return array{certs: list<Certificate>, subjects: list<string>, anchored: bool, anchorIsRoot: bool, selfSigned: bool}
      */
     private function buildPath(Certificate $leaf, array $pool): array
     {
@@ -148,6 +153,7 @@ final class ChainValidator
         $subjects = [$leaf->subject];
         $current = $leaf;
         $anchored = false;
+        $anchorIsRoot = false;
         $selfSigned = false;
 
         for ($depth = 0; $depth < self::MAX_DEPTH; $depth++) {
@@ -158,6 +164,7 @@ final class ChainValidator
                     $subjects[] = $anchor->subject;
                 }
                 $anchored = true;
+                $anchorIsRoot = $anchor->isSelfIssued() && $anchor->isIssuedBy($anchor);
                 break;
             }
             if ($current->isSelfIssued() && $current->isIssuedBy($current)) {
@@ -173,7 +180,7 @@ final class ChainValidator
             $current = $next;
         }
 
-        return ['certs' => $certs, 'subjects' => $subjects, 'anchored' => $anchored, 'selfSigned' => $selfSigned];
+        return ['certs' => $certs, 'subjects' => $subjects, 'anchored' => $anchored, 'anchorIsRoot' => $anchorIsRoot, 'selfSigned' => $selfSigned];
     }
 
     /**

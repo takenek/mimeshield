@@ -34,7 +34,7 @@ final class SafeHttpClient
     ];
 
     private const BLOCKED_V6 = [
-        '::/128', '::1/128', '::ffff:0:0/96', '64:ff9b::/96', '64:ff9b:1::/48', '100::/64',
+        '::/96', '::ffff:0:0/96', '::ffff:0:0:0/96', '64:ff9b::/96', '64:ff9b:1::/48', '100::/64',
         '2001::/32', '2001:db8::/32', '2002::/16', 'fc00::/7', 'fe80::/10', 'fec0::/10', 'ff00::/8',
     ];
 
@@ -116,10 +116,7 @@ final class SafeHttpClient
         $code = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
         $primary = (string) curl_getinfo($ch, CURLINFO_PRIMARY_IP);
         $err = curl_error($ch);
-        if (PHP_VERSION_ID < 80000) {
-            curl_close($ch);
-        }
-        unset($ch);
+        unset($ch); // curl handles are objects (PHP 8): freed here, curl_close() is deprecated in 8.5
 
         if ($tooLarge) {
             throw new ValidationException('revocationunavailable', 'response exceeds size limit');
@@ -163,6 +160,11 @@ final class SafeHttpClient
             throw new ValidationException('revocationunavailable', 'port not allowed');
         }
         $host = strtolower(trim($p['host'], '[]'));
+        // "host." is the same host as "host": normalise before deny/allow/name checks
+        $host = rtrim($host, '.');
+        if ($host === '' || str_contains($host, '..')) {
+            throw new ValidationException('revocationunavailable', 'invalid host');
+        }
         foreach ($this->denyHosts as $d) {
             if (self::hostMatches($host, strtolower($d))) {
                 throw new ValidationException('revocationunavailable', 'host denied');

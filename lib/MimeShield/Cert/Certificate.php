@@ -163,7 +163,23 @@ final class Certificate
         $this->keyBits = $bits;
         $this->curve = $curve;
 
-        $this->parseDer();
+        $d = self::parseDer($der);
+        $this->serialHex = $d['serialHex'];
+        $this->issuerNameDer = $d['issuerNameDer'];
+        $this->subjectNameDer = $d['subjectNameDer'];
+        $this->notBefore = $d['notBefore'];
+        $this->notAfter = $d['notAfter'];
+        $this->sanEmails = $d['sanEmails'];
+        $this->subjectEmails = $d['subjectEmails'];
+        $this->rejectedEmails = $d['rejectedEmails'];
+        $this->keyUsage = $d['keyUsage'];
+        $this->extendedKeyUsage = $d['extendedKeyUsage'];
+        $this->isCa = $d['isCa'];
+        $this->crlUrls = $d['crlUrls'];
+        $this->ocspUrls = $d['ocspUrls'];
+        $this->caIssuerUrls = $d['caIssuerUrls'];
+        $this->subjectKeyId = $d['subjectKeyId'];
+        $this->authorityKeyId = $d['authorityKeyId'];
     }
 
     /**
@@ -171,7 +187,7 @@ final class Certificate
      */
     public static function fromString(string $data): self
     {
-        $data = trim($data);
+        // never trim raw DER: its last byte may legitimately be whitespace or NUL
         if (str_contains($data, '-----BEGIN CERTIFICATE-----')) {
             if (!preg_match('/-----BEGIN CERTIFICATE-----\s*([A-Za-z0-9+\/=\s]+?)\s*-----END CERTIFICATE-----/', $data, $m)) {
                 throw new ValidationException('certinvalid', 'bad PEM');
@@ -442,9 +458,15 @@ final class Certificate
         return implode(', ', $out);
     }
 
-    private function parseDer(): void
+    /**
+     * Security-relevant fields parsed from DER.
+     *
+     * @return array<string, mixed>
+     */
+    private static function parseDer(string $der): array
     {
-        $cert = Asn1::parse($this->der);
+        $out = [];
+        $cert = Asn1::parse($der);
         $tbs = $cert->child(0)->expect(Asn1::TAG_SEQUENCE, true);
         $f = $tbs->children();
         $i = 0;
@@ -452,20 +474,20 @@ final class Certificate
             $i = 1;
         }
         $serial = $f[$i] ?? throw new ValidationException('certinvalid', 'no serial');
-        $this->serialHex = Asn1::integerHex($serial);
+        $out['serialHex'] = Asn1::integerHex($serial);
         $issuer = $f[$i + 2] ?? throw new ValidationException('certinvalid', 'no issuer');
         $validity = $f[$i + 3] ?? throw new ValidationException('certinvalid', 'no validity');
         $subject = $f[$i + 4] ?? throw new ValidationException('certinvalid', 'no subject');
         $issuer->expect(Asn1::TAG_SEQUENCE, true);
         $subject->expect(Asn1::TAG_SEQUENCE, true);
-        $this->issuerNameDer = $issuer->raw();
-        $this->subjectNameDer = $subject->raw();
+        $out['issuerNameDer'] = $issuer->raw();
+        $out['subjectNameDer'] = $subject->raw();
         $v = $validity->expect(Asn1::TAG_SEQUENCE, true)->children();
         if (count($v) !== 2) {
             throw new ValidationException('certinvalid', 'bad validity');
         }
-        $this->notBefore = Asn1::time($v[0]);
-        $this->notAfter = Asn1::time($v[1]);
+        $out['notBefore'] = Asn1::time($v[0]);
+        $out['notAfter'] = Asn1::time($v[1]);
 
         // subject emailAddress attributes (legacy)
         $subjectEmails = [];
@@ -516,7 +538,7 @@ final class Certificate
                         foreach ($value->expect(Asn1::TAG_SEQUENCE, true)->children() as $gn) {
                             if ($gn->isContext(1) && !$gn->constructed) {
                                 $raw = $gn->content();
-                                $email = preg_match('/^[\x21-\x7E]+$/', $raw) ? AddressMatcher::normalize($raw) : null;
+                                $email = preg_match('/^[\x21-\x7E]+$/D', $raw) ? AddressMatcher::normalize($raw) : null;
                                 if ($email === null) {
                                     $rejected[] = $raw;
                                 } else {
@@ -593,16 +615,18 @@ final class Certificate
             }
         }
 
-        $this->sanEmails = array_values(array_unique($san));
-        $this->subjectEmails = array_values(array_unique($subjectEmails));
-        $this->rejectedEmails = $rejected;
-        $this->keyUsage = $ku;
-        $this->extendedKeyUsage = $eku;
-        $this->isCa = $isCa;
-        $this->crlUrls = array_values(array_filter($crl, static fn ($u) => preg_match('/^[\x21-\x7E]{1,2048}$/', $u) === 1));
-        $this->ocspUrls = array_values(array_filter($ocsp, static fn ($u) => preg_match('/^[\x21-\x7E]{1,2048}$/', $u) === 1));
-        $this->caIssuerUrls = array_values(array_filter($caIssuers, static fn ($u) => preg_match('/^[\x21-\x7E]{1,2048}$/', $u) === 1));
-        $this->subjectKeyId = $ski;
-        $this->authorityKeyId = $aki;
+        $out['sanEmails'] = array_values(array_unique($san));
+        $out['subjectEmails'] = array_values(array_unique($subjectEmails));
+        $out['rejectedEmails'] = $rejected;
+        $out['keyUsage'] = $ku;
+        $out['extendedKeyUsage'] = $eku;
+        $out['isCa'] = $isCa;
+        $out['crlUrls'] = array_values(array_filter($crl, static fn ($u) => preg_match('/^[\x21-\x7E]{1,2048}$/D', $u) === 1));
+        $out['ocspUrls'] = array_values(array_filter($ocsp, static fn ($u) => preg_match('/^[\x21-\x7E]{1,2048}$/D', $u) === 1));
+        $out['caIssuerUrls'] = array_values(array_filter($caIssuers, static fn ($u) => preg_match('/^[\x21-\x7E]{1,2048}$/D', $u) === 1));
+        $out['subjectKeyId'] = $ski;
+        $out['authorityKeyId'] = $aki;
+
+        return $out;
     }
 }

@@ -105,7 +105,8 @@ final class Log
         $s = (string) $value;
         // PEM blocks (keys, certificates, CMS) - never log
         $s = (string) preg_replace('/-----BEGIN [A-Z0-9 ]+-----.*?(-----END [A-Z0-9 ]+-----|$)/s', '[PEM-REDACTED]', $s);
-        // long base64/hex-like runs (possible key material, PKCS#12, ciphertext)
+        // line-wrapped base64 (MIME/PEM bodies without armour) and long base64/hex-like runs
+        $s = (string) preg_replace('/(?:[A-Za-z0-9+\/=]{40,}[ \t]*\r?\n[ \t]*){1,}[A-Za-z0-9+\/=]*/', '[BLOB-REDACTED]', $s);
         $s = (string) preg_replace('/[A-Za-z0-9+\/=]{120,}/', '[BLOB-REDACTED]', $s);
         // invalid UTF-8 / binary
         if (!preg_match('//u', $s)) {

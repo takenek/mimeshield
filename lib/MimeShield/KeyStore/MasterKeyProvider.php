@@ -113,7 +113,7 @@ final class MasterKeyProvider
      */
     public static function generateLine(string $kid): string
     {
-        if (!preg_match('/^[a-z0-9]{1,16}$/', $kid)) {
+        if (!preg_match('/^[a-z0-9]{1,16}$/D', $kid)) {
             throw new ConfigException('internalerror', 'invalid key id');
         }
         return $kid . ' ' . base64_encode(random_bytes(self::KEY_BYTES));
@@ -125,6 +125,9 @@ final class MasterKeyProvider
             return;
         }
 
+        // build into locals and publish only after every check passed: a broken configuration must
+        // fail on every call, never be cached as a partial success
+        $keys = [];
         $env = $this->envName !== '' ? getenv($this->envName) : false;
         if (is_string($env) && $env !== '') {
             foreach (explode(',', $env) as $entry) {
@@ -132,28 +135,36 @@ final class MasterKeyProvider
                 if (count($p) !== 2) {
                     throw new ConfigException('keystoreunavailable', 'malformed master key environment variable');
                 }
-                $this->addKey($p[0], $p[1]);
+                self::addKey($keys, $p[0], $p[1]);
             }
-            $this->source = 'env';
+            $source = 'env';
         } elseif ($this->file !== '') {
-            $this->loadFile();
-            $this->source = 'file';
+            $keys = $this->loadFile();
+            $source = 'file';
         } else {
             throw new ConfigException('keystoreunavailable', 'no master key configured');
         }
 
-        if ($this->keys === []) {
+        if ($keys === []) {
             throw new ConfigException('keystoreunavailable', 'master key source contains no key');
         }
-        if ($this->activeKid === '') {
-            $kids = array_keys($this->keys);
-            $this->activeKid = (string) end($kids);
-        } elseif (!isset($this->keys[$this->activeKid])) {
+        $active = $this->activeKid;
+        if ($active === '') {
+            $kids = array_keys($keys);
+            $active = (string) end($kids);
+        } elseif (!isset($keys[$active])) {
             throw new ConfigException('keystoreunavailable', 'configured active master key id not found');
         }
+
+        $this->keys = $keys;
+        $this->activeKid = $active;
+        $this->source = $source;
     }
 
-    private function loadFile(): void
+    /**
+     * @return array<string, string>
+     */
+    private function loadFile(): array
     {
         $path = $this->file;
         if (!str_starts_with($path, '/')) {
@@ -184,6 +195,7 @@ final class MasterKeyProvider
         if ($data === false) {
             throw new ConfigException('keystoreunavailable', 'master key file not readable');
         }
+        $keys = [];
         foreach (preg_split('/\r?\n/', $data) ?: [] as $line) {
             $line = trim($line);
             if ($line === '' || $line[0] === '#') {
@@ -193,23 +205,27 @@ final class MasterKeyProvider
             if ($p === false || count($p) !== 2) {
                 throw new ConfigException('keystoreunavailable', 'malformed master key file line');
             }
-            $this->addKey($p[0], $p[1]);
+            self::addKey($keys, $p[0], $p[1]);
         }
+        return $keys;
     }
 
-    private function addKey(string $kid, string $b64): void
+    /**
+     * @param array<string, string> $keys
+     */
+    private static function addKey(array &$keys, string $kid, string $b64): void
     {
         $kid = trim($kid);
-        if (!preg_match('/^[a-z0-9]{1,16}$/', $kid)) {
+        if (!preg_match('/^[a-z0-9]{1,16}$/D', $kid)) {
             throw new ConfigException('keystoreunavailable', 'invalid master key id');
         }
         $raw = base64_decode(trim($b64), true);
         if ($raw === false || strlen($raw) !== self::KEY_BYTES) {
             throw new ConfigException('keystoreunavailable', 'master key must be 32 random bytes, base64 encoded');
         }
-        if (isset($this->keys[$kid])) {
+        if (isset($keys[$kid])) {
             throw new ConfigException('keystoreunavailable', 'duplicate master key id');
         }
-        $this->keys[$kid] = $raw;
+        $keys[$kid] = $raw;
     }
 }

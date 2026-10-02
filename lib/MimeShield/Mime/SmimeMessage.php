@@ -86,7 +86,7 @@ class SmimeMessage extends \Mail_mime
                 continue;
             }
             $name = (string) ($part['name'] ?? 'message.eml');
-            if (!preg_match('/\.eml$/i', $name)) {
+            if (!preg_match('/\.eml$/iD', $name)) {
                 $name .= '.eml';
             }
             $message->parts[$i]['body'] = $data;
@@ -115,6 +115,13 @@ class SmimeMessage extends \Mail_mime
         return $message->build_params[$name] ?? null;
     }
 
+    /**
+     * @param null|array<string, mixed> $params
+     * @param null|resource|string      $filename
+     * @param bool                      $skip_head
+     *
+     * @return null|string|\PEAR_Error
+     */
     #[\Override]
     public function get($params = null, $filename = null, $skip_head = false)
     {
@@ -131,6 +138,9 @@ class SmimeMessage extends \Mail_mime
         return $this->smimeBody;
     }
 
+    /**
+     * @return array<string, string>
+     */
     #[\Override]
     protected function contentHeaders()
     {

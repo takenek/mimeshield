@@ -113,7 +113,7 @@ final class VerificationResult
                 $out[] = ['cert_badpurpose', [], self::LEVEL_ERROR];
             }
 
-            $status = $this->chain?->status ?? ChainResult::NO_TRUST_STORE;
+            $status = $this->chain->status ?? ChainResult::NO_TRUST_STORE;
             $out[] = match ($status) {
                 ChainResult::TRUSTED => ['chain_trusted', ['issuer' => $signer->issuerDisplayName()], self::LEVEL_OK],
                 ChainResult::UNTRUSTED_ROOT => ['chain_untrusted', ['issuer' => $signer->issuerDisplayName()], self::LEVEL_WARNING],

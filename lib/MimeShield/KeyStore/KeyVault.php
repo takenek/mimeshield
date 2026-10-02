@@ -106,12 +106,17 @@ final class KeyVault
             throw new CryptoException('keystorecorrupt', 'key blob: bad key id');
         }
         $kid = substr($raw, 6, $kidLen);
-        if (!preg_match('/^[a-z0-9]{1,16}$/', $kid)) {
+        if (!preg_match('/^[a-z0-9]{1,16}$/D', $kid)) {
             throw new CryptoException('keystorecorrupt', 'key blob: bad key id');
         }
         $header = substr($raw, 0, 6 + $kidLen);
         $rest = substr($raw, 6 + $kidLen);
         $aad = $this->aad($header, $context);
+        if (!in_array($kid, $this->keys->kids(), true)) {
+            // a tampered/copied blob or a master key removed too early during rotation
+            Log::error('keystore', 'private key blob references an unknown master key id', ['kid' => $kid]);
+            throw new CryptoException('keystorecorrupt', 'key blob: unknown master key id');
+        }
         $key = $this->deriveKey($kid);
 
         try {
@@ -159,7 +164,7 @@ final class KeyVault
         }
         $len = ord($raw[5]);
         $kid = substr($raw, 6, $len);
-        return preg_match('/^[a-z0-9]{1,16}$/', $kid) ? $kid : null;
+        return preg_match('/^[a-z0-9]{1,16}$/D', $kid) ? $kid : null;
     }
 
     /**
@@ -180,6 +185,8 @@ final class KeyVault
 
     /**
      * Best-effort wipe of a secret string held in a variable.
+     *
+     * @param-out string $secret
      */
     public static function wipe(string &$secret): void
     {

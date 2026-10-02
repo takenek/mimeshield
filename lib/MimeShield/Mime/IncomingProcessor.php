@@ -57,6 +57,9 @@ final class IncomingProcessor
     /** @var null|callable(): \rcube_storage */
     private $storageFactory;
 
+    /** Whether the message root is a single part (root part id '1') */
+    private bool $singlePartRoot = false;
+
     public function __construct(
         private readonly KeyService $keys,
         private readonly CmsService $cms,
@@ -83,6 +86,9 @@ final class IncomingProcessor
             return $p;
         }
         $mimetype = strtolower((string) ($p['mimetype'] ?? $struct->mimetype));
+        if ($depth === 0 && $struct === ($msg->headers->structure ?? null) && empty($struct->parts)) {
+            $this->singlePartRoot = true;
+        }
 
         try {
             if (in_array($mimetype, self::MIME_TYPES, true) || $this->isP7mOctetStream($struct, $mimetype)) {
@@ -119,7 +125,8 @@ final class IncomingProcessor
                 return $this->status[$id];
             }
             if ($id === '' || $id === '0') {
-                return $this->status['0'] ?? $this->status['1'] ?? null;
+                // '1' is the root only for single-part messages
+                return $this->status['0'] ?? ($this->singlePartRoot ? ($this->status['1'] ?? null) : null);
             }
             $pos = strrpos($id, '.');
             $id = $pos === false ? '0' : substr($id, 0, $pos);
@@ -139,7 +146,8 @@ final class IncomingProcessor
      */
     public function hiddenParts(): array
     {
-        return array_keys($this->hidden);
+        // array keys like '2' become ints in PHP: always return strings
+        return array_map('strval', array_keys($this->hidden));
     }
 
     public function isDecryptedPart(string $partId): bool
@@ -180,6 +188,9 @@ final class IncomingProcessor
         return $this->status[$id] ??= new PartStatus($id);
     }
 
+    /**
+     * @param array<string, mixed> $p
+     */
     private function isRoot(array $p, \rcube_message_part $struct): bool
     {
         $msg = $p['object'];
@@ -192,7 +203,7 @@ final class IncomingProcessor
     {
         // Outlook/Exchange sometimes send application/octet-stream + *.p7m (RFC 8551 3.10)
         return $mimetype === 'application/octet-stream'
-            && preg_match('/\.p7m$/i', (string) ($struct->filename ?: ($struct->ctype_parameters['name'] ?? ''))) === 1;
+            && preg_match('/\.p7m$/iD', (string) ($struct->filename ?: ($struct->ctype_parameters['name'] ?? ''))) === 1;
     }
 
     private function isSmimeSigned(\rcube_message_part $struct): bool
@@ -213,6 +224,12 @@ final class IncomingProcessor
         $root = $this->isRoot($p, $struct);
         $st = $this->statusOf($id);
 
+        if (strtolower((string) $struct->mimetype) === 'message/rfc822' && !$root) {
+            // S/MIME inside a forwarded message: never decrypted/unwrapped (EFAIL, decryption oracle)
+            $st->notDecrypted = true;
+            return $p;
+        }
+
         if ((int) $struct->size > $this->maxSize) {
             throw new ValidationException('messagetoolarge', 'S/MIME part too large');
         }
@@ -221,7 +238,7 @@ final class IncomingProcessor
         if ($der === '') {
             throw new ValidationException('malformed', 'empty S/MIME part');
         }
-        if ($der[0] !== "\x30" && preg_match('/^[A-Za-z0-9+\/=\s]+$/', $der)) {
+        if ($der[0] !== "\x30" && preg_match('/^[A-Za-z0-9+\/=\s]+$/D', $der)) {
             // base64 without Content-Transfer-Encoding header
             $der = (string) base64_decode(preg_replace('/\s+/', '', $der) ?? '', true);
         }
@@ -300,12 +317,15 @@ final class IncomingProcessor
      * Verify a clear-signed (multipart/signed) entity. The structure is left as is (Roundcube shows
      * the first part); the smime.p7s part is hidden from the attachment list.
      */
+    /**
+     * @param array<string, mixed> $p
+     */
     private function handleSigned(array $p, \rcube_message_part $struct, \rcube_message $msg): void
     {
         $id = (string) $struct->mime_id;
         $st = $this->statusOf($id);
         $root = $this->isRoot($p, $struct) || strtolower((string) $struct->mimetype) === 'message/rfc822';
-        if (isset($struct->parts[1]->mime_id)) {
+        if (isset($struct->parts[1])) {
             $this->hidden[(string) $struct->parts[1]->mime_id] = true;
         }
         if ($this->verifier === null) {

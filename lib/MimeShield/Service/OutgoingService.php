@@ -114,6 +114,8 @@ final class OutgoingService
     /**
      * Drafts are never signed (a signature would be invalid after the next edit and would need the
      * key on every autosave). With encryption requested they are encrypted to the sender only.
+     *
+     * @param array{identity_id: int|string, email: string} $identity
      */
     private function processDraft(\Mail_mime $message, array $identity, bool $sign, bool $encrypt): ?SmimeMessage
     {
@@ -148,6 +150,8 @@ final class OutgoingService
     }
 
     /**
+     * @param array{identity_id: int|string, email: string} $identity
+     *
      * @return array{der: string, micalg: string, fingerprint: string}
      */
     private function sign(string $inner, array $identity): array
