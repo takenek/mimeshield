@@ -82,8 +82,10 @@ chmod 0440 /etc/roundcube/mimeshield.key
 example. Create the directory deliberately, e.g.
 `install -d -m 0750 -o root -g www-data /etc/roundcube` (group = the PHP-FPM / web server user),
 or pass `--create-parent`: missing directories are then created with mode 0700 for the user running
-the tool (never through a symbolic link, never inside a directory writable by other users without
-the sticky bit); adjust their group and mode afterwards so the PHP process can read the key.
+the tool. It refuses (and creates nothing) when any existing component of the path, from `/` down,
+is a symbolic link (give the real path), is owned by a user other than root or the user running the
+tool, or is writable by group/others without the sticky bit. Adjust the group and mode of the new
+directories afterwards so the PHP process can read the key.
 
 Back this file up **separately from database backups** (without it stored keys are unusable;
 with it plus a DB dump all keys are exposed). Alternative: provide the key in the environment

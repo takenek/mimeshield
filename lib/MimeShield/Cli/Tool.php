@@ -237,8 +237,9 @@ final class Tool
      * The directory for a new key file must exist, be a real directory and be writable. Missing
      * directories are only created on the administrator's explicit request (--create-parent): one
      * level at a time with mkdir() (which never follows a symbolic link and fails if the name
-     * exists), mode 0700 for the current user, never below a symbolic link or inside a directory
-     * that other users can modify.
+     * exists), mode 0700 for the current user, only when no existing component of the path is a
+     * symbolic link, owned by a user other than root / the current user, or writable by other
+     * users without the sticky bit.
      */
     private function prepareParentDir(string $dir, bool $create): bool
     {
@@ -277,20 +278,41 @@ final class Tool
                 return false;
             }
         }
+        // every existing component from "/" down is checked with lstat(): a symbolic link anywhere in
+        // the chain, a component owned by another user (only root and the current user are trusted)
+        // or one writable by group/others without the sticky bit stops the operation
+        $euid = function_exists('posix_geteuid') ? posix_geteuid() : (int) getmyuid();
+        $base = '/';
         $missing = [];
-        $base = $dir;
-        while (!file_exists($base) && !is_link($base)) {
-            array_unshift($missing, basename($base));
-            $base = dirname($base);
-        }
-        if (is_link($base) || !is_dir($base)) {
-            $this->out("Refusing to create {$dir}: {$base} is not a real directory\n");
-            return false;
-        }
-        $mode = (int) @fileperms($base);
-        if (($mode & 0o022) !== 0 && ($mode & 0o1000) === 0) {
-            $this->out("Refusing to create {$dir}: {$base} is writable by other users (and not sticky)\n");
-            return false;
+        foreach (array_merge([''], $parts) as $i => $name) {
+            $path = $i === 0 ? '/' : $base . ($base === '/' ? '' : '/') . $name;
+            if ($missing !== []) {
+                $missing[] = $name;
+                continue;
+            }
+            clearstatcache(true, $path);
+            $st = @lstat($path);
+            if ($st === false) {
+                $missing[] = $name;
+                continue;
+            }
+            if (($st['mode'] & 0o170000) === 0o120000) {
+                $this->out("Refusing to create {$dir}: {$path} is a symbolic link (use the real path)\n");
+                return false;
+            }
+            if (($st['mode'] & 0o170000) !== 0o040000) {
+                $this->out("Refusing to create {$dir}: {$path} is not a directory\n");
+                return false;
+            }
+            if ($st['uid'] !== 0 && $st['uid'] !== $euid) {
+                $this->out("Refusing to create {$dir}: {$path} is owned by uid {$st['uid']} (only root or the current user are trusted)\n");
+                return false;
+            }
+            if (($st['mode'] & 0o022) !== 0 && ($st['mode'] & 0o1000) === 0) {
+                $this->out("Refusing to create {$dir}: {$path} is writable by other users (and not sticky)\n");
+                return false;
+            }
+            $base = $path;
         }
         $old = umask(0o077);
         try {

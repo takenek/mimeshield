@@ -16,8 +16,9 @@ semantic versioning.
 
 ### Added
 - `mimeshield.sh keygen --create-parent`: explicitly create missing parent directories of `--file`
-  (mode 0700 for the current user; never through a symbolic link, never in a directory writable by
-  other users without the sticky bit).
+  (mode 0700 for the current user). Every existing path component from `/` is checked with
+  `lstat()`: a symbolic link anywhere in the path, a component owned by a user other than root / the
+  current user, or one writable by group/others without the sticky bit makes it fail closed.
 
 ### Fixed
 - Badges in the certificate lists were stretched to the full row width.

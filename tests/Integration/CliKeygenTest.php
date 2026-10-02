@@ -104,7 +104,7 @@ final class CliKeygenTest extends TestCase
         // the missing directory would be created below a symbolic link
         [$code, $out] = $this->keygen(['keygen', 'file' => $this->base . '/link/sub/mimeshield.key', 'create-parent' => true]);
         self::assertSame(1, $code);
-        self::assertStringContainsString('is not a real directory', $out);
+        self::assertStringContainsString($this->base . '/link is a symbolic link', $out);
         self::assertFileDoesNotExist($this->base . '/real/sub');
 
         // a dangling symbolic link in place of the directory to create
@@ -113,6 +113,44 @@ final class CliKeygenTest extends TestCase
         self::assertSame(1, $code);
         self::assertStringContainsString('symbolic link', $out);
         self::assertFileDoesNotExist($this->base . '/nowhere');
+    }
+
+    public function testCreateParentRefusesSymbolicLinkInTheMiddleOfThePath(): void
+    {
+        // link -> real; real/existing is a real directory: the existing part of the path below the
+        // symbolic link must not be trusted either
+        mkdir($this->base . '/real/existing', 0o700, true);
+        symlink($this->base . '/real', $this->base . '/link');
+
+        [$code, $out] = $this->keygen(['keygen', 'file' => $this->base . '/link/existing/new/sub/mimeshield.key', 'create-parent' => true]);
+        self::assertSame(1, $code, $out);
+        self::assertStringContainsString($this->base . '/link is a symbolic link', $out);
+        self::assertFileDoesNotExist($this->base . '/real/existing/new');
+        self::assertStringNotContainsString('Created directory', $out);
+    }
+
+    public function testCreateParentRefusesExistingDirectoryOwnedByAnotherUser(): void
+    {
+        if (!function_exists('posix_geteuid') || posix_geteuid() !== 0) {
+            self::markTestSkipped('needs root to give a directory to another uid');
+        }
+        // mode 0700: the mode bits alone look safe, the owner is not trusted
+        $other = $this->base . '/other';
+        mkdir($other, 0o700);
+        self::assertTrue(chown($other, 65534));
+
+        [$code, $out] = $this->keygen(['keygen', 'file' => $other . '/new/mimeshield.key', 'create-parent' => true]);
+        self::assertSame(1, $code, $out);
+        self::assertStringContainsString("{$other} is owned by uid 65534", $out);
+        self::assertFileDoesNotExist($other . '/new');
+
+        // also when the foreign directory is higher up in the path
+        mkdir($other . '/sub', 0o700);
+        chown($other . '/sub', 0);
+        [$code, $out] = $this->keygen(['keygen', 'file' => $other . '/sub/new/mimeshield.key', 'create-parent' => true]);
+        self::assertSame(1, $code, $out);
+        self::assertStringContainsString("{$other} is owned by uid 65534", $out);
+        self::assertFileDoesNotExist($other . '/sub/new');
     }
 
     public function testCreateParentRefusesDirectoriesWritableByOthersAndUnnormalisedPaths(): void
