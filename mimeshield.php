@@ -139,7 +139,7 @@ class mimeshield extends rcube_plugin
         return [
             'name' => 'MIME Shield',
             'vendor' => 'TaKeN',
-            'version' => '1.0.0',
+            'version' => '1.0.1',
             'license' => 'GPL-3.0-or-later',
             'uri' => 'https://github.com/takenek/mimeshield',
         ];
