@@ -162,12 +162,29 @@ final class CmsService
             $der = $fixed;
         }
 
+        // Verify that the private key really belongs to the supplied certificate before CMS
+        // decryption. OpenSSL >= 3.2 uses RSA PKCS#1 v1.5 "implicit rejection": with a wrong RSA
+        // key it can deliberately derive pseudorandom key material instead of returning a padding
+        // error (Bleichenbacher-oracle protection). With unauthenticated CBC content that garbage
+        // can occasionally have valid padding and make CMS_decrypt() report success. Do not rely
+        // on that return value to detect a mismatched certificate/key pair.
+        [$privateKey] = OpenSsl::run(static fn () => openssl_pkey_get_private($privateKeyPem));
+        if (!$privateKey instanceof \OpenSSLAsymmetricKey) {
+            Log::debug('decrypt', 'private key is unreadable', ['fingerprint' => $cert->fingerprint]);
+            return null;
+        }
+        [$keyMatches] = OpenSsl::run(static fn () => openssl_x509_check_private_key($cert->pem, $privateKey));
+        if ($keyMatches !== true) {
+            Log::debug('decrypt', 'private key does not match certificate', ['fingerprint' => $cert->fingerprint]);
+            return null;
+        }
+
         $tmp = new SecureTemp($this->tempBaseDir);
         try {
             $in = $tmp->file($der);
             $out = $tmp->file();
             $certPem = $cert->pem;
-            [$ok, $errors] = OpenSsl::run(static fn () => openssl_cms_decrypt($in, $out, $certPem, $privateKeyPem, OPENSSL_ENCODING_DER));
+            [$ok, $errors] = OpenSsl::run(static fn () => openssl_cms_decrypt($in, $out, $certPem, $privateKey, OPENSSL_ENCODING_DER));
             if ($ok !== true) {
                 // on failure the output file may contain partial/garbage plaintext: discard it
                 $tmp->remove($out);
