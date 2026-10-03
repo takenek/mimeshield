@@ -5,6 +5,8 @@ semantic versioning.
 
 ## [Unreleased]
 
+## [1.0.1] – 2026-10-03
+
 ### Fixed
 - Removed the Composer classmap entry for the Roundcube plugin bootstrap `mimeshield.php`. Roundcube
   loads that file directly from `plugins/mimeshield/mimeshield.php`; keeping it in Composer's
