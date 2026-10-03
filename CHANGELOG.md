@@ -27,7 +27,9 @@ Remediation of the final security report of 2026-10-03 (IDs F-xx of that report)
 - F-06: with CRL checking, a certificate without an http(s) CRL distribution point is "unknown"
   (subject to `mimeshield_revocation_unknown`), never "not checked" / fully valid.
 - F-07: at most 8 signed entities are extracted or verified per request, including clear-signed
-  and opaque content in compose/get.
+  and opaque content in compose/get. Decision: the total number of MIME parts is not limited (the
+  plugin's work per non-S/MIME part is constant); a PHP-FPM `request_terminate_timeout` or proxy
+  timeout is an installation requirement, shown as `[INFO]` by `diag`.
 - F-08: the PHP key derivation of the PKCS#12 inspection is bounded by its real work; key imports
   are limited per user account as well as per session. Account reservations are atomic across
   concurrent sessions, committed before KDF work, and fail closed on storage errors.
@@ -48,14 +50,26 @@ Remediation of the final security report of 2026-10-03 (IDs F-xx of that report)
   resolver/PHP-FPM time limits). Issuer validation failures are cached separately from URL failures;
   an outdated CRL is cached as a failure, and a transfer cut short by the budget is not.
   Disk caching is disabled if its base or `crl/` directory is a symlink, has a foreign owner
-  (where ownership checking is available), or grants group/other access.
+  (where ownership checking is available), or grants group/other access. Decision: synchronous DNS
+  cannot be interrupted without losing SSRF pinning; with CRL checking, resolver limits (`options
+  timeout:1 attempts:2` or a local caching resolver) are an installation requirement and `diag`
+  warns when one lookup can exceed 10 seconds (`/etc/resolv.conf`, glibc limits applied).
 - F-15: saving an untrusted sender certificate under `mimeshield_encrypt_untrusted = 'warn'` needs a
   confirmation bound to the shown fingerprint; the dialog shows old and new fingerprints.
 - F-16: SECURITY.md and the threat model document the minimum OpenSSL versions with the
-  CVE-2026-35189 fix (environment update; `diag` warns).
+  CVE-2026-35189 fix (environment update; `diag` warns). New `CertPrecheck` refuses, before any
+  OpenSSL call, certificates with a duplicate cRLDistributionPoints extension, more than 8 or
+  relative (nameRelativeToCRLIssuer) distribution points, or an unparsable structure: in
+  certificates read by the plugin, SignedData and OriginatorInfo certificates of incoming mail and
+  PKCS#7 uploads (must be SignedData). Such signatures are "malformed"; such encrypted messages give
+  a decryption error; unreadable envelopes are no longer passed to OpenSSL. `diag` deliberately does
+  not warn for end-of-life OpenSSL branches 3.1-3.3 (the advisory lists supported branches only).
 - I-05: security audit working documents (`FINAL_SECURITY_REPORT.md`, `STAGE_*.md`, `DOSTARCZONE/`)
-  are excluded from release archives.
-- I-17: "save sender certificate" requests are limited per session (20 per minute).
+  are excluded from release archives. CI (GitHub Actions, PHP 8.1-8.5, PHPUnit, `php -l`,
+  `node --check`, PHPStan 2.x; actions pinned to commit SHAs, read-only token) and
+  `docs/RELEASING.md`; signed tags and Packagist publication are done by the maintainer.
+- I-17: "save sender certificate" requests are limited per session and per user account (20 per
+  minute each).
 - I-03/I-08: `diag` warns for a CRL proxy without `mimeshield_revocation_allow_hosts` and for
   `mimeshield_bcc_mode = 'single'`.
 - I-11/I-12: decrypted content using any cipher other than AES (3DES, DES, RC2, unknown) and signatures with more than one SignerInfo
@@ -63,16 +77,39 @@ Remediation of the final security report of 2026-10-03 (IDs F-xx of that report)
 - I-16: tests now prove the isolation of the trust store from OpenSSL's default CA directory.
 - I-13: README recommends the master key file over the environment variable.
 - I-01: the message status headline and header indicator explicitly warn when certificate
-  revocation has not been checked; algorithm defaults remain unchanged.
+  revocation has not been checked; algorithm defaults remain unchanged. Decision: revocation stays
+  `off` by default (outbound HTTP, CA learns checked certificates; enabling `crl` is recommended
+  where egress is allowed); SHA-1 signatures stay accepted with a warning, never green.
 - I-04: settings import confirmation is bound to the complete pending public file; stale
   confirmations are refused, and opening an import form preserves the pending state.
 - I-06: unexpected exception messages (also from incoming mail processing) are logged only in debug
   mode; normal logs retain the type.
-- I-09: CRL inner and outer signature AlgorithmIdentifier values must agree.
+- I-09: CRL inner and outer signature AlgorithmIdentifier values must agree. SHA-1 signed CRLs
+  follow `mimeshield_legacy_digests`: without `'sha1'` they give revocation status "unknown".
+- I-02: with CRL checking, the highest cRLNumber per CRL issuer/distribution point is kept in
+  Roundcube's `cache_shared` table (db driver, 30-day TTL, refreshed daily on use); a CRL with a lower
+  number is "unknown", is not cached, and a cached copy is refetched. Store errors are logged once
+  and do not stop checks.
+- I-14: `diag` warns for a PHP branch past its security support (table 8.1-8.5) and recommends
+  PHP >= 8.3. Decision: composer keeps `php >=8.1 <8.6` (Roundcube 1.7 supports it; the plugin cannot
+  update the host runtime).
+- I-15: new option `mimeshield_temp_dir_strict` (default `false`): with an unusable configured temp
+  directory, sign/encrypt/decrypt/verify are refused (`tempdirunavailable`) instead of falling back
+  to the system temp directory; chain checks then fail closed. `diag` warns when the temp directory
+  is not on tmpfs/ramfs.
+- I-18: decryption tries only own keys matching a RecipientInfo; only when none matches, at most 5
+  other keys are tried (clients encoding the recipient identifier differently).
 - I-10: identity binding selections are fully validated before any write, then committed atomically.
 - I-07: the Bcc delivery error says that Bcc copies delivered before the failure may have arrived;
   when every Bcc copy was delivered but the main delivery fails, the error says that the Bcc
-  recipients already have the message (`message_send_error` hook).
+  recipients already have the message (`message_send_error` hook). Accepted: SMTP delivery of
+  separate Bcc envelopes cannot be atomic.
+- Documented decisions (not defects): F-01 - a forwarded `message/rfc822` without a parsed
+  Content-Type is matched by its second part type only, and its status is always "partial"; F-02 -
+  with several bundle certificates of the same subject and key OpenSSL may pick another of them as
+  anchor (it is still an administrator anchor); F-12 - no directory fsync after the key file rename.
+- `keygen` checks every write of a new key file and removes a partial file;
+  the unused `SignatureVerifier::findIssuer` was removed.
 
 ### Changed (behaviour, 2026-10-03)
 - With `mimeshield_revocation = 'crl'`, signatures and recipients whose intermediate CA has no

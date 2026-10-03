@@ -56,7 +56,10 @@
   separately (offline). Using the environment variable source keeps the key out of files.
 * Temp files: private keys are never written to disk; message plaintext/signatures exist in 0600
   files in a private 0700 directory only during one OpenSSL call (removed in `finally`; a tmpfs is
-  recommended). Roundcube itself writes compose attachments to its temp dir (see Limitations).
+  recommended, `diag` warns otherwise - I-15). If the configured directory is unusable the plugin
+  falls back to the system temp directory (logged); `mimeshield_temp_dir_strict = true` refuses
+  S/MIME operations instead (decision: fallback stays the default so plain mail keeps working on a
+  misconfigured host). Roundcube itself writes compose attachments to its temp dir (see Limitations).
 
 ### T4 Compromise of the PHP process / server account (NOT protected)
 * An attacker who can execute code as the PHP user, read process memory, or modify the plugin
@@ -99,7 +102,9 @@
   certificate for another address is shown in red ("certificate does not match the sender").
   When revocation is not checked, the headline and header indicator carry an explicit warning,
   including for an otherwise valid signature (I-01).
-* Weak/unsupported algorithms: MD5 rejected, SHA-1 warned, RC2/DES not decrypted unless the admin
+* Weak/unsupported algorithms: MD5 rejected, SHA-1 warned (accepted by default on purpose, never
+  green: Outlook on the web signs with SHA-1; `mimeshield_legacy_digests = []` rejects it - I-01
+  decision), RC2/DES not decrypted unless the admin
   enables the OpenSSL legacy provider. A signature whose digest algorithm cannot be determined by the
   plugin's parser is never shown as fully valid ("algorithm could not be checked", audit MS-08).
 
@@ -125,7 +130,9 @@
   fingerprint (audit F-15).
 
 ### T7 SSRF via CRL / OCSP / AIA URLs
-* Revocation checking is **off by default**; AIA/OCSP URLs are never fetched.
+* Revocation checking is **off by default**; AIA/OCSP URLs are never fetched. Deliberate (I-01
+  decision 2026-10-03): CRL checks need outbound HTTP and tell CAs which certificates are checked;
+  the UI then says "revocation not checked". Enabling `crl` is recommended where egress is allowed.
 * With `mimeshield_revocation = 'crl'`: only for certificates whose chain already validated to an
   admin trust anchor (attacker certificates cannot trigger requests); only http/https on ports
   80/443; no user info, no redirects; host allow/deny lists; the host is resolved once and **every**
@@ -147,12 +154,21 @@
   per request within a shared 10-second transfer deadline (F-14). Transport failures are cached per
   URL; signature/issuer validation failures per URL and issuer, so one issuer cannot suppress another.
   Exhausting the current request's deadline does not mark a URL as unavailable for later requests.
-  An in-progress synchronous DNS lookup needs an external resolver/PHP-FPM lifetime bound.
+  An in-progress synchronous DNS lookup needs an external resolver/PHP-FPM lifetime bound. Decision
+  (F-14): DNS stays synchronous because it cannot be interrupted without losing the SSRF pinning;
+  resolver limits (`options timeout:1 attempts:2` or a local caching resolver) are an installation
+  requirement with CRL checking, and `diag` warns when one lookup can exceed 10 seconds.
   The on-disk cache is used only when its base and `crl/` child are private directories (no symlinks,
   no group/other access, PHP ownership where checkable). An unsafe directory disables disk caching
   without altering UNKNOWN handling; it is never repaired or trusted automatically.
-* The inner and outer CRL signature AlgorithmIdentifier values must agree (I-09). SHA-1 CRL
-  signatures remain accepted for compatibility; disabling them is a separate policy decision.
+* The inner and outer CRL signature AlgorithmIdentifier values must agree (I-09). SHA-1 signed
+  CRLs follow `mimeshield_legacy_digests`: without `'sha1'` they give "unknown" (I-09 decision).
+* CRL replay (I-02): the highest cRLNumber per CRL issuer name, authority key identifier and
+  distribution point URL is kept in Roundcube's `cache_shared` table; a CRL with a lower number is
+  "unknown" and is neither cached nor recorded (a cached copy is refetched). Accepted limits: the
+  entry lives 30 days (Roundcube's TTL cap, rewritten after a day of use); concurrent writers on
+  several servers may keep the lower of two new numbers, never one below the previous high mark;
+  a CRL without cRLNumber is handled as before.
 * When `mimeshield_revocation_proxy` is set, pinning and the connected-address check are performed
   by the proxy, not by the plugin: the proxy must enforce the egress policy (or use
   `mimeshield_revocation_allow_hosts`).
@@ -212,9 +228,22 @@
   content in compose/download (F-07).
   Limits per IP and request time limits
   (native OpenSSL work ignores `max_execution_time`) belong to the reverse proxy / WAF / PHP-FPM.
+  Decision (F-07): the total number of MIME parts is not limited (the plugin's work per non-S/MIME
+  part is constant; costly work is bounded); a PHP-FPM `request_terminate_timeout` or proxy timeout
+  is an installation requirement (`diag` reminds).
+* "Save sender certificate" is limited per session and per user account (20 per minute, I-17).
+* Decryption tries only own keys that match a RecipientInfo; only when none matches, at most 5 other
+  keys are tried (I-18 decision: interoperability with clients encoding the recipient identifier
+  differently, bounded work; a message naming one own key but encrypted to another fails).
 * Certificates embedded in received signatures reach OpenSSL before any plugin limit: an OpenSSL
   library affected by CVE-2026-35189 can be made to allocate excessive memory by a crafted message
-  (F-16; `diag` warns, the fix is an OpenSSL update).
+  (F-16; `diag` warns, the fix is an OpenSSL update; CertPrecheck refuses such certificates in mail,
+  SignedData, OriginatorInfo and PKCS#7 uploads before libcrypto parses them). `diag` deliberately
+  does not warn for end-of-life OpenSSL branches 3.1-3.3, for which the advisory lists no fixed
+  version. Not covered by the pre-check: PKCS#12 import, CRLs in SignedData and the Freshest CRL
+  extension (the advisory names certificates only). CMS structures the plugin's parser cannot read
+  (e.g. non-minimal lengths, more than 20000 ASN.1 nodes) are shown as malformed / not decrypted
+  instead of being passed to OpenSSL (fail closed).
 * Upload size limits checked before reading; limits on keys/certificates per user, recipients per
   message, message size for S/MIME processing, ASN.1 nodes/depth, certificates per file, CRL size.
 
@@ -226,6 +255,8 @@
 * Metadata: subjects, sender/recipient addresses, dates and message sizes are not encrypted by
   S/MIME (header protection, RFC 9788, is not implemented — no major client emits it yet).
 * Revocation when checking is disabled, and OCSP-only revocation.
+* Partial delivery of separate Bcc envelopes: SMTP cannot deliver several envelopes atomically; the
+  user is told about partial delivery (accepted, I-07).
 * Plaintext of decrypted attachments that Roundcube writes to its temp dir when a decrypted message
   is forwarded/edited with attachments (core `filesystem_attachments` behaviour).
 * Trust decisions made by the administrator's CA bundle (a malicious/compromised CA in the bundle is

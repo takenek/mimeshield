@@ -35,6 +35,12 @@ use MimeShield\Log;
  * status - "not checked" is reserved for disabled checking (audit F-06). A CRL that could not be
  * obtained is not requested again for NEGATIVE_TTL seconds, and the number of network fetches per
  * request is bounded (audit F-14).
+ *
+ * Rollback protection (audit I-02): with a CrlNumberStore, the highest cRLNumber per issuer name, AKI
+ * and distribution point is remembered; a validly signed, unexpired but OLDER CRL (replayed over plain
+ * http, or a stale cache) yields "unknown" instead of a possibly outdated "good". Within a CRL's
+ * validity window this is the only freshness signal RFC 5280 offers; CRLs without cRLNumber are
+ * evaluated as before (deliberate: nothing to compare, audit I-02 decision 2026-10-03).
  */
 final class RevocationChecker
 {
@@ -60,6 +66,9 @@ final class RevocationChecker
         '1.2.840.10045.4.1' => OPENSSL_ALGO_SHA1,
     ];
 
+    /** SHA-1 CRL signatures, accepted only with $acceptSha1 (audit I-09) */
+    private const SHA1_SIG_ALGS = ['1.2.840.113549.1.1.5', '1.2.840.10045.4.1'];
+
     private const CLOCK_SKEW = 300;
 
     /** Seconds a CRL URL that could not be fetched / validated is not requested again */
@@ -78,6 +87,18 @@ final class RevocationChecker
     /** Monotonic deadline shared by all network fetches in this request. Cached CRLs remain usable. */
     private ?float $fetchDeadline = null;
 
+    /** @var array<string, string> per-request cRLNumber already compared with the store, key => number */
+    private array $numbersSeen = [];
+
+    private bool $storeFailureLogged = false;
+
+    /**
+     * $acceptSha1: SHA-1 signed CRLs follow mimeshield_legacy_digests (Services passes whether 'sha1'
+     * is listed). Deliberate: a CA that still signs CRLs with SHA-1 is a legacy CA the administrator
+     * has chosen to accept for signatures too; rejecting only its CRLs would turn every check into
+     * "unknown" without protecting anything (audit I-09 decision 2026-10-03). A rejected CRL is
+     * "unknown", never "good", so mimeshield_revocation_unknown decides.
+     */
     public function __construct(
         private readonly string $mode,
         private readonly ?SafeHttpClient $http,
@@ -87,6 +108,8 @@ final class RevocationChecker
         private readonly int $maxUrls = 2,
         private readonly int $maxFetchesPerRequest = 8,
         private readonly float $maxFetchSecondsPerRequest = 10.0,
+        private readonly bool $acceptSha1 = true,
+        private readonly ?CrlNumberStore $crlNumbers = null,
     ) {
     }
 
@@ -172,7 +195,8 @@ final class RevocationChecker
     }
 
     /**
-     * Evaluate a CRL (DER) for $cert. Public for tests.
+     * Evaluate a CRL (DER) for $cert. Public for tests. No cRLNumber tracking here: that belongs to the
+     * CRLs actually obtained for a distribution point (obtain()).
      */
     public function evaluate(string $crlDer, Certificate $cert, Certificate $issuer, int $now): RevocationResult
     {
@@ -225,6 +249,8 @@ final class RevocationChecker
                 try {
                     $crl = $this->parse($der, $issuer);
                     if ($crl['nextUpdate'] !== null && $crl['nextUpdate'] >= $now) {
+                        // an older CRL than already seen elsewhere (another server) is refetched (I-02)
+                        $this->checkNumber($crl, $issuer, $url);
                         return $this->memory[$url] = $der;
                     }
                 } catch (ValidationException) {
@@ -280,6 +306,8 @@ final class RevocationChecker
             if ($crl['nextUpdate'] === null || $crl['nextUpdate'] < $now - self::CLOCK_SKEW) {
                 throw new ValidationException('revocationunavailable', 'CRL expired');
             }
+            // a replayed older CRL is neither used nor cached (audit I-02)
+            $this->checkNumber($crl, $issuer, $url);
         } catch (ValidationException | \TypeError | \ValueError $e) {
             $this->rememberFailure($issuerKey, $issuerFailFile, $now);
             throw $e;
@@ -299,6 +327,69 @@ final class RevocationChecker
             }
         }
         return $this->memory[$url] = $der;
+    }
+
+    /**
+     * Compare the cRLNumber of a validly signed, unexpired CRL with the highest one seen for the same
+     * issuer and distribution point; throws when it is lower, stores it when it is higher (audit I-02).
+     * Store failures never break the check: without the store there is simply no rollback protection.
+     *
+     * @param array{number: ?string, aki: string} $crl
+     */
+    private function checkNumber(array $crl, Certificate $issuer, string $url): void
+    {
+        $number = $crl['number'];
+        if ($this->crlNumbers === null || $number === null) {
+            return;
+        }
+        $key = hash('sha256', self::lp($issuer->subjectNameDer) . self::lp($crl['aki'] !== '' ? $crl['aki'] : $issuer->subjectKeyId) . self::lp($url));
+        if (($this->numbersSeen[$key] ?? null) === $number) {
+            return;
+        }
+        try {
+            $seen = $this->crlNumbers->get($key);
+        } catch (\Throwable $e) {
+            $this->storeFailed($e);
+            return;
+        }
+        $seen = $seen !== null && preg_match('/^[0-9A-Fa-f]{1,128}$/D', $seen) === 1 ? $seen : null;
+        $cmp = $seen === null ? 1 : self::compareNumbers($number, $seen);
+        if ($cmp < 0) {
+            Log::info('revocation', 'CRL number lower than previously seen: ' . $number . ' < ' . $seen, ['url' => $url]);
+            throw new ValidationException('revocationunavailable', 'CRL number lower than previously seen');
+        }
+        if ($cmp > 0) {
+            try {
+                $this->crlNumbers->put($key, $number);
+            } catch (\Throwable $e) {
+                $this->storeFailed($e);
+            }
+        }
+        $this->numbersSeen[$key] = $number;
+    }
+
+    private function storeFailed(\Throwable $e): void
+    {
+        if (!$this->storeFailureLogged) {
+            $this->storeFailureLogged = true;
+            Log::info('revocation', 'CRL number store unavailable: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * Compare two non-negative integers given as hex: length of the normalised form first, then
+     * lexicographically.
+     */
+    public static function compareNumbers(string $a, string $b): int
+    {
+        $a = ltrim(strtoupper($a), '0');
+        $b = ltrim(strtoupper($b), '0');
+        return strlen($a) <=> strlen($b) ?: strcmp($a, $b) <=> 0;
+    }
+
+    private static function lp(string $s): string
+    {
+        return pack('N', strlen($s)) . $s;
     }
 
     private function rememberFailure(string $key, ?string $file, int $now): void
@@ -343,7 +434,7 @@ final class RevocationChecker
     /**
      * Parse and verify a CRL against $issuer.
      *
-     * @return array{thisUpdate: int, nextUpdate: ?int, entries: list<array{serial: string, date: ?int, reason: string}>, idpUris: list<string>, idpScoped: bool, onlyUser: bool, onlyCa: bool}
+     * @return array{thisUpdate: int, nextUpdate: ?int, entries: list<array{serial: string, date: ?int, reason: string}>, idpUris: list<string>, idpScoped: bool, onlyUser: bool, onlyCa: bool, number: ?string, aki: string}
      */
     private function parse(string $der, Certificate $issuer): array
     {
@@ -361,6 +452,9 @@ final class RevocationChecker
         $sigAlg = Asn1::oid($sigAlgNode->child(0));
         if (!isset(self::SIG_ALGS[$sigAlg])) {
             throw new ValidationException('revocationunavailable', 'unsupported CRL signature algorithm');
+        }
+        if (!$this->acceptSha1 && in_array($sigAlg, self::SHA1_SIG_ALGS, true)) {
+            throw new ValidationException('revocationunavailable', 'SHA-1 CRL signature not allowed (mimeshield_legacy_digests)');
         }
         [$sigBytes] = Asn1::bitString($sigNode);
         if (!$issuer->hasKeyUsage(Certificate::KU_CRL_SIGN)) {
@@ -404,7 +498,7 @@ final class RevocationChecker
         if (isset($fields[$i]) && $fields[$i]->isUniversal(Asn1::TAG_SEQUENCE)) {
             $revoked = $fields[$i++];
         }
-        $idp = ['uris' => [], 'scoped' => false, 'onlyUser' => false, 'onlyCa' => false];
+        $idp = ['uris' => [], 'scoped' => false, 'onlyUser' => false, 'onlyCa' => false, 'number' => null, 'aki' => ''];
         if (isset($fields[$i]) && $fields[$i]->isContext(0)) {
             $idp = $this->checkCrlExtensions($fields[$i]);
         }
@@ -435,15 +529,16 @@ final class RevocationChecker
         }
 
         return ['thisUpdate' => $thisUpdate, 'nextUpdate' => $nextUpdate, 'entries' => $entries, 'idpUris' => $idp['uris'], 'idpScoped' => $idp['scoped'],
-            'onlyUser' => $idp['onlyUser'], 'onlyCa' => $idp['onlyCa']];
+            'onlyUser' => $idp['onlyUser'], 'onlyCa' => $idp['onlyCa'], 'number' => $idp['number'], 'aki' => $idp['aki']];
     }
 
     /**
      * Validate CRL extensions; returns the URIs of the IssuingDistributionPoint fullName (if any),
      * whether a fullName (in any name form) restricts the scope of the CRL and whether the CRL only
-     * covers end-entity (onlyContainsUserCerts) or CA (onlyContainsCACerts) certificates.
+     * covers end-entity (onlyContainsUserCerts) or CA (onlyContainsCACerts) certificates, plus the
+     * cRLNumber (hex, null when absent or not a non-negative INTEGER) and the AKI keyIdentifier (hex).
      *
-     * @return array{uris: list<string>, scoped: bool, onlyUser: bool, onlyCa: bool}
+     * @return array{uris: list<string>, scoped: bool, onlyUser: bool, onlyCa: bool, number: ?string, aki: string}
      */
     private function checkCrlExtensions(Asn1Node $wrapper): array
     {
@@ -451,6 +546,8 @@ final class RevocationChecker
         $scoped = false;
         $onlyUser = false;
         $onlyCa = false;
+        $number = null;
+        $aki = '';
         foreach ($wrapper->child(0)->children() as $ext) {
             $x = self::extension($ext);
             $oid = Asn1::oid($x[0]);
@@ -486,11 +583,30 @@ final class RevocationChecker
                 }
                 continue;
             }
+            // Only read for rollback tracking (I-02): a malformed value means "no number" / "no AKI",
+            // exactly as before the tracking existed, never a rejected CRL.
+            try {
+                if ($oid === self::OID_CRL_NUMBER) {
+                    // RFC 5280 5.2.3: non-negative INTEGER
+                    $n = Asn1::parseContent($x[count($x) - 1]);
+                    if ($n->isUniversal(Asn1::TAG_INTEGER) && !$n->constructed && $n->content() !== '' && (ord($n->content()[0]) & 0x80) === 0) {
+                        $number = Asn1::integerHex($n);
+                    }
+                } elseif ($oid === self::OID_AKI) {
+                    foreach (Asn1::parseContent($x[count($x) - 1])->children() as $a) {
+                        if ($a->isContext(0) && !$a->constructed) {
+                            $aki = strtoupper(bin2hex($a->content()));
+                        }
+                    }
+                }
+            } catch (ValidationException | \TypeError | \ValueError) {
+                // ignored, see above
+            }
             if ($critical && !in_array($oid, [self::OID_CRL_NUMBER, self::OID_AKI], true)) {
                 throw new ValidationException('revocationunavailable', 'unknown critical CRL extension');
             }
         }
-        return ['uris' => $uris, 'scoped' => $scoped, 'onlyUser' => $onlyUser, 'onlyCa' => $onlyCa];
+        return ['uris' => $uris, 'scoped' => $scoped, 'onlyUser' => $onlyUser, 'onlyCa' => $onlyCa, 'number' => $number, 'aki' => $aki];
     }
 
     /**

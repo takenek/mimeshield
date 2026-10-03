@@ -10,6 +10,7 @@ declare(strict_types=1);
 
 namespace MimeShield\Crypto;
 
+use MimeShield\Cert\CertPrecheck;
 use MimeShield\Cert\Certificate;
 use MimeShield\Exception\CryptoException;
 use MimeShield\Exception\ValidationException;
@@ -134,7 +135,7 @@ final class CmsService
         try {
             $type = CmsInspector::contentType($der);
         } catch (ValidationException) {
-            // let OpenSSL reject it
+            // not a ContentInfo: refused by the certificate pre-check below
         }
         if ($type === CmsInspector::OID_AUTH_ENVELOPED_DATA) {
             // fail closed: the tag must be verifiable as 12..16 octets (RFC 5084), otherwise refuse
@@ -146,6 +147,14 @@ final class CmsService
             if ($tag['macLength'] < 12 || $tag['macLength'] > 16 || ($tag['icvLength'] !== null && $tag['icvLength'] !== $tag['macLength'])) {
                 throw new CryptoException('unsupportedalgorithm', 'AuthEnvelopedData with truncated authentication tag');
             }
+        }
+        // OriginatorInfo certificates are parsed by libcrypto during openssl_cms_decrypt: pre-check
+        // them (CVE-2026-35189, audit F-16); an unreadable structure or a refused certificate gives an
+        // error status instead of an OpenSSL attempt
+        try {
+            self::assertCertificatesSafe($der);
+        } catch (ValidationException $e) {
+            throw new CryptoException($e->getUserLabel(), 'decrypt refused before OpenSSL: ' . $e->getMessage());
         }
         $fixed = CmsInspector::fixGcmIcvLength($der);
         if ($fixed !== null) {
@@ -183,6 +192,10 @@ final class CmsService
      */
     public function verifyDetached(string $content, string $signatureDer, bool $allowTextCanonicalization = true): SignatureCheck
     {
+        $refused = self::refuseUnsafeCertificates($signatureDer);
+        if ($refused !== null) {
+            return $refused;
+        }
         $tmp = new SecureTemp($this->tempBaseDir);
         try {
             $in = $tmp->file($content);
@@ -218,6 +231,10 @@ final class CmsService
      */
     public function verifyOpaque(string $der): SignatureCheck
     {
+        $refused = self::refuseUnsafeCertificates($der);
+        if ($refused !== null) {
+            return $refused;
+        }
         $tmp = new SecureTemp($this->tempBaseDir);
         try {
             $in = $tmp->file($der);
@@ -267,6 +284,11 @@ final class CmsService
      */
     public static function embeddedCertificates(string $der): array
     {
+        try {
+            self::assertCertificatesSafe($der);
+        } catch (ValidationException) {
+            return [];
+        }
         $pem = "-----BEGIN CMS-----\n" . chunk_split(base64_encode($der), 64, "\n") . "-----END CMS-----\n";
         $certs = [];
         [$ok] = OpenSsl::run(static function () use ($pem, &$certs) {
@@ -276,6 +298,42 @@ final class CmsService
             return [];
         }
         return array_values(array_filter($certs, 'is_string'));
+    }
+
+    /**
+     * CVE-2026-35189 pre-check (audit F-16 decision 2026-10-03): every certificate a CMS structure
+     * carries is checked by CertPrecheck before libcrypto parses it. Fail closed: a structure the
+     * plugin's parser cannot read is not handed to OpenSSL either (deliberate; real-world CMS, including
+     * BER streamed messages within the size limit, stays within the Asn1 limits).
+     *
+     * @throws ValidationException
+     */
+    private static function assertCertificatesSafe(string $der): void
+    {
+        foreach (CmsInspector::certificateChoices($der)['certificates'] as $certDer) {
+            CertPrecheck::assertSafe($certDer);
+        }
+    }
+
+    /**
+     * Invalid (malformed) SignatureCheck without any OpenSSL call when the pre-check refuses the
+     * SignedData, null when it may be verified. The message is still displayed, never as validly signed.
+     */
+    private static function refuseUnsafeCertificates(string $der): ?SignatureCheck
+    {
+        try {
+            self::assertCertificatesSafe($der);
+            return null;
+        } catch (ValidationException $e) {
+            Log::info('verify', 'SignedData refused before OpenSSL: ' . $e->getMessage());
+        }
+        $info = null;
+        try {
+            $info = CmsInspector::signedData($der);
+        } catch (ValidationException) {
+            $info = null;
+        }
+        return new SignatureCheck(false, SignatureCheck::FAIL_MALFORMED, [], [], $info, null, false);
     }
 
     /**

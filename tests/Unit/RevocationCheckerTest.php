@@ -7,6 +7,7 @@ namespace MimeShield\Tests\Unit;
 use MimeShield\Cert\Certificate;
 use MimeShield\Exception\ValidationException;
 use MimeShield\Tests\TestPki;
+use MimeShield\Trust\CrlNumberStore;
 use MimeShield\Trust\RevocationChecker;
 use MimeShield\Trust\RevocationResult;
 use MimeShield\Trust\SafeHttpClient;
@@ -1054,6 +1055,180 @@ final class RevocationCheckerTest extends TestCase
         self::assertStringContainsString('response exceeds size limit', implode("\n", $GLOBALS['mimeshield_test_log']));
     }
 
+    // ================================================================== SHA-1 CRLs (audit I-09)
+
+    public function testSha1CrlIsAcceptedByDefault(): void
+    {
+        $crl = self::craft(['sigOid' => '1.2.840.113549.1.1.5', 'algo' => OPENSSL_ALGO_SHA1]);
+        self::assertSame(RevocationResult::GOOD, self::checker()->evaluate($crl, TestPki::cert('alice'), TestPki::cert('int'), time())->status);
+    }
+
+    public function testSha1CrlIsUnknownWhenSha1IsNoLegacyDigest(): void
+    {
+        $crl = self::craft(['sigOid' => '1.2.840.113549.1.1.5', 'algo' => OPENSSL_ALGO_SHA1]);
+        self::serve('custom', $crl);
+        $c = new RevocationChecker(RevocationChecker::MODE_CRL, self::proxyHttp(), '', acceptSha1: false);
+        $r = $c->check(TestPki::cert('alice'), TestPki::cert('int'), time());
+        self::assertSame(RevocationResult::UNKNOWN, $r->status);
+        self::assertSame('revocationunavailable', $r->reason);
+        self::assertStringContainsString('SHA-1 CRL signature not allowed', implode("\n", $GLOBALS['mimeshield_test_log']));
+        // SHA-2 CRLs are unaffected
+        $ok = new RevocationChecker(RevocationChecker::MODE_CRL, self::failingHttp($calls), $this->cacheWith(self::craft()), acceptSha1: false);
+        self::assertSame(RevocationResult::GOOD, $ok->check(TestPki::cert('alice'), TestPki::cert('int'), time())->status);
+    }
+
+    // ================================================================== cRLNumber rollback (audit I-02)
+
+    public function testCrlNumberComparisonIsNumeric(): void
+    {
+        self::assertSame(1, RevocationChecker::compareNumbers('0100', 'FF'));
+        self::assertSame(-1, RevocationChecker::compareNumbers('FF', '0100'));
+        self::assertSame(0, RevocationChecker::compareNumbers('0a', 'A'));
+        self::assertSame(-1, RevocationChecker::compareNumbers('0F', '10'));
+        self::assertSame(0, RevocationChecker::compareNumbers('0', '00'));
+    }
+
+    public function testHigherCrlNumberIsStoredAndEqualIsAccepted(): void
+    {
+        $store = self::numberStore();
+        self::assertSame(RevocationResult::GOOD, $this->checkNumbered($store, '10')->status);
+        self::assertSame(['10'], array_values($store->data));
+        self::assertSame(RevocationResult::GOOD, $this->checkNumbered($store, '10')->status, 'equal number');
+        self::assertSame(1, $store->puts, 'an equal number is not written again');
+        self::assertSame(RevocationResult::GOOD, $this->checkNumbered($store, '0100')->status);
+        self::assertSame(['0100'], array_values($store->data));
+        self::assertSame(2, $store->puts);
+    }
+
+    public function testLowerCrlNumberThanPreviouslySeenIsUnknown(): void
+    {
+        $store = self::numberStore();
+        self::assertSame(RevocationResult::REVOKED, $this->checkNumbered($store, '0100', TestPki::cert('revoked'))->status);
+        // an older, validly signed CRL (cached or replayed) must not un-revoke the certificate
+        $r = $this->checkNumbered($store, 'FF', TestPki::cert('revoked'));
+        self::assertSame(RevocationResult::UNKNOWN, $r->status);
+        self::assertSame('revocationunavailable', $r->reason);
+        self::assertSame(['0100'], array_values($store->data), 'a lower number is never stored');
+        self::assertStringContainsString('CRL number lower than previously seen', implode("\n", $GLOBALS['mimeshield_test_log']));
+    }
+
+    public function testCrlNumbersAreTrackedPerIssuerAndDistributionPoint(): void
+    {
+        $store = self::numberStore();
+        $this->checkNumbered($store, '10');
+        $store->data = array_fill_keys(array_map(static fn ($k) => $k . 'x', array_keys($store->data)), 'FF');
+        // the high-water mark of another issuer/scope does not apply
+        self::assertSame(RevocationResult::GOOD, $this->checkNumbered($store, '10')->status);
+    }
+
+    public function testCrlWithoutNumberIsAcceptedWhenANumberWasSeen(): void
+    {
+        $store = self::numberStore();
+        $this->checkNumbered($store, '10');
+        $c = new RevocationChecker(RevocationChecker::MODE_CRL, self::failingHttp($calls), $this->cacheWith(self::craft()), crlNumbers: $store);
+        self::assertSame(RevocationResult::GOOD, $c->check(TestPki::cert('alice'), TestPki::cert('int'), time())->status);
+        self::assertSame(['10'], array_values($store->data));
+    }
+
+    public function testCrlNumberStoreFailureDoesNotBreakChecks(): void
+    {
+        $store = new class () implements CrlNumberStore {
+            public function get(string $key): ?string
+            {
+                throw new \RuntimeException('cache down');
+            }
+
+            public function put(string $key, string $number): void
+            {
+                throw new \RuntimeException('cache down');
+            }
+        };
+        self::assertSame(RevocationResult::GOOD, $this->checkNumbered($store, '10')->status);
+        self::assertSame(RevocationResult::REVOKED, $this->checkNumbered($store, '10', TestPki::cert('revoked'))->status);
+        self::assertStringContainsString('CRL number store unavailable: cache down', implode("\n", $GLOBALS['mimeshield_test_log']));
+
+        $putFails = self::numberStore();
+        $putFails->failPut = true;
+        self::assertSame(RevocationResult::GOOD, $this->checkNumbered($putFails, '10')->status);
+    }
+
+    public function testReplayedOlderCrlIsNeitherUsedNorCached(): void
+    {
+        $store = self::numberStore();
+        $this->checkNumbered($store, '0100');
+        $cache = TestPki::tempDir();
+        $this->temp[] = $cache;
+        self::serve('custom', self::numberedCrl('FF'));
+        $c = new RevocationChecker(RevocationChecker::MODE_CRL, self::proxyHttp(), $cache, crlNumbers: $store);
+        $r = $c->check(TestPki::cert('alice'), TestPki::cert('int'), time());
+        self::assertSame(RevocationResult::UNKNOWN, $r->status);
+        self::assertFileDoesNotExist(self::cacheFile($cache));
+        self::assertSame([self::URL], self::requests());
+    }
+
+    public function testOlderCachedCrlIsReplacedByAFreshFetch(): void
+    {
+        // another server already saw CRL 0x0100; this server's disk cache still holds 0xFF
+        $store = self::numberStore();
+        $this->checkNumbered($store, '0100');
+        $cache = $this->cacheWith(self::numberedCrl('FF'));
+        self::serve('custom', self::numberedCrl('0101'));
+        $c = new RevocationChecker(RevocationChecker::MODE_CRL, self::proxyHttp(), $cache, crlNumbers: $store);
+        self::assertSame(RevocationResult::GOOD, $c->check(TestPki::cert('alice'), TestPki::cert('int'), time())->status);
+        self::assertSame([self::URL], self::requests());
+        self::assertSame(['0101'], array_values($store->data));
+        self::assertSame(self::numberedCrl('0101'), file_get_contents(self::cacheFile($cache)));
+    }
+
+    private function checkNumbered(CrlNumberStore $store, string $number, ?Certificate $cert = null): RevocationResult
+    {
+        // a cached CRL older than the stored number is refetched: refused here, so it stays unknown
+        $c = new RevocationChecker(RevocationChecker::MODE_CRL, self::refusingHttp($calls), $this->cacheWith(self::numberedCrl($number)), crlNumbers: $store);
+        $r = $c->check($cert ?? TestPki::cert('alice'), TestPki::cert('int'), time());
+        self::assertSame($r->status === RevocationResult::UNKNOWN ? 1 : 0, $calls);
+        return $r;
+    }
+
+    /** @var array<string, string> */
+    private static array $numbered = [];
+
+    /** CRL of the intermediate with the given cRLNumber, listing the 'revoked' certificate. */
+    private static function numberedCrl(string $hex): string
+    {
+        return self::$numbered[$hex] ??= self::craft([
+            'thisUpdate' => time() - 3600,
+            'entries' => [[self::serialOf('revoked'), time() - 7200, []]],
+            'exts' => [self::ext('2.5.29.20', self::integer($hex))],
+        ]);
+    }
+
+    /**
+     * @return CrlNumberStore&object{data: array<string, string>, puts: int, failPut: bool}
+     */
+    private static function numberStore(): CrlNumberStore
+    {
+        return new class () implements CrlNumberStore {
+            /** @var array<string, string> */
+            public array $data = [];
+            public int $puts = 0;
+            public bool $failPut = false;
+
+            public function get(string $key): ?string
+            {
+                return $this->data[$key] ?? null;
+            }
+
+            public function put(string $key, string $number): void
+            {
+                if ($this->failPut) {
+                    throw new \RuntimeException('write failed');
+                }
+                $this->puts++;
+                $this->data[$key] = $number;
+            }
+        };
+    }
+
     // ================================================================== helpers: HTTP
 
     private static function failingHttp(?int &$calls): SafeHttpClient
@@ -1081,9 +1256,12 @@ final class RevocationCheckerTest extends TestCase
         return new SafeHttpClient(5, 3, [80, 443], [], [], 'http://127.0.0.1:' . $port, static fn (string $h): array => ['8.8.8.8']);
     }
 
-    private static function serve(string $mode): void
+    private static function serve(string $mode, ?string $custom = null): void
     {
         self::server();
+        if ($custom !== null) {
+            file_put_contents(self::$work . '/www/custom.crl', $custom);
+        }
         file_put_contents(self::$work . '/www/mode.txt', $mode);
         @unlink(self::$work . '/www/requests.log');
     }
@@ -1120,6 +1298,7 @@ switch ($mode) {
     case 'badpem': echo "-----BEGIN X509 CRL-----\n%%%%\n-----END X509 CRL-----\n"; break;
     case 'wrongca': echo file_get_contents(__DIR__ . '/root.crl'); break;
     case 'tampered': echo file_get_contents(__DIR__ . '/tampered.crl'); break;
+    case 'custom': echo file_get_contents(__DIR__ . '/custom.crl'); break;
     case 'redirect': header('Location: http://crl.example.test/elsewhere.crl', true, 302); break;
     case '404': http_response_code(404); echo 'no'; break;
     default: echo 'garbage';

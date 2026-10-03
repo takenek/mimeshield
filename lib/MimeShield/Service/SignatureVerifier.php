@@ -122,14 +122,4 @@ final class SignatureVerifier
         return new VerificationResult($check, $signer, $chain, $identity, $time, $purposeOk, $rev, $weak, $forbidden, $small,
             $fromAddresses, $partial, $signer->usesLegacySubjectEmail() && $this->subjectEmailFallback);
     }
-
-    /**
-     * Issuer certificate of $cert among embedded, configured intermediate and anchor certificates.
-     *
-     * @param list<string> $embedded
-     */
-    public function findIssuer(Certificate $cert, array $embedded): ?Certificate
-    {
-        return $this->store->findIssuer($cert, $embedded);
-    }
 }

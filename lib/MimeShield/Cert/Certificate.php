@@ -115,6 +115,8 @@ final class Certificate
 
     private function __construct(public readonly string $pem, public readonly string $der)
     {
+        // untrusted input: refuse certificates that trigger CVE-2026-35189 before libcrypto parses them (audit F-16)
+        CertPrecheck::assertSafe($der);
         [$x509, $err] = OpenSsl::run(static fn () => openssl_x509_read($pem));
         if (!$x509 instanceof \OpenSSLCertificate) {
             throw new ValidationException('certinvalid', 'openssl_x509_read failed: ' . OpenSsl::summarize($err));

@@ -11,6 +11,7 @@ declare(strict_types=1);
 namespace MimeShield;
 
 use MimeShield\Crypto\CmsService;
+use MimeShield\Crypto\SecureTemp;
 
 /**
  * Typed access to the plugin configuration (config.inc.php) with safe defaults.
@@ -31,6 +32,9 @@ final class Config
         'mimeshield_bcc_mode' => 'separate',
         'mimeshield_cipher' => CmsService::CIPHER_AES_256_CBC,
         'mimeshield_allowed_digests' => ['sha256', 'sha384', 'sha512'],
+        // Deliberate (audit I-01 decision 2026-10-03): SHA-1 signatures stay accepted with a visible
+        // warning, never green (Outlook on the web signs SHA-1); admins may set []. Also governs
+        // SHA-1 signed CRLs (I-09).
         'mimeshield_legacy_digests' => ['sha1'],
         'mimeshield_smime_capabilities' => false,
         'mimeshield_encrypt_untrusted' => 'block',
@@ -46,6 +50,9 @@ final class Config
         'mimeshield_use_system_ca' => false,
         'mimeshield_intermediates' => [],
         'mimeshield_subject_email_fallback' => true,
+        // Deliberate (audit I-01 decision 2026-10-03): off by default because 'crl' needs outbound
+        // HTTP and discloses checked certificates to CAs; the UI then says "revocation not checked".
+        // README/SECURITY recommend 'crl' where egress is allowed.
         'mimeshield_revocation' => 'off',
         'mimeshield_revocation_unknown' => 'warn',
         'mimeshield_revocation_timeout' => 5,
@@ -55,6 +62,7 @@ final class Config
         'mimeshield_revocation_deny_hosts' => [],
         'mimeshield_revocation_proxy' => '',
         'mimeshield_temp_dir' => '',
+        'mimeshield_temp_dir_strict' => false,
         'mimeshield_master_key_file' => '',
         'mimeshield_master_key_env' => 'MIMESHIELD_MASTER_KEY',
         'mimeshield_master_key_active' => '',
@@ -163,20 +171,38 @@ final class Config
 
     /**
      * Base directory for temporary files (the plugin creates "<base>/mimeshield" with mode 0700).
+     *
+     * With mimeshield_temp_dir_strict (administrator-only, like every mimeshield_* option) an unusable
+     * configured directory is not silently replaced: the system temp directory is still returned, but
+     * registered with SecureTemp as refused, so every operation that would write message plaintext
+     * there (sign, encrypt, decrypt, verify) fails with 'tempdirunavailable' (audit I-15).
+     * Deliberate (audit I-15 decision 2026-10-03): the refusal is enforced lazily where SecureTemp
+     * prepares its directory, not by throwing here - the service graph is built for every displayed
+     * message and settings page, and a throw here would break plain messages and certificate lists.
+     * Default false keeps the fallback (logged and reported by diag) for installations without a
+     * dedicated temp directory.
      */
     public function tempBaseDir(): string
     {
         $dir = $this->configuredTempDir();
-        if ($dir === '' || !is_dir($dir) || !is_writable($dir)) {
-            if ($dir !== '' && !self::$tempFallbackLogged) {
+        $fallback = $dir === '' || !is_dir($dir) || !is_writable($dir);
+        $strict = $fallback && $this->bool('mimeshield_temp_dir_strict');
+        if ($fallback) {
+            if (($dir !== '' || $strict) && !self::$tempFallbackLogged) {
                 // never silent: decrypted content may end up on a non-tmpfs, shared directory (INF-03)
                 self::$tempFallbackLogged = true;
-                Log::warning('config', 'configured temp directory not usable, falling back to the system temp directory', ['dir' => $dir]);
+                if ($strict) {
+                    Log::error('config', 'configured temp directory not usable, S/MIME operations refused (mimeshield_temp_dir_strict)', ['dir' => $dir]);
+                } else {
+                    Log::warning('config', 'configured temp directory not usable, falling back to the system temp directory', ['dir' => $dir]);
+                }
             }
             $dir = sys_get_temp_dir();
         }
         $real = realpath($dir);
-        return $real !== false ? $real : $dir;
+        $real = $real !== false ? $real : $dir;
+        SecureTemp::refuseBaseDir($strict ? $real : null);
+        return $real;
     }
 
     /**
@@ -187,6 +213,15 @@ final class Config
     {
         $dir = $this->configuredTempDir();
         return $dir === '' || !is_dir($dir) || !is_writable($dir);
+    }
+
+    /**
+     * mimeshield_temp_dir_strict is on and the configured temp directory is unusable: S/MIME
+     * operations that need temporary files are refused (audit I-15).
+     */
+    public function tempDirRefused(): bool
+    {
+        return $this->bool('mimeshield_temp_dir_strict') && $this->tempDirIsFallback();
     }
 
     private function configuredTempDir(): string

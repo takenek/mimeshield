@@ -156,6 +156,53 @@ final class CmsInspector
     }
 
     /**
+     * Raw DER of every certificate a CMS structure carries for OpenSSL to parse: SignedData [0]
+     * certificates, or the OriginatorInfo certificates of EnvelopedData / AuthEnvelopedData. Located by
+     * position only. Other CertificateChoices (extendedCertificate [0], attribute certificates [1]/[2],
+     * other [3]) are counted in 'other', not returned. Other content types carry no certificates.
+     * Used for the CVE-2026-35189 pre-check (audit F-16); throws ValidationException when the
+     * structure cannot be read, so that callers can fail closed.
+     *
+     * @return array{certificates: list<string>, other: int}
+     */
+    public static function certificateChoices(string $der): array
+    {
+        $type = self::contentType($der);
+        $sets = [];
+        if ($type === self::OID_SIGNED_DATA) {
+            $f = self::content($der, $type)->children();
+            // version, digestAlgorithms, encapContentInfo, [0] certificates, [1] crls, signerInfos
+            for ($i = 3; $i < count($f); $i++) {
+                if ($f[$i]->isContext(0)) {
+                    $sets[] = $f[$i];
+                }
+            }
+        } elseif ($type === self::OID_ENVELOPED_DATA || $type === self::OID_AUTH_ENVELOPED_DATA) {
+            $f = self::content($der, $type)->children();
+            // version, [0] originatorInfo { [0] certs, [1] crls } OPTIONAL, recipientInfos, ...
+            if (isset($f[1]) && $f[1]->isContext(0)) {
+                foreach ($f[1]->children() as $oi) {
+                    if ($oi->isContext(0)) {
+                        $sets[] = $oi;
+                    }
+                }
+            }
+        }
+        $certs = [];
+        $other = 0;
+        foreach ($sets as $set) {
+            foreach ($set->children() as $choice) {
+                if ($choice->isUniversal(Asn1::TAG_SEQUENCE)) {
+                    $certs[] = $choice->raw();
+                } else {
+                    $other++;
+                }
+            }
+        }
+        return ['certificates' => $certs, 'other' => $other];
+    }
+
+    /**
      * Inspect EnvelopedData / AuthEnvelopedData.
      *
      * @return array{type: string, cipher: string, recipients: list<array<string, string>>, macLength: ?int, icvLength: ?int}

@@ -361,3 +361,43 @@ generated input and contact nothing.
 
 Each new test was checked to fail without its fix. E2E/browser rendering, the PHP/database matrix,
 interop and PHPStan/PHP-CS-Fixer were not run in this pass.
+
+## 10. Remediation decisions (2026-10-03)
+
+Implementation of the operator decisions on the remaining audit items (rationale: SECURITY.md,
+"Design decisions and accepted risks"). Local stack as above (PHP 8.4.26, OpenSSL 3.5.7, Roundcube
+1.7.4 libraries, SQLite). Full suite with `--filter '^(?!.*::testFuzz)'`:
+**1218 tests / 11895 assertions / 0 failures / 0 errors / 1 skipped** (the SafeHttpClient
+direct-connection test, needs internet). `php -l` clean on all changed files. PHPStan was not
+installed locally; it now runs in CI (`.github/workflows/ci.yml`), which has not yet run on GitHub.
+
+New or changed tests ("fails without fix" = checked against the code without the change):
+
+- I-09/I-02 (`RevocationCheckerTest`): `testSha1CrlIsUnknownWhenSha1IsNoLegacyDigest`,
+  `testServicesWireTheCrlPolicy`, `testHigherCrlNumberIsStoredAndEqualIsAccepted`,
+  `testLowerCrlNumberThanPreviouslySeenIsUnknown`, `testCrlWithoutNumberIsAcceptedWhenANumberWasSeen`,
+  `testCrlNumberStoreFailureDoesNotBreakChecks`, `testReplayedOlderCrlIsNeitherUsedNorCached`,
+  `testOlderCachedCrlIsReplacedByAFreshFetch` (all fail without fix); guards
+  `testSha1CrlIsAcceptedByDefault`, `testCrlNumberComparisonIsNumeric`,
+  `testCrlNumbersAreTrackedPerIssuerAndDistributionPoint`. `SharedCacheCrlNumberStoreTest` (new,
+  4 tests: immediate write to `cache_shared`, invalid entries, daily rewrite, no store without CRL).
+- I-18 (`SignatureVerifierTest`): `testDecryptionCandidatesAreOnlyTheMatchingKeysWhenOneMatches`,
+  `testDecryptionCandidatesWithoutAnyMatchAreBoundedToFive`, changed
+  `testRotationSwitchesSigningKeyAndOldKeyStillDecrypts` (all fail without fix); `testFindIssuer`
+  removed with the dead method.
+- F-16 (`CertPrecheckTest`, 11 tests): 8 fail without the pre-check (more than 8 points, relative
+  name, duplicate extension, unparsable value, verifyDetached/verifyOpaque/decrypt with an unsafe
+  embedded certificate, PKCS#7 bundle refused before OpenSSL); 3 positive controls (all fixture
+  certificates pass, 8 full-name points accepted, certificate choices of fixtures).
+- I-14/I-15/F-14 (`DiagChecksTest`, new): PHP security support (12 cases), PHP 8.1 warning text,
+  temp dir file system (9 cases), later mount wins, unknown mount table is informational, resolver
+  worst case (9 cases). They test new helpers, so they were not run against the old code.
+- keygen (`CliKeygenTest::testNewKeyFileWriteIsCheckedAndPartialFileRemoved`): short and failing
+  writes of a new key file; fails without fix.
+- I-15 (`TempDirStrictTest`, new): strict mode refuses sign/encrypt/decrypt/verify, non-strict falls
+  back, send aborted with the temp-dir message (each fails without fix); usable directory and
+  localisation guards.
+- I-17 (`MessageSaveCertLimitTest::testAccountLimitAppliesAcrossSessions`): fails without the
+  per-account limit.
+
+Not run in this pass: E2E/browser rendering, the PHP/database matrix, interop, PHPStan, CI on GitHub.

@@ -35,6 +35,23 @@ final class Tool
      */
     private const CVE_2026_35189_FIXED = ['3.0' => 23, '3.4' => 8, '3.5' => 9, '3.6' => 5, '4.0' => 3];
 
+    /**
+     * End of security support per PHP branch, from https://www.php.net/supported-versions.php
+     * (update with each PHP release). composer.json deliberately keeps php >=8.1 <8.6: diag warns about
+     * an unsupported branch instead of refusing to install (audit I-14 decision 2026-10-03).
+     */
+    private const PHP_SECURITY_EOL = ['8.1' => '2025-12-31', '8.2' => '2026-12-31', '8.3' => '2027-12-31', '8.4' => '2028-12-31', '8.5' => '2029-12-31'];
+
+    /** worst-case duration of one blocking DNS lookup (seconds) above which diag warns (audit F-14) */
+    private const MAX_DNS_LOOKUP_SECONDS = 10;
+
+    /**
+     * Resolver options recommended by diag and the documentation (README, SECURITY.md,
+     * config.inc.php.dist, THREAT_MODEL): 1 s x 2 attempts x at most 3 name servers (glibc MAXNS)
+     * = 6 s, so it stays below MAX_DNS_LOOKUP_SECONDS for every server count (audit F-14).
+     */
+    public const RECOMMENDED_RESOLVER_OPTIONS = 'options timeout:1 attempts:2';
+
     private int $failures = 0;
 
     /** @var resource */
@@ -90,7 +107,8 @@ final class Tool
         $this->check($rcCurrent, 'Roundcube', $rcVersion . ($rcCurrent ? '' : ($rcRelease
             ? ' - older than ' . self::MIN_SECURE_ROUNDCUBE . ' (security releases): update Roundcube'
             : ' - not a release version: make sure it contains the fixes of ' . self::MIN_SECURE_ROUNDCUBE)), true);
-        $this->ok('PHP', PHP_VERSION);
+        [$phpOk, $phpText] = self::phpSupportStatus(PHP_VERSION, gmdate('Y-m-d'));
+        $this->check($phpOk, 'PHP', $phpText, true);
         $this->ok('OpenSSL (PHP build headers)', OPENSSL_VERSION_TEXT);
         [$libOk, $libText] = self::opensslLibraryStatus();
         $this->check($libOk, 'OpenSSL library (this PHP SAPI)', $libText . ' - check the PHP-FPM SAPI too (php-fpm -i)', true);
@@ -114,6 +132,7 @@ final class Tool
         $this->section('Temporary directory');
         $this->check(!$cfg->tempDirIsFallback(), 'configured temp directory', $cfg->tempDirIsFallback()
             ? 'NOT USABLE - falling back to ' . sys_get_temp_dir() . ' (set mimeshield_temp_dir, ideally on tmpfs)' : 'usable', true);
+        $dir = $cfg->tempBaseDir();
         try {
             $dir = SecureTemp::prepareDir($cfg->tempBaseDir());
             $t = new SecureTemp($cfg->tempBaseDir());
@@ -123,6 +142,16 @@ final class Tool
             $this->check($mode === 0o600, 'temp dir ' . $dir, sprintf('writable, files 0%o', $mode));
         } catch (MimeShieldException $e) {
             $this->check(false, 'temp dir', $e->getMessage());
+        }
+        // decrypted plaintext passes through these files: on disk it may survive in the journal or
+        // free blocks after unlink (audit I-15); a warning only - the directory is installation policy
+        $real = realpath($dir);
+        $mounts = PHP_OS_FAMILY === 'Linux' && is_readable('/proc/mounts') ? @file_get_contents('/proc/mounts') : false;
+        [$memOk, $memText] = self::tmpfsStatus(is_string($mounts) ? $mounts : null, $real !== false ? $real : $dir);
+        if ($memOk === null) {
+            $this->info('temp dir file system', $memText);
+        } else {
+            $this->check($memOk, 'temp dir file system', $memText, true);
         }
 
         $this->section('Trust store');
@@ -134,11 +163,29 @@ final class Tool
             $cfg->bool('mimeshield_use_system_ca') ? 'ENABLED - TLS CAs are trusted for e-mail; configure mimeshield_ca_bundle with S/MIME CAs instead' : 'not used', true);
         $this->ok('configured intermediates', (string) count($store->intermediates()));
         $this->ok('revocation checking', $cfg->revocationMode());
+        if ($cfg->revocationMode() === 'crl') {
+            // the CRL host name is resolved by a blocking libc lookup that no plugin time budget can
+            // interrupt: only the resolver configuration bounds it (audit F-14)
+            $resolv = @file_get_contents('/etc/resolv.conf');
+            if (is_string($resolv)) {
+                [$dnsOk, $dnsText] = self::resolverStatus($resolv);
+                $this->check($dnsOk, 'DNS lookup worst case (CRL hosts)', $dnsText, true);
+            } else {
+                $this->info('DNS lookup worst case (CRL hosts)', '/etc/resolv.conf not readable - check the resolver timeout yourself');
+            }
+        }
         if ($cfg->revocationMode() === 'crl' && (string) $cfg->get('mimeshield_revocation_proxy') !== '') {
             // through a proxy the plugin cannot pin addresses: the proxy enforces egress (audit I-03)
             $this->check($cfg->list('mimeshield_revocation_allow_hosts') !== [], 'CRL proxy host allow-list',
                 $cfg->list('mimeshield_revocation_allow_hosts') !== [] ? 'set' : 'EMPTY - the proxy must restrict CRL egress, or set mimeshield_revocation_allow_hosts', true);
         }
+
+        $this->section('Request time limits');
+        // deliberate: request time limits belong to the installation; the plugin only bounds its own
+        // expensive work (at most 8 signature checks per request, CRL time budget) (audit F-07 decision
+        // 2026-10-03). max_execution_time of the web SAPI cannot be read from the CLI and does not
+        // count time spent in system calls on Linux anyway.
+        $this->info('web request timeout', 'not visible from the CLI - REQUIRED: request_terminate_timeout (PHP-FPM) or a reverse-proxy timeout');
 
         $this->section('Master key');
         try {
@@ -239,9 +286,15 @@ final class Tool
                 $this->out("Cannot create {$file}" . (is_array($err) ? ': ' . preg_replace('/^fopen\([^)]*\):\s*/', '', $err['message']) : '') . "\n");
                 return 1;
             }
-            $ok = fwrite($fh, "# MIME Shield master key file - keep secret, never commit, back up securely\n" . $line . "\n") !== false;
-            fclose($fh);
-            @chmod($file, 0o400);
+            $content = "# MIME Shield master key file - keep secret, never commit, back up securely\n" . $line . "\n";
+            $ok = self::writeAll($fh, $content);
+            KeyVault::wipe($content);
+            if ($ok) {
+                @chmod($file, 0o400);
+            } else {
+                // never leave a truncated key file behind: it would look like a valid one (audit F-12)
+                @unlink($file);
+            }
         }
         KeyVault::wipe($line);
         if (!$ok) {
@@ -285,15 +338,8 @@ final class Tool
             $this->out("Cannot create {$tmp}\n");
             return false;
         }
-        $ok = true;
-        for ($done = 0, $len = strlen($payload); $ok && $done < $len; $done += $w) {
-            $w = @fwrite($fh, substr($payload, $done));
-            $ok = is_int($w) && $w > 0;
-            $w = (int) $w;
-        }
-        $ok = $ok && fflush($fh) && (!function_exists('fsync') || fsync($fh));
         $written = fstat($fh);
-        $ok = fclose($fh) && $ok;
+        $ok = self::writeAll($fh, $payload);
         if ($ok) {
             @chown($tmp, (int) fileowner($file));
             @chgrp($tmp, (int) filegroup($file));
@@ -325,6 +371,24 @@ final class Tool
             $this->out("Writing {$file} failed - the original file is unchanged\n");
         }
         return $ok;
+    }
+
+    /**
+     * Write every byte (a short write is retried, no progress is a failure), flush, fsync when
+     * available, and close the handle; true only if all of it succeeded.
+     *
+     * @param resource $fh
+     */
+    private static function writeAll($fh, #[\SensitiveParameter] string $data): bool
+    {
+        $ok = true;
+        for ($done = 0, $len = strlen($data); $ok && $done < $len; $done += $w) {
+            $w = @fwrite($fh, substr($data, $done));
+            $ok = is_int($w) && $w > 0;
+            $w = (int) $w;
+        }
+        $ok = $ok && fflush($fh) && (!function_exists('fsync') || fsync($fh));
+        return fclose($fh) && $ok;
     }
 
     /**
@@ -557,6 +621,10 @@ final class Tool
      * of its branch that fixes a known issue. Only the upstream version is visible: distributions may
      * backport the fix without changing it, so a version below the fix is a warning, not a proof.
      * Branches not listed (other libraries, end-of-life branches, newer releases) give no warning.
+     * Deliberate (audit F-16 decision 2026-10-03): end-of-life branches 3.1-3.3 are not warned about,
+     * because the CVE-2026-35189 advisory lists fixed versions for supported branches only; such
+     * libraries are out of support anyway, and CertPrecheck refuses the triggering certificates in
+     * the plugin's own input paths before OpenSSL parses them.
      *
      * @return array{0: bool, 1: string}
      *
@@ -574,6 +642,98 @@ final class Tool
         return [true, $text];
     }
 
+    /**
+     * Whether the PHP branch of a version (e.g. "8.1.33") is still within its security support on
+     * $today (Y-m-d). Branches not in the table (newer releases) give no warning.
+     *
+     * @return array{0: bool, 1: string}
+     *
+     * @internal public for tests
+     */
+    public static function phpSupportStatus(string $version, string $today): array
+    {
+        if (preg_match('/^(\d+\.\d+)\./', $version, $m)) {
+            $eol = self::PHP_SECURITY_EOL[$m[1]] ?? null;
+            if ($eol !== null && $today > $eol) {
+                return [false, sprintf('%s - PHP %s security support ended %s: upgrade, PHP >= 8.3 recommended', $version, $m[1], $eol)];
+            }
+        }
+        return [true, $version];
+    }
+
+    /**
+     * Whether $path lies on a memory file system (tmpfs / ramfs) according to the text of
+     * /proc/mounts (null: unknown, e.g. not Linux). The longest mount point that is a path prefix of
+     * $path (resolved by the caller) wins; octal escapes of the mount table (\040 = space) are decoded.
+     *
+     * @return array{0: ?bool, 1: string}
+     *
+     * @internal public for tests
+     */
+    public static function tmpfsStatus(?string $mounts, string $path): array
+    {
+        $best = null;
+        $type = '';
+        foreach ($mounts === null ? [] : explode("\n", $mounts) as $row) {
+            $f = preg_split('/\s+/', trim($row));
+            if ($f === false || count($f) < 3) {
+                continue;
+            }
+            $mp = preg_replace_callback('/\\\\([0-7]{3})/', static fn (array $o): string => chr((int) octdec($o[1])), $f[1]);
+            $mp = $mp === '/' ? '/' : rtrim((string) $mp, '/');
+            $prefix = $mp === '/' || $path === $mp || str_starts_with($path, $mp . '/');
+            // equal length: the later entry is the one mounted on top
+            if ($prefix && ($best === null || strlen($mp) >= strlen($best))) {
+                $best = $mp;
+                $type = $f[2];
+            }
+        }
+        if ($best === null) {
+            return [null, 'cannot be determined (no /proc/mounts) - use tmpfs for mimeshield_temp_dir'];
+        }
+        if (in_array($type, ['tmpfs', 'ramfs'], true)) {
+            return [true, $type . ' (' . $best . ')'];
+        }
+        return [false, $type . ' (' . $best . ') - decrypted content is written to disk: put mimeshield_temp_dir on tmpfs'];
+    }
+
+    /**
+     * Worst-case duration of one blocking host name lookup from the text of /etc/resolv.conf:
+     * timeout x attempts x name servers (glibc defaults timeout 5, attempts 2; rotate changes only
+     * the order). A warning above MAX_DNS_LOOKUP_SECONDS.
+     *
+     * @return array{0: bool, 1: string}
+     *
+     * @internal public for tests
+     */
+    public static function resolverStatus(string $resolvConf): array
+    {
+        $servers = 0;
+        $timeout = 5;
+        $attempts = 2;
+        foreach (explode("\n", $resolvConf) as $row) {
+            $row = trim((string) preg_replace('/[#;].*$/', '', $row));
+            if (preg_match('/^nameserver\s+\S/', $row)) {
+                $servers = min($servers + 1, 3);   // glibc uses the first 3 (MAXNS)
+            } elseif (preg_match('/^options\s+(.*)$/', $row, $o)) {
+                foreach (preg_split('/\s+/', $o[1]) ?: [] as $opt) {
+                    if (preg_match('/^timeout:(\d+)$/', $opt, $v)) {
+                        $timeout = min((int) $v[1], 30);   // glibc caps at 30 (RES_MAXRETRANS)
+                    } elseif (preg_match('/^attempts:(\d+)$/', $opt, $v)) {
+                        $attempts = min((int) $v[1], 5);   // glibc caps at 5 (RES_MAXRETRY)
+                    }
+                }
+            }
+        }
+        $worst = $timeout * $attempts * max(1, $servers);
+        $text = sprintf('%d s (timeout %d x attempts %d x %d name server(s))', $worst, $timeout, $attempts, max(1, $servers));
+        if ($worst > self::MAX_DNS_LOOKUP_SECONDS) {
+            return [false, $text . ' - reduce it to at most ' . self::MAX_DNS_LOOKUP_SECONDS . ' s, e.g. "'
+                . self::RECOMMENDED_RESOLVER_OPTIONS . '", or use a local caching resolver'];
+        }
+        return [true, $text];
+    }
+
     private function section(string $title): void
     {
         $this->out("\n== {$title}\n");
@@ -582,6 +742,12 @@ final class Tool
     private function ok(string $what, string $value): void
     {
         $this->out(sprintf("  [ OK ] %-34s %s\n", $what, $value));
+    }
+
+    /** informational line: never counts as a problem */
+    private function info(string $what, string $value): void
+    {
+        $this->out(sprintf("  [INFO] %-34s %s\n", $what, $value));
     }
 
     private function check(bool $cond, string $what, string $value, bool $warnOnly = false): void

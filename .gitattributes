@@ -6,6 +6,8 @@
 /.php-cs-fixer.dist.php export-ignore
 /phpstan.neon.dist export-ignore
 /phpunit.xml.dist export-ignore
+# CI configuration (audit I-05)
+/.github export-ignore
 # security audit working documents and delivered artefacts (never part of a release)
 /FINAL_SECURITY_REPORT.md export-ignore
 /STAGE_*.md export-ignore

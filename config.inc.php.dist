@@ -94,7 +94,10 @@ $config['mimeshield_cipher'] = 'aes-256-cbc';
 $config['mimeshield_allowed_digests'] = ['sha256', 'sha384', 'sha512'];
 
 // Legacy digests accepted WITH a visible warning (Outlook on the web signs with SHA-1 by default).
-// Set to [] to reject them.
+// Set to [] to reject them. Such signatures are never shown as fully valid. Keeping 'sha1' by
+// default is a deliberate interoperability decision (audit I-01, 2026-10-03).
+// Also governs SHA-1 signed CRLs: without 'sha1' such CRLs give revocation status "unknown"
+// (audit I-09).
 $config['mimeshield_legacy_digests'] = ['sha1'];
 
 // Include the S/MIME Capabilities attribute in signatures. OpenSSL's default list advertises
@@ -140,7 +143,10 @@ $config['mimeshield_encrypt_untrusted'] = 'block';
 // ---------------------------------------------------------------------------------------------
 // REVOCATION (CRL)
 // ---------------------------------------------------------------------------------------------
-// 'off' (default): revocation is not checked and the UI says "Revocation status: not checked".
+// 'off' (default): revocation is not checked and the UI says "Revocation status: not checked"
+//        (with an explicit warning in the headline). 'off' is the default on purpose (audit I-01,
+//        2026-10-03): 'crl' needs outbound HTTP from the webmail server and tells CAs which
+//        certificates are being checked. RECOMMENDED: set 'crl' wherever such egress is allowed.
 // 'crl': download CRLs (http/https distribution points only) for certificates whose chain is
 //        already trusted. EVERY certificate of the accepted path below the trust anchor is checked
 //        (end entity and intermediate CAs), each against the CRL of its issuer on that path; CRLs
@@ -151,6 +157,12 @@ $config['mimeshield_encrypt_untrusted'] = 'block';
 //        pinning, no redirects, ports 80/443, size and time limits. OCSP is not implemented.
 //        Disk caching needs PHP-owned, private 0700 directories <temp>/mimeshield and its crl child;
 //        symlinks, group/other access or a foreign owner disable disk caching without changing policy.
+//        The highest cRLNumber per CRL issuer/distribution point is kept in Roundcube's cache_shared
+//        table (db driver, 30-day TTL, refreshed daily on use); a CRL older than one seen before
+//        yields "unknown" (audit I-02).
+//        REQUIRED with 'crl' (audit F-14): synchronous DNS cannot be interrupted without losing the
+//        SSRF pinning, so bound it in /etc/resolv.conf ("options timeout:1 attempts:2") or use a
+//        local caching resolver. diag warns when one lookup can exceed 10 seconds.
 $config['mimeshield_revocation'] = 'off';
 $config['mimeshield_revocation_timeout'] = 5;            // seconds per transfer, within aggregate budget
 $config['mimeshield_revocation_max_bytes'] = 10485760;   // maximum CRL size
@@ -188,7 +200,12 @@ $config['mimeshield_max_total_envelope_bytes'] = 268435456;
 // inside encrypted PKCS#12 layers (inspected with the entered password before OpenSSL reads the
 // file). Key imports are limited to 10 attempts per session AND per account within 5 minutes.
 // Account reservations are atomic across sessions/workers; a storage failure refuses the import.
-// Recipient status checks in compose are limited to 30 per session and minute.
+// Recipient status checks in compose are limited to 30 per session and minute. "Save sender
+// certificate" is limited to 20 per minute per session AND per account.
+// At most 8 signed entities are verified per request. The number of MIME parts is NOT limited
+// (deliberate, audit F-07: the plugin's work per non-S/MIME part is constant). REQUIRED: a request
+// time limit - request_terminate_timeout in the PHP-FPM pool or a reverse-proxy read timeout
+// (native OpenSSL work and DNS lookups are not interrupted by max_execution_time).
 
 // ---------------------------------------------------------------------------------------------
 // FILES
@@ -198,7 +215,13 @@ $config['mimeshield_max_total_envelope_bytes'] = 268435456;
 // (briefly, 0600, removed immediately). A tmpfs (e.g. /dev/shm) avoids writing it to disk.
 // If the configured directory is not usable, the system temp directory is used: this is logged
 // (mimeshield log, "falling back to the system temp directory") and reported by diag.
+// Put it on tmpfs/ramfs: diag warns for any other file system (audit I-15).
 $config['mimeshield_temp_dir'] = '';
+
+// true: if the configured temp directory is not usable, refuse S/MIME operations (sign, encrypt,
+// decrypt, verify; error "tempdirunavailable") instead of falling back to the system temp
+// directory. Certificate chain checks then fail closed. Default false: fallback, logged, diag.
+$config['mimeshield_temp_dir_strict'] = false;
 
 // Legacy PKCS#12 files (RC2-40, Windows "TripleDES-SHA1" export) cannot be read by OpenSSL 3.
 // When enabled, the plugin converts them with the openssl binary below (proc_open without a

@@ -28,6 +28,7 @@ use MimeShield\Storage\KeyRepository;
 use MimeShield\Trust\ChainValidator;
 use MimeShield\Trust\RevocationChecker;
 use MimeShield\Trust\SafeHttpClient;
+use MimeShield\Trust\SharedCacheCrlNumberStore;
 use MimeShield\Trust\TrustStore;
 
 /**
@@ -113,9 +114,28 @@ final class Services
                 $this->config->tempBaseDir() . '/mimeshield',
                 $this->config->int('mimeshield_revocation_max_bytes', 65536, 104857600),
                 $this->config->int('mimeshield_revocation_cache_ttl', 60, 604800),
+                acceptSha1: in_array('sha1', $this->config->legacyDigests(), true),
+                crlNumbers: $http !== null ? $this->crlNumberStore() : null,
             );
         }
         return $this->revocation;
+    }
+
+    /**
+     * Highest cRLNumber per CRL issuer/scope in Roundcube's shared cache (audit I-02). Always the db
+     * driver (table cache_shared): deliberately not rcube::get_cache_shared(), which is off unless a
+     * "<name>_cache" option is set and whose driver/TTL options could be overridden by user
+     * preferences (audit I-02 decision 2026-10-03). Without the cache there is no rollback tracking.
+     */
+    private function crlNumberStore(): ?SharedCacheCrlNumberStore
+    {
+        try {
+            $cache = \rcube_cache::factory('db', null, SharedCacheCrlNumberStore::PREFIX, SharedCacheCrlNumberStore::TTL);
+            return new SharedCacheCrlNumberStore($cache);
+        } catch (\Throwable $e) {
+            Log::info('revocation', 'CRL number tracking disabled: shared cache unavailable (' . $e->getMessage() . ')');
+            return null;
+        }
     }
 
     public function verifier(): SignatureVerifier

@@ -112,14 +112,18 @@ See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full threat model and
 
 * HTTPS only, `session_samesite = 'Strict'` or `'Lax'`, `use_https = true`.
 * `mimeshield_temp_dir` on a tmpfs (e.g. a dedicated directory under `/dev/shm`) owned by the PHP
-  user.
-* Keep `mimeshield_revocation = 'off'` unless outbound HTTP from the web server is acceptable; if
-  enabled, consider `mimeshield_revocation_allow_hosts`, a proxy and `mimeshield_revocation_unknown`.
+  user (`diag` warns otherwise); consider `mimeshield_temp_dir_strict = true` to refuse S/MIME
+  operations instead of falling back to the system temp directory.
+* Enable `mimeshield_revocation = 'crl'` wherever outbound HTTP from the web server is acceptable
+  (recommended); then consider `mimeshield_revocation_allow_hosts`, a proxy and
+  `mimeshield_revocation_unknown`, and bound DNS (`options timeout:1 attempts:2` in
+  `/etc/resolv.conf` or a local caching resolver - required, `diag` checks it).
+* Run a PHP branch with security support (PHP >= 8.3 recommended; `diag` warns).
 * Configure `mimeshield_ca_bundle` with S/MIME roots and keep `mimeshield_use_system_ca = false`.
 * Add rate limits for the Roundcube endpoints at the reverse proxy / WAF and a request time limit
   (`request_terminate_timeout` in PHP-FPM, proxy read timeout): native OpenSSL work is not
   interrupted by `max_execution_time`. The plugin limits key imports per session and per user,
-  recipient checks and "save sender certificate" requests per session, signed-entity extraction or
+  recipient checks per session, "save sender certificate" requests per session and per account, signed-entity extraction or
   verification per request (8, including clear-signed and opaque content in compose/download) and CRL downloads per request
   (8, within a shared 10-second transfer budget). Resolver timeouts and PHP-FPM must also bound
   synchronous DNS calls, which cannot be interrupted while running.
@@ -138,3 +142,27 @@ See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full threat model and
   certificate fingerprints. Unexpected exceptions log their type by default; their sanitised
   messages are emitted only with `mimeshield_debug`, and may still include personal data or
   infrastructure details. Keep debug logging disabled during normal operation.
+
+## Design decisions and accepted risks
+
+Decisions taken on 2026-10-03 after the security audit of that date. They are intentional; a later
+audit should treat them as known and accepted, not as new findings, unless the stated rationale no
+longer holds.
+
+| Audit ID | Decision | Rationale | Administrator action |
+|---|---|---|---|
+| I-01 | `mimeshield_revocation = 'off'` by default; SHA-1 signatures accepted with a warning (never green). | CRL checks need outbound HTTP and tell CAs which certificates are checked; the UI says "revocation not checked". Outlook on the web signs with SHA-1. | Set `'crl'` where egress is allowed; set `mimeshield_legacy_digests = []` to reject SHA-1. |
+| I-09 | SHA-1 signed CRLs follow `mimeshield_legacy_digests`. | One policy for SHA-1 in signatures and CRLs. | None (or remove `'sha1'`). |
+| I-02 | Highest cRLNumber per CRL issuer/distribution point kept in Roundcube's `cache_shared`; lower numbers give "unknown". | Prevents replay of an older CRL. TTL is 30 days (Roundcube cap), refreshed daily; concurrent writers are best effort but never go below the previous high-water mark. | Keep the `cache_shared` table (Roundcube schema). |
+| I-14 | composer keeps `php >=8.1 <8.6`. | Roundcube 1.7 supports 8.1; a plugin cannot update the host runtime. | Use a PHP branch with security support (>= 8.3 recommended); `diag` warns. |
+| I-15 | Fallback to the system temp directory stays the default; new `mimeshield_temp_dir_strict`. | Refusing by default would break mail display on a misconfigured host; the fallback is logged and reported. | Put the temp dir on tmpfs; optionally enable strict mode. |
+| I-18 | Unmatched own keys are tried only when no RecipientInfo matches, at most 5. | Interoperability with clients that encode the recipient identifier differently, with bounded work. A message that lists one own key but is encrypted to another no longer decrypts. | None. |
+| F-07 | No limit on the total number of MIME parts. | Work per non-S/MIME part is constant; costly work is bounded (8 signature checks, CRL budget). | **Required:** PHP-FPM `request_terminate_timeout` or a reverse-proxy timeout. |
+| F-14 | DNS lookups for CRL downloads stay synchronous. | They cannot be interrupted without losing SSRF DNS pinning. | **Required with CRL:** `options timeout:1 attempts:2` (at most 6 s with 3 name servers) or a local caching resolver; `diag` warns above 10 s. |
+| F-16 | `CertPrecheck` refuses certificates with risky CRL distribution points before OpenSSL; OpenSSL update still required. `diag` does not warn for end-of-life branches 3.1-3.3. | The advisory lists fixed versions only for supported branches; the pre-check covers the plugin's own input paths, not every libcrypto use. | **Required:** OpenSSL with the CVE-2026-35189 fix. |
+| I-05 | CI with SHA-pinned actions and `docs/RELEASING.md`. | Signing tags and Packagist publication need the maintainer's credentials. | Install a tagged version once one is published; until then a reviewed, pinned commit (see README 2.1). |
+| I-07 | Separate Bcc envelopes are not delivered atomically. | SMTP has no transaction across envelopes; the user is told about partial delivery. | Use `separate` Bcc mode (default) knowingly. |
+| I-17 | "Save sender certificate" limited per session and per account. | An exhausted account limit also uses a session slot (same as key import). | None. |
+| F-01 | A forwarded `message/rfc822` without a parsed Content-Type is matched by its second part type only. | Its status is always "partial", never green. | None. |
+| F-02 | With several bundle certificates of the same subject and key, OpenSSL may pick any of them as anchor. | Not a bypass: the anchor is still in the administrator bundle. | Avoid duplicate anchors in bundles. |
+| F-12 | No directory fsync after the key file rename. | After a crash the old (complete) key file survives. | Back up the master key. |

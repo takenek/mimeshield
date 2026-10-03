@@ -11,6 +11,7 @@ declare(strict_types=1);
 namespace MimeShield\Crypto;
 
 use MimeShield\Exception\CryptoException;
+use MimeShield\Exception\ValidationException;
 use MimeShield\Log;
 
 /**
@@ -32,6 +33,13 @@ final class SecureTemp
 
     /** @var array<string, true> */
     private array $files = [];
+
+    /**
+     * Base directory that must not be used: the configured temp directory is unusable and the
+     * administrator forbade the system temp fallback (mimeshield_temp_dir_strict, audit I-15).
+     * Set by Config::tempBaseDir() for the current request.
+     */
+    private static ?string $refusedBaseDir = null;
 
     public function __construct(string $baseDir)
     {
@@ -147,6 +155,14 @@ final class SecureTemp
     }
 
     /**
+     * Refuse (or, with null, allow again) a base directory for every later instance / prepareDir().
+     */
+    public static function refuseBaseDir(?string $baseDir): void
+    {
+        self::$refusedBaseDir = $baseDir === null ? null : rtrim($baseDir, '/');
+    }
+
+    /**
      * Create/verify the dedicated directory.
      */
     public static function prepareDir(string $baseDir): string
@@ -154,6 +170,16 @@ final class SecureTemp
         $baseDir = rtrim($baseDir, '/');
         if ($baseDir === '' || !str_starts_with($baseDir, '/')) {
             throw new CryptoException('internalerror', 'temp dir must be an absolute path');
+        }
+        // Single enforcement point of mimeshield_temp_dir_strict (audit I-15): every CMS operation
+        // (sign, encrypt, decrypt, verify) and the chain check create their files through here.
+        // The chain check then fails closed (certificate not trusted); the CRL cache, which only
+        // holds public data, is not affected.
+        if (self::$refusedBaseDir !== null) {
+            $real = realpath($baseDir);
+            if (($real !== false ? $real : $baseDir) === self::$refusedBaseDir) {
+                throw new ValidationException('tempdirunavailable', 'configured temp directory unusable and fallback refused (mimeshield_temp_dir_strict)');
+            }
         }
 
         $dir = $baseDir . '/mimeshield';

@@ -17,6 +17,7 @@
         "ext-curl": "Required only for CRL revocation checking"
     },
     "require-dev": {
+        "phpstan/phpstan": "^2.1",
         "phpunit/phpunit": "^10.5 || ^11.5"
     },
     "autoload": {

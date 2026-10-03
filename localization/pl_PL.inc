@@ -228,6 +228,7 @@ $messages['ratelimited'] = 'Zbyt wiele prób. Odczekaj kilka minut i spróbuj po
 $messages['keystoreunavailable'] = 'Magazyn kluczy S/MIME nie jest skonfigurowany na tym serwerze (brak klucza głównego). Skontaktuj się z administratorem.';
 $messages['keystorecorrupt'] = 'Nie można odblokować zapisanego klucza prywatnego (błąd kontroli integralności). Skontaktuj się z administratorem.';
 $messages['internalerror'] = 'Operacja S/MIME nie powiodła się. Wiadomość nie została wysłana.';
+$messages['tempdirunavailable'] = 'S/MIME jest niedostępne: nie można użyć katalogu tymczasowego serwera. Wiadomość nie została wysłana ani przetworzona. Poproś administratora o naprawę katalogu tymczasowego.';
 $messages['dberror'] = 'Błąd bazy danych.';
 $messages['notfound'] = 'Nie znaleziono elementu.';
 $messages['notloggedin'] = 'Sesja wygasła.';

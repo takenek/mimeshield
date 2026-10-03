@@ -327,6 +327,58 @@ PHP;
     }
 
     /**
+     * New key file (no --append): a short write is completed, a failing write leaves no truncated
+     * key file behind (which would later look like a valid one) and is reported (audit F-12).
+     */
+    public function testNewKeyFileWriteIsCheckedAndPartialFileRemoved(): void
+    {
+        foreach (['short' => 0, 'fail' => 1] as $mode => $expected) {
+            $file = $this->base . '/' . $mode . '.key';
+            $script = $this->base . '/new-' . $mode . '.php';
+            // Namespace wrapper affects this isolated subprocess only: the first write to the key
+            // file is cut to 7 bytes, a second write either works ('short') or fails ('fail').
+            $wrapper = <<<'PHP'
+<?php
+namespace MimeShield\Cli {
+    function fwrite($stream, $data) {
+        if (\stream_get_meta_data($stream)['uri'] === $GLOBALS['key_file']) {
+            if (!empty($GLOBALS['short_write_done']) && $GLOBALS['mode'] === 'fail') {
+                return false;
+            }
+            if (empty($GLOBALS['short_write_done'])) {
+                $GLOBALS['short_write_done'] = true;
+                return \fwrite($stream, substr($data, 0, 7));
+            }
+        }
+        return \fwrite($stream, $data);
+    }
+}
+namespace {
+PHP;
+            file_put_contents($script, $wrapper
+                . '$GLOBALS["mode"] = ' . var_export($mode, true) . ';'
+                . '$GLOBALS["key_file"] = ' . var_export($file, true) . ';'
+                . 'require ' . var_export(dirname(__DIR__) . '/bootstrap.php', true) . ';'
+                . 'exit((new MimeShield\Cli\Tool(rcube::get_instance(), ' . var_export(dirname(__DIR__, 2), true) . ', fopen("php://stdout", "w")))'
+                . '->run(["keygen", "file" => $GLOBALS["key_file"], "kid" => "k1"])); }');
+            $proc = proc_open([PHP_BINARY, $script], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null,
+                ['MIMESHIELD_RC' => (string) getenv('MIMESHIELD_RC')]);
+            self::assertIsResource($proc);
+            $output = stream_get_contents($pipes[1]) . stream_get_contents($pipes[2]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            self::assertSame($expected, proc_close($proc), $mode . ': ' . $output);
+            if ($mode === 'short') {
+                self::assertMatchesRegularExpression('/\A# MIME Shield master key file[^\n]*\nk1 [A-Za-z0-9+\/]{43}=\n\z/', (string) file_get_contents($file));
+                self::assertSame(0o400, fileperms($file) & 0o777);
+            } else {
+                self::assertStringContainsString("Writing {$file} failed", $output);
+                self::assertFileDoesNotExist($file, 'no partial key file may remain');
+            }
+        }
+    }
+
+    /**
      * Audit F-12: --append is serialised by a lock file; a second run waits and then keeps both keys.
      */
     public function testConcurrentAppendsAreSerialisedAndKeepEveryKey(): void

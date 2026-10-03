@@ -31,10 +31,29 @@ Documentation: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
 | Component | Requirement |
 |---|---|
 | Roundcube | 1.7.4 or later 1.7.x security release (`min-version` 1.7.4: decrypted mail is rendered by the core HTML sanitiser, so its security fixes matter; tested: see [Compatibility](#9-compatibility)), Elastic skin |
-| PHP | 8.1 – 8.5 |
+| PHP | 8.1 – 8.5 accepted (composer `php >=8.1 <8.6`); PHP ≥ 8.3 recommended, and `diag` warns once a PHP branch is past its security support (audit I-14 decision) |
 | PHP extensions | `openssl` (with CMS functions, OpenSSL ≥ 3.0; keep the library loaded by PHP-FPM patched — for CVE-2026-35189 ≥ 3.0.23 / 3.4.8 / 3.5.9 / 3.6.5 / 4.0.3 on the respective branch or a distribution backport; `diag` shows the library version), `mbstring`; recommended: `intl` (internationalised domain names), `sodium` (XChaCha20-Poly1305 key store; otherwise AES-256-GCM), `curl` (only for CRL checks) |
 | Database | whatever Roundcube 1.7 supports: MySQL/MariaDB, PostgreSQL, SQLite |
 | OpenSSL CLI | optional, only for converting legacy RC2 PKCS#12 files (`mimeshield_pkcs12_legacy_cli`) |
+
+**Installation requirements** (deliberate design decisions of the 2026-10-03 audit, see
+[SECURITY.md](SECURITY.md#design-decisions-and-accepted-risks); `diag` checks or reminds of each):
+
+* **OpenSSL with the CVE-2026-35189 fix** in the library loaded by PHP-FPM (versions above). The
+  plugin's `CertPrecheck` refuses the triggering certificates in its own input paths, but other
+  libcrypto use is only protected by the update (F-16).
+* **A request time limit**: `request_terminate_timeout` in the PHP-FPM pool or a reverse-proxy read
+  timeout. The plugin bounds only its own work (8 signature checks, CRL budget) and does not limit
+  the number of MIME parts (F-07).
+* **With `mimeshield_revocation = 'crl'`: resolver timeouts**, e.g. `options timeout:1 attempts:2`
+  in `/etc/resolv.conf` (worst case 6 s with up to 3 name servers; `diag` warns above 10 s), or a
+  local caching resolver; synchronous DNS lookups cannot be interrupted
+  without losing the SSRF pinning (F-14).
+* **Temp directory on tmpfs** (`mimeshield_temp_dir`, e.g. under `/dev/shm`); optionally
+  `mimeshield_temp_dir_strict = true` to refuse S/MIME operations rather than fall back to the
+  system temp directory (I-15).
+* Recommended: enable `mimeshield_revocation = 'crl'` wherever outbound HTTP from the web server is
+  allowed (default `off`, audit I-01 decision).
 
 ## 2. Installation
 
@@ -55,8 +74,18 @@ The directory **must** be named `plugins/mimeshield`.
 
 ```sh
 cd /var/www/roundcube
-composer require takenek/mimeshield          # once a release is tagged and published
-# until then: add a VCS repository for https://github.com/takenek/mimeshield and require ":dev-main"
+composer require "takenek/mimeshield:^1.0"    # a tagged release; never dev-main in production
+```
+
+Install a signed, tagged release by version constraint; see [docs/RELEASING.md](docs/RELEASING.md)
+(section 2 for installation, section 3 for verifying the tag signature). This command works only
+once v1.0.0 is tagged and published on Packagist (release process: docs/RELEASING.md section 1).
+**Until then** use the git method above, or add the repository as a Composer VCS repository and pin
+a reviewed commit (for testing, not for production):
+
+```sh
+composer config repositories.mimeshield vcs https://github.com/takenek/mimeshield
+composer require "takenek/mimeshield:dev-main#<commit-sha>"
 ```
 
 The installer (roundcube/plugin-installer) copies `config.inc.php.dist` to
@@ -152,7 +181,10 @@ for the same message.
 * Temporary files: Roundcube `temp_dir` (or `mimeshield_temp_dir`) must be writable by the PHP
   user; the plugin creates a private `mimeshield/` subdirectory with mode `0700`. A tmpfs is
   recommended (e.g. `$config['mimeshield_temp_dir'] = '/dev/shm/roundcube';`, directory owned by
-  the PHP user, mode 0700).
+  the PHP user, mode 0700). If it is unusable the plugin falls back to the system temp directory
+  (logged, `diag`); `mimeshield_temp_dir_strict = true` refuses sign/encrypt/decrypt/verify instead
+  (error "the server's temporary directory cannot be used"; certificate chains then show as
+  untrusted).
 * The CRL disk cache (`<temp>/mimeshield/crl`) and its `mimeshield` parent must be private
   directories, owned by the PHP user with mode 0700. An unsafe directory disables disk caching;
   review its ownership and contents before restoring access. The plugin does not repair it.
@@ -177,8 +209,14 @@ sudo -u www-data plugins/mimeshield/bin/mimeshield.sh diag
 The command checks Roundcube/PHP/OpenSSL versions (warning for Roundcube older than 1.7.4 and for
 an OpenSSL library below the CVE-2026-35189 fix of its branch — 3.0.23, 3.4.8, 3.5.9, 3.6.5, 4.0.3;
 only the upstream version number is visible, so a distribution backport is not detected; the CLI
-SAPI may load a different OpenSSL than PHP-FPM — compare with `php-fpm -i`), extensions, CMS
+SAPI may load a different OpenSSL than PHP-FPM — compare with `php-fpm -i`; end-of-life branches
+3.1–3.3 are deliberately not warned about, as the advisory lists supported branches only). Since
+F-16 the plugin also refuses, before any OpenSSL call, certificates with more than 8 or relative
+(nameRelativeToCRLIssuer) CRL distribution points or a duplicate cRLDistributionPoints extension
+(`CertPrecheck`). `diag` further checks the PHP branch support date, extensions, CMS
 functions, the temp directory (0600 files; warning when the configured directory is not usable),
+whether the temp directory is on tmpfs/ramfs, the resolver worst case with CRL checking (warning
+above 10 seconds per lookup), reminds that a PHP-FPM/proxy request timeout is required, checks
 the CA bundle (warning while the system TLS bundle is trusted), the master key (AEAD self-test,
 never printed), the database schema (with the number of stored private keys, identity bindings and
 contact certificates) and the configuration. Exit code 0 = OK (warnings such as a missing `intl` do
@@ -326,7 +364,8 @@ available". Messages without expected protection are sent normally.
 | "database schema missing" | run `bin/initdb.sh --dir=plugins/mimeshield/SQL` |
 | "S/MIME protection is required ... MIME Shield is not available" on send | schema missing or outdated after an upgrade: run `bin/updatedb.sh --package=mimeshield --dir=plugins/mimeshield/SQL` |
 | Recipient shown "revocation status could not be checked" | CRL checking is on and no current CRL could be used for that certificate **or one of its intermediate CAs** (every certificate of the path is checked; a CA certificate without an http(s) CRL distribution point is undetermined) — check egress/proxy, `mimeshield_revocation_allow_hosts`; an unreachable distribution point is retried after 5 minutes; with `mimeshield_revocation_unknown = 'block'` such recipients are refused |
-| "Too many attempts" | limit of key imports (10 / 5 min per session and per user) or recipient checks (30 / min per session); wait and retry |
+| "Too many attempts" | limit of key imports (10 / 5 min per session and per user), recipient checks (30 / min per session) or "save sender certificate" (20 / min per session and per user); wait and retry |
+| Signature "malformed" / decryption error for a message other clients accept | the embedded certificates have risky CRL distribution points (CVE-2026-35189 pre-check) or the CMS structure cannot be read by the plugin's parser; refused deliberately before OpenSSL |
 | Signature "not verified: too many signatures" | the message contains more than 8 signed parts; only the first 8 are verified |
 | Valid signatures shown as "issuer not trusted" | add the CA root to `mimeshield_ca_bundle` |
 | "chain incomplete" for Outlook on the web mail | OWA does not include intermediates by default – add them to `mimeshield_intermediates` |
@@ -360,7 +399,11 @@ checklist is provided.
   directory in plaintext (core `filesystem_attachments` behaviour).
 * With `bcc_mode = separate`, if the delivery of the main message fails after Bcc copies were
   accepted, a retry can send duplicate Bcc copies. The error message then says that the Bcc
-  recipients already have the message.
+  recipients already have the message. Separate SMTP envelopes cannot be delivered atomically
+  (accepted, audit I-07).
+* When decrypting, only own keys matching a RecipientInfo are tried; if none match, at most 5 other
+  keys are tried (for clients that encode the recipient identifier differently, audit I-18). A
+  message naming one own key but encrypted to another does not decrypt.
 * Recipient checks are limited per session, key imports per session and atomically per user (the
   account quota is committed before import; a quota storage failure blocks imports); limits per IP
   and request time limits belong to the reverse proxy / WAF and PHP-FPM in front of Roundcube.

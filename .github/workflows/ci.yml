@@ -1,0 +1,111 @@
+# MIME Shield - continuous integration (audit I-05 decision 2026-10-03).
+#
+# Deliberate choices, so that a later audit does not re-report them:
+# - third-party actions are pinned to full commit SHAs (tag in the comment); update both together;
+# - read-only token (permissions: contents: read), no secrets, no pull_request_target: untrusted
+#   pull requests run with the same minimal rights as pushes;
+# - composer.lock is git-ignored (a plugin, not an application), so every PHP version resolves its
+#   own dependency set - exactly what an installation on that PHP version gets;
+# - Roundcube is not a runtime dependency of the plugin; the copy that roundcube/plugin-installer
+#   pulls into vendor/ is assembled into the directory MIMESHIELD_RC expects (docs/TESTING.md).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  tests:
+    name: PHPUnit (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.1', '8.2', '8.3', '8.4', '8.5']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: openssl, mbstring, intl, sqlite3, pdo_sqlite, curl, sodium
+          coverage: none
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress
+
+      - name: Assemble the Roundcube directory for integration tests
+        run: |
+          rc="$RUNNER_TEMP/rc"
+          mkdir -p "$rc"
+          for d in program config plugins SQL; do
+            ln -s "$GITHUB_WORKSPACE/vendor/roundcube/roundcubemail/$d" "$rc/$d"
+          done
+          ln -s "$GITHUB_WORKSPACE/vendor" "$rc/vendor"
+          test -f "$rc/program/lib/Roundcube/bootstrap.php"
+          echo "MIMESHIELD_RC=$rc" >> "$GITHUB_ENV"
+
+      - name: PHPUnit
+        run: vendor/bin/phpunit
+
+      - name: PHP syntax check
+        run: |
+          status=0
+          while IFS= read -r -d '' f; do
+            php -l "$f" > /dev/null 2>&1 || { php -l "$f"; status=1; }
+          done < <(find lib tests -type f -name '*.php' -print0; find localization -type f -name '*.inc' -print0; printf '%s\0' mimeshield.php bin/mimeshield.sh)
+          exit "$status"
+
+      - name: JavaScript syntax check
+        run: node --check js/mimeshield.js
+
+  phpstan:
+    name: PHPStan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          # PHP >= 8.3 so that the curl constants added in 8.3 are known (phpstan.neon.dist)
+          php-version: '8.4'
+          extensions: openssl, mbstring, intl, sqlite3, pdo_sqlite, curl, sodium
+          coverage: none
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress
+
+      # phpstan.neon.dist scans Roundcube at /opt/rcrun/1.7.4 (its documented default location)
+      - name: Assemble the Roundcube directory for analysis
+        run: |
+          rc="$RUNNER_TEMP/rc"
+          mkdir -p "$rc"
+          for d in program config plugins SQL; do
+            ln -s "$GITHUB_WORKSPACE/vendor/roundcube/roundcubemail/$d" "$rc/$d"
+          done
+          ln -s "$GITHUB_WORKSPACE/vendor" "$rc/vendor"
+          sudo mkdir -p /opt/rcrun
+          sudo ln -s "$rc" /opt/rcrun/1.7.4
+          echo "MIMESHIELD_RC=/opt/rcrun/1.7.4" >> "$GITHUB_ENV"
+
+      - name: PHPStan
+        run: php -d memory_limit=2G vendor/bin/phpstan analyse --no-progress -c phpstan.neon.dist

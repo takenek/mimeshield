@@ -28,6 +28,7 @@ lib/MimeShield/
     ImportedKey.php            import result (transient, holds the key in memory only)
     LegacyPkcs12Converter.php  opt-in RC2 PKCS#12 conversion via openssl CLI (no shell, no disk)
     PublicCertImporter.php     PEM / DER / PKCS#7 certs-only
+    CertPrecheck.php           CVE-2026-35189 pre-check of CRL distribution points before OpenSSL
   KeyStore/
     MasterKeyProvider.php      master key(s) from file or environment, rotation (kid)
     KeyVault.php               AEAD blob format v1 (XChaCha20-Poly1305 / AES-256-GCM)
@@ -35,7 +36,8 @@ lib/MimeShield/
     TrustStore.php             admin-defined anchors (+ opt-in system bundle), intermediates, issuer lookup
     ChainValidator.php         OpenSSL decision + diagnostic path building (reasons), CA EKU for EC recipients
     AddressMatcher.php         e-mail normalisation / comparison
-    RevocationChecker.php      opt-in CRL checking (signature, freshness, critical extensions)
+    RevocationChecker.php      opt-in CRL checking (signature, freshness, critical extensions, cRLNumber)
+    CrlNumberStore.php, SharedCacheCrlNumberStore.php   highest cRLNumber per CRL scope (Roundcube cache_shared)
     SafeHttpClient.php         SSRF-hardened HTTP GET for CRLs
     VerificationResult.php     separated crypto / chain / identity / revocation / time / policy states
     ChainResult.php, RevocationResult.php   result value objects
@@ -53,7 +55,7 @@ lib/MimeShield/
     PartStatus.php             per-part S/MIME state for the UI
   Ui/                          ComposeUi, MessageUi, SettingsUi (all output escaped)
   Cli/Tool.php                 bin/mimeshield.sh: diag, keygen, rotate, check-keystore
-  RateLimiter.php              per-session sliding-window limits (recipient checks, key import)
+  RateLimiter.php              per-session limits and per-user reservations (recipient checks, key import, savecert)
 SQL/                           mysql / postgres / sqlite schemas (Roundcube conventions)
 skins/elastic/                 templates + CSS
 js/mimeshield.js               compose / settings / message view (no secrets, no innerHTML with data)
@@ -448,6 +450,46 @@ reservation is committed before KDF work. Storage failures block import; no sche
 * I-01: the message UI adds an explicit warning headline and header indicator for an otherwise
   valid signature whose revocation was not checked; public verification levels and configured
   digest policies are unchanged.
+
+## 8d. Remediation decisions (2026-10-03)
+
+Decisions on the remaining audit items; the rationale is also in SECURITY.md ("Design decisions and
+accepted risks") and in "Deliberate ... (audit X decision 2026-10-03)" comments at the code sites.
+
+* I-01: `Config` defaults keep `mimeshield_revocation = 'off'` and `mimeshield_legacy_digests =
+  ['sha1']` (comment at the defaults); the UI never shows these states as fully valid.
+* I-09: `RevocationChecker` option `acceptSha1`, wired by `Services` from `legacyDigests()`; a SHA-1
+  signed CRL is otherwise UNKNOWN (`revocationunavailable`).
+* I-02: `RevocationChecker` takes an optional `CrlNumberStore`; `SharedCacheCrlNumberStore` uses
+  `rcube_cache::factory('db', ...)` directly (not `get_cache_shared()`, which is disabled without an
+  option and whose driver/TTL user preferences may override). Key: SHA-256 of issuer name DER, CRL
+  AKI (else issuer SKI) and URL; numbers compared as unsigned big integers. Lower number → UNKNOWN,
+  not stored, not disk-cached (a cached copy is refetched). Store errors are logged once; checks go
+  on. TTL 30 days (`rcube_cache` cap), rewritten when older than a day.
+* I-14/I-15/F-07/F-14: `Tool::phpSupportStatus()` (`PHP_SECURITY_EOL` table, update every release),
+  `Tool::tmpfsStatus()` (longest mount prefix of the real temp path), `Tool::resolverStatus()`
+  (timeout × attempts × nameservers, glibc caps, warn above 10 s) and an `[INFO]` line requiring a
+  PHP-FPM/proxy request timeout. All are WARN/INFO only.
+* I-15: `mimeshield_temp_dir_strict`; `Config::tempBaseDir()` registers the fallback directory with
+  `SecureTemp::refuseBaseDir()`, and `SecureTemp::prepareDir()` throws `tempdirunavailable` - the
+  only enforcement point, so the service graph built for every message still works.
+  `message_ready` checks `Config::tempDirRefused()` before recipient checks.
+* I-17: `saveCertAction` adds `RateLimiter::allowForUser(..., 'savecert', 20, 60)`.
+* I-18: `KeyService::decryptionCandidates()` returns only keys matching a RecipientInfo
+  (issuer+serial or SKI); if none matches, at most `MAX_UNMATCHED_CANDIDATES` (5) others.
+* F-16: `CertPrecheck::assertSafe()` (plugin `Asn1` parser) runs in `Certificate::__construct()`,
+  `CmsService` verify/decrypt/embeddedCertificates (via `CmsInspector::certificateChoices()`) and
+  `PublicCertImporter` (PKCS#7 must be SignedData). Refusals: FAIL_MALFORMED signature, `CryptoException`
+  on decrypt, `[]` for embedded certificates. `Tool::opensslVersionStatus()` deliberately ignores
+  end-of-life branches 3.1-3.3.
+* I-05: `.github/workflows/ci.yml` (PHP 8.1-8.5 PHPUnit, `php -l`, `node --check`, PHPStan 2.x;
+  SHA-pinned actions, read-only token), `docs/RELEASING.md`, `/.github export-ignore`.
+* Accepted notes: F-01 (forwarded `message/rfc822` without parsed Content-Type matched by second
+  part type only, always "partial"), F-02 (OpenSSL may choose another bundle certificate with the
+  same subject and key as anchor - still an administrator anchor), F-12 (no directory fsync after
+  rename), I-07 (separate Bcc envelopes are not atomic).
+* Cleanups: `keygen` new-file writes use the checked `Tool::writeAll()` (partial file removed);
+  unused `SignatureVerifier::findIssuer()` removed.
 
 ## 9. Differences from the original requirements (and why)
 

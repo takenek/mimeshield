@@ -26,7 +26,7 @@ final class MessageUi
 {
     private const SEVERITY = ['ok' => 0, 'warning' => 1, 'error' => 2];
 
-    /** "save sender certificate" requests per session and minute */
+    /** "save sender certificate" requests per minute, per session and per user account */
     private const SAVECERT_PER_MINUTE = 20;
 
     public function __construct(private readonly \mimeshield $plugin)
@@ -284,8 +284,10 @@ final class MessageUi
             $rc->output->show_message('mimeshield.invalidrequest', 'error');
             $rc->output->send();
         }
-        // each request re-fetches and re-verifies the message: bound the frequency per session
-        if (!\MimeShield\RateLimiter::allow($_SESSION, 'mimeshield_rl_savecert', self::SAVECERT_PER_MINUTE, 60)) {
+        // each request re-fetches and re-verifies the message: bound the frequency per session and per
+        // user account across sessions (audit I-17; same pattern as the key import)
+        if (!\MimeShield\RateLimiter::allow($_SESSION, 'mimeshield_rl_savecert', self::SAVECERT_PER_MINUTE, 60)
+            || !\MimeShield\RateLimiter::allowForUser($this->plugin->services()->db(), $this->plugin->services()->userId(), 'savecert', self::SAVECERT_PER_MINUTE, 60)) {
             $rc->output->show_message('mimeshield.ratelimited', 'error');
             $rc->output->send();
         }

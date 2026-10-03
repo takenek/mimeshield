@@ -365,6 +365,11 @@ class mimeshield extends rcube_plugin
                 throw new \MimeShield\Exception\ValidationException('enigmaconflict', 'PGP and S/MIME selected together');
             }
 
+            // checked before recipient certificates: their chain check would otherwise report the
+            // refused temp directory as "certificate not trusted" (audit I-15)
+            if ($cfg->tempDirRefused()) {
+                throw new \MimeShield\Exception\ValidationException('tempdirunavailable', 'temp directory unusable (mimeshield_temp_dir_strict)');
+            }
             $identity = $this->composeIdentity();
             $result = $this->services()->outgoing()->process($p['message'], $identity, $sign, $encrypt, $draft);
             if ($result !== null) {

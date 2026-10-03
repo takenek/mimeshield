@@ -239,7 +239,16 @@ final class KeyService
     }
 
     /**
-     * Own keys ordered by how likely they decrypt $der (RecipientInfo match first).
+     * Unmatched keys tried when no own key matches any RecipientInfo of the message (audit I-18).
+     * Deliberate: some clients encode the recipient identifier differently (e.g. an SKI computed by
+     * another method), so a small blind fallback keeps those messages readable while bounding the
+     * private-key unwraps and decrypt attempts a crafted message can trigger.
+     */
+    private const MAX_UNMATCHED_CANDIDATES = 5;
+
+    /**
+     * Own keys likely to decrypt $der: only the keys matching a RecipientInfo (issuer+serial or SKI);
+     * when none matches, at most MAX_UNMATCHED_CANDIDATES other keys (audit I-18 decision 2026-10-03).
      *
      * @return list<KeyRecord>
      */
@@ -273,11 +282,15 @@ final class KeyService
             if ($hit) {
                 $matched[] = $r;
             } else {
-                // identifiers may be computed differently by some clients: try the others afterwards
                 $rest[] = $r;
             }
         }
-        return array_slice(array_merge($matched, $rest), 0, $max);
+        if ($matched !== []) {
+            // a matching key exists: unmatched keys are never unwrapped for this message (audit I-18)
+            return array_slice($matched, 0, $max);
+        }
+        // nothing matched: identifiers may be computed differently by some clients, try a few others
+        return array_slice($rest, 0, min($max, self::MAX_UNMATCHED_CANDIDATES));
     }
 
     public function delete(int $keyId): bool

@@ -9,6 +9,7 @@ use MimeShield\Cert\KeyImporter;
 use MimeShield\Cert\PublicCertImporter;
 use MimeShield\Crypto\CmsInspector;
 use MimeShield\Crypto\CmsService;
+use MimeShield\Exception\MimeShieldException;
 use MimeShield\Exception\MissingCertificatesException;
 use MimeShield\Exception\StorageException;
 use MimeShield\Exception\ValidationException;
@@ -762,9 +763,9 @@ final class OutgoingPipelineTest extends TestCase
         self::assertContains($newer['cert']->serialHex, $serials);
         self::assertNotContains(TestPki::cert('alice')->serialHex, $serials);
 
-        // the old message still decrypts through the candidates (old key first: RecipientInfo match)
+        // the old message still decrypts through the candidates (only the RecipientInfo match, audit I-18)
         $cands = $this->aliceKeys->decryptionCandidates($oldDer);
-        self::assertCount(3, $cands);
+        self::assertCount(1, $cands);
         self::assertSame($this->aliceKeyId, $cands[0]->id());
         $plain = null;
         foreach ($cands as $rec) {
@@ -784,6 +785,40 @@ final class OutgoingPipelineTest extends TestCase
         // and a message encrypted to the NEW certificate selects the new key first
         $newDer = $this->cms->encrypt("Content-Type: text/plain\r\n\r\nnowa\r\n", [$newer['cert']]);
         self::assertSame($newId, $this->aliceKeys->decryptionCandidates($newDer)[0]->id());
+    }
+
+    /**
+     * Imports unrelated fixture keys into bob's store (none of them is a recipient of alice's messages).
+     *
+     * @return int number of keys bob holds afterwards
+     */
+    private function giveBobManyKeys(): int
+    {
+        foreach (['carol', 'mallory', 'evil', 'signonly', 'untrusted', 'selfsigned', 'wrongmail', 'legacyemail', 'notyet', 'revoked'] as $n) {
+            try {
+                $this->bobKeys->import(TestPki::read($n . '.p12'), TestPki::PASSWORD, $this->identities(self::BOB));
+            } catch (MimeShieldException) {
+                // a fixture the importer refuses is irrelevant here
+            }
+        }
+        return $this->bobKeys->repository()->count();
+    }
+
+    public function testDecryptionCandidatesAreOnlyTheMatchingKeysWhenOneMatches(): void
+    {
+        self::assertGreaterThan(6, $this->giveBobManyKeys());
+        // audit I-18: with a RecipientInfo match, unmatched keys are never unwrapped for the message
+        $der = $this->cms->encrypt("Content-Type: text/plain\r\n\r\nx\r\n", [TestPki::cert('bob'), TestPki::cert('alice')]);
+        self::assertSame([$this->bobKeyId], array_map(static fn ($r) => $r->id(), $this->bobKeys->decryptionCandidates($der)));
+    }
+
+    public function testDecryptionCandidatesWithoutAnyMatchAreBoundedToFive(): void
+    {
+        self::assertGreaterThan(6, $this->giveBobManyKeys());
+        // audit I-18: no own key matches (message for alice) - at most 5 blind attempts
+        $der = $this->cms->encrypt("Content-Type: text/plain\r\n\r\nx\r\n", [TestPki::cert('alice')]);
+        self::assertCount(5, $this->bobKeys->decryptionCandidates($der));
+        self::assertCount(2, $this->bobKeys->decryptionCandidates($der, 2), 'the caller limit still applies');
     }
 
     // ================================================================== user isolation

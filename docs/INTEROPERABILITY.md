@@ -42,6 +42,13 @@ environment. Use the manual checklist below before relying on them in production
 | Intermediates in signatures | OWA omits them by default | included | included when sending; configure `mimeshield_intermediates` for OWA mail |
 | Bcc | OWA: one encrypted copy per Bcc recipient | single envelope | separate envelopes (default) |
 | PKCS#12 export (Windows) | "TripleDES-SHA1" (default) uses RC2-40 for the certificate bag | — | clear error + optional CLI conversion; re-export with AES256-SHA256 recommended |
+| Recipient identifier in EnvelopedData | issuer+serial (default) or SKI | issuer+serial | only own keys matching a RecipientInfo are tried; if none matches, at most 5 other own keys (audit I-18 decision) |
+| SHA-1 signed CRLs (older CAs) | — | — | accepted while `'sha1'` is in `mimeshield_legacy_digests` (default); otherwise revocation "unknown" (audit I-09 decision) |
+| Embedded certificates with many/relative CRL distribution points | — | — | refused before OpenSSL (CVE-2026-35189 pre-check, F-16): signature "malformed", decryption error; no real CA issues such certificates |
+
+Keeping SHA-1 signatures accepted with a warning (never green) is a deliberate decision (audit I-01,
+2026-10-03): Outlook on the web signs with SHA-1 by default. Set `mimeshield_legacy_digests = []` to
+reject them.
 
 ## 3. Manual interoperability checklist (Outlook and Thunderbird)
 

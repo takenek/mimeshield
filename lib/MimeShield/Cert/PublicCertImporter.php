@@ -11,6 +11,7 @@ declare(strict_types=1);
 namespace MimeShield\Cert;
 
 use MimeShield\Crypto\Asn1;
+use MimeShield\Crypto\CmsInspector;
 use MimeShield\Crypto\OpenSsl;
 use MimeShield\Exception\ValidationException;
 
@@ -44,7 +45,14 @@ final class PublicCertImporter
         if (str_contains($data, '-----BEGIN CERTIFICATE-----')) {
             $pems = Certificate::splitPemBundle($data, $this->maxCerts + 1);
         } elseif (str_contains($data, '-----BEGIN PKCS7-----') || str_contains($data, '-----BEGIN CMS-----')) {
-            $pems = $this->readPkcs7(str_replace('CMS-----', 'PKCS7-----', $data));
+            if (!preg_match('/-----BEGIN (PKCS7|CMS)-----\s*([A-Za-z0-9+\/=\s]+?)\s*-----END \1-----/', $data, $m)) {
+                throw new ValidationException('certinvalid', 'bad PKCS#7 PEM');
+            }
+            $der = base64_decode(preg_replace('/\s+/', '', $m[2]) ?? '', true);
+            if ($der === false || $der === '') {
+                throw new ValidationException('certinvalid', 'bad PKCS#7 PEM base64');
+            }
+            $pems = $this->readPkcs7($der);
         } else {
             // DER: a certificate or a PKCS#7 SignedData (certs-only)
             try {
@@ -54,8 +62,7 @@ final class PublicCertImporter
                 throw new ValidationException('certinvalid', 'not a DER structure');
             }
             if ($first->isUniversal(Asn1::TAG_OID)) {
-                $pem = "-----BEGIN PKCS7-----\n" . chunk_split(base64_encode($data), 64, "\n") . "-----END PKCS7-----\n";
-                $pems = $this->readPkcs7($pem);
+                $pems = $this->readPkcs7($data);
             } else {
                 $pems = [Certificate::derToPem($data)];
             }
@@ -82,10 +89,31 @@ final class PublicCertImporter
     }
 
     /**
+     * Certificates of a PKCS#7 certs-only bundle (DER).
+     *
      * @return list<string>
      */
-    private function readPkcs7(string $pem): array
+    private function readPkcs7(string $der): array
     {
+        // a bundle may hold certificates received from anyone: each one passes the CVE-2026-35189
+        // pre-check before openssl_pkcs7_read parses it (audit F-16). Only SignedData is accepted
+        // (deliberate: the certificates of other PKCS#7 types could not be pre-checked)
+        try {
+            $isSigned = CmsInspector::contentType($der) === CmsInspector::OID_SIGNED_DATA;
+            $choices = $isSigned ? CmsInspector::certificateChoices($der)['certificates'] : [];
+        } catch (ValidationException) {
+            throw new ValidationException('certinvalid', 'PKCS#7 bundle unreadable');
+        }
+        if (!$isSigned) {
+            throw new ValidationException('certinvalid', 'PKCS#7 bundle is not SignedData');
+        }
+        if (count($choices) > $this->maxCerts) {
+            throw new ValidationException('importtoomany', 'too many certificates in file');
+        }
+        foreach ($choices as $certDer) {
+            CertPrecheck::assertSafe($certDer);
+        }
+        $pem = "-----BEGIN PKCS7-----\n" . chunk_split(base64_encode($der), 64, "\n") . "-----END PKCS7-----\n";
         $certs = [];
         [$ok] = OpenSsl::run(static function () use ($pem, &$certs) {
             return openssl_pkcs7_read($pem, $certs);

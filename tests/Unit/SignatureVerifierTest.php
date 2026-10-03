@@ -546,18 +546,6 @@ final class SignatureVerifierTest extends TestCase
         self::assertLine($r, 'revocation_unknown', VerificationResult::LEVEL_WARNING, []);
     }
 
-    // --- findIssuer ----------------------------------------------------------------------------
-
-    public function testFindIssuer(): void
-    {
-        $v = $this->verifier();
-        $alice = TestPki::cert('alice');
-        self::assertSame(TestPki::cert('int')->fingerprint, $v->findIssuer($alice, [TestPki::read('mallory.crt'), 'junk', TestPki::read('int.crt')])?->fingerprint);
-        self::assertNull($v->findIssuer($alice, []));
-        self::assertSame(TestPki::cert('root')->fingerprint, $v->findIssuer(TestPki::cert('int'), [])?->fingerprint);
-        self::assertNull($v->findIssuer(TestPki::cert('untrusted'), [TestPki::read('int.crt')]));
-    }
-
     // --- helpers -------------------------------------------------------------------------------
 
     /**

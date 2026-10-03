@@ -230,6 +230,7 @@ $messages['ratelimited'] = 'Too many attempts. Please wait a few minutes and try
 $messages['keystoreunavailable'] = 'The S/MIME key store is not configured on this server (master key missing). Please contact your administrator.';
 $messages['keystorecorrupt'] = 'A stored private key could not be unlocked (integrity check failed). Please contact your administrator.';
 $messages['internalerror'] = 'S/MIME operation failed. The message was not sent.';
+$messages['tempdirunavailable'] = 'S/MIME is unavailable: the server\'s temporary directory cannot be used. The message was not sent or processed. Please ask your administrator to fix the temporary directory.';
 $messages['dberror'] = 'Database error.';
 $messages['notfound'] = 'Item not found.';
 $messages['notloggedin'] = 'Session expired.';
