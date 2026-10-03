@@ -19,6 +19,8 @@ API (no changes to Roundcube core):
 * UI in Settings, Compose and message view (Elastic skin), English and Polish translations,
 * CLI diagnostics and master-key tools.
 
+Created and maintained by **[TaKeN](https://github.com/takenek)**.
+
 Documentation: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
 [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) · [SECURITY.md](SECURITY.md) ·
 [docs/INTEROPERABILITY.md](docs/INTEROPERABILITY.md) · [docs/TESTING.md](docs/TESTING.md) ·
@@ -413,7 +415,13 @@ checklist is provided.
 * `multipart/signed` messages without the `protocol` parameter (non-conforming senders) are not
   verified; the signature part is then shown as an attachment.
 
-## 11. License
+## 11. Author
+
+**MIME Shield** was created and is maintained by **[TaKeN](https://github.com/takenek)**.
+
+Project repository: [github.com/takenek/mimeshield](https://github.com/takenek/mimeshield)
+
+## 12. License
 
 GPL-3.0-or-later (same as Roundcube; see [LICENSE](LICENSE)). Roundcube's plugin exception allows
 plugins under other licenses, GPL-3.0-or-later was chosen for consistency with the ecosystem.

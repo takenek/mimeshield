@@ -1,5 +1,7 @@
 # Security policy – MIME Shield
 
+Maintainer: **[TaKeN](https://github.com/takenek)**.
+
 ## Reporting a vulnerability
 
 Please report security problems **privately**, not in public issues:
