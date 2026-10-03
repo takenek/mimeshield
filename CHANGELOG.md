@@ -5,6 +5,8 @@ semantic versioning.
 
 ## [Unreleased]
 
+## [1.0.0] – 2026-10-03
+
 ### Security
 Remediation of the final security report of 2026-10-03 (IDs F-xx of that report).
 - F-01/F-13: a `multipart/signed` container is S/MIME only when both its `protocol` parameter and
@@ -196,11 +198,7 @@ Remediation of the final security report of 2026-10-02 (IDs MS-xx / INF-xx of th
   was missing; it now names the cause (missing / not a directory / not writable) and shows an
   `install -d` example.
 
-## [1.0.0] – 2026-10-02
-
-First release.
-
-### Added
+### Added (initial implementation)
 - S/MIME signing (clear-signed `multipart/signed`, SHA-256, intermediates embedded,
   no SMIMECapabilities), encryption (AES-256-CBC EnvelopedData, optional AES-GCM on PHP 8.5,
   RSA and ECDH recipients, encrypt-to-self, separate envelopes per Bcc recipient) and
