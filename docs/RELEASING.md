@@ -6,7 +6,10 @@ version constraint. `dev-main` is for development only.
 
 ## 1. Checklist
 
-> **Public Packagist precondition:** `packagist.org` indexes public packages from a public VCS URL. Before submitting this package to public Packagist, make the GitHub repository public. If the repository must remain private, use Private Packagist instead; the public installation instructions below do not apply.
+> **Public Packagist precondition (first publication only):** `packagist.org` indexes public
+> packages from a public VCS URL. Before the initial submission, make the GitHub repository public.
+> If the repository must remain private, use Private Packagist instead. After initial setup, confirm
+> that Packagist reports the package as **auto-updated** so later tags are synchronized automatically.
 
 1. **CI is green** on `main` for the commit to be released (`.github/workflows/ci.yml`: PHPUnit on
    PHP 8.1–8.5 with the Roundcube library, `php -l`, `node --check`, PHPStan level 6). Run the
@@ -32,11 +35,13 @@ version constraint. `dev-main` is for development only.
 5. **Push the tag**: `git push origin vX.Y.Z` (the commit must already be on `main`).
 6. **GitHub release** from the tag (`gh release create vX.Y.Z --verify-tag --notes-file <notes>`),
    notes = the CHANGELOG section of the version.
-7. **Packagist**: after the repository is public, submit `https://github.com/takenek/mimeshield`
-   once at packagist.org and enable the GitHub hook (Packagist "GitHub Service Hook" / sync),
-   so new tags are published automatically. Check that version `X.Y.Z` appears at
-   packagist.org/packages/takenek/mimeshield and resolves to the exact tag commit. Stable versions
-   are immutable on Packagist, so never move or recreate a published release tag.
+7. **Packagist**:
+   - **first publication only**: after the repository is public, submit
+     `https://github.com/takenek/mimeshield` once at packagist.org and configure/confirm GitHub
+     synchronization until the package page reports **"This package is auto-updated"**;
+   - **every release**: check that version `X.Y.Z` appears at
+     `packagist.org/packages/takenek/mimeshield` and resolves to the exact tag commit.
+   Stable versions are immutable on Packagist, so never move or recreate a published release tag.
 
 ## 2. Installation by version
 
