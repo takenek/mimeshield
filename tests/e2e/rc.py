@@ -26,6 +26,7 @@ class Roundcube:
         self.s = requests.Session()
         self.s.hooks['response'].append(self._observe)
         self.token = None
+        self.pending_cert_digest = None
 
     def _observe(self, r, *args, **kwargs):
         for cb in Roundcube.response_observers:
@@ -164,15 +165,23 @@ class Roundcube:
 
     def import_cert(self, path, confirm=False, filename=None):
         if confirm:
-            # the confirmation form posts directly (a GET of the import form discards the pending upload)
-            return self.s.post(self.url(_task='settings', _action='plugin.mimeshield-certimport', _framed=1),
-                               data={'_token': self.token, '_confirm': '1'})
+            # The confirmation form is bound to the exact pending upload by a SHA-256 digest.
+            # Mirror the browser form: never send a bare _confirm=1, because the server deliberately
+            # rejects stale/replayed confirmation from another tab (audit I-04).
+            digest = self.pending_cert_digest or ''
+            r = self.s.post(self.url(_task='settings', _action='plugin.mimeshield-certimport', _framed=1),
+                            data={'_token': self.token, '_confirm': '1', '_pending_digest': digest})
+            self.pending_cert_digest = None
+            return r
         r = self.get(_task='settings', _action='plugin.mimeshield-certimport', _framed=1)
         tok = self.env_token(r.text) or self.token
         with open(path, 'rb') as f:
             files = {'_file': (filename or path.split('/')[-1], f.read(), 'application/pkix-cert')}
-        return self.s.post(self.url(_task='settings', _action='plugin.mimeshield-certimport', _framed=1),
-                           data={'_token': tok}, files=files)
+        r = self.s.post(self.url(_task='settings', _action='plugin.mimeshield-certimport', _framed=1),
+                        data={'_token': tok}, files=files)
+        m = re.search(r'name="_pending_digest"[^>]*value="([0-9a-fA-F]{64})"', r.text)
+        self.pending_cert_digest = m.group(1).lower() if m else None
+        return r
 
     def key_ids(self):
         r = self.get(_task='settings', _action='plugin.mimeshield')
