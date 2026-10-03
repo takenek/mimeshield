@@ -6,9 +6,13 @@ version constraint. `dev-main` is for development only.
 
 ## 1. Checklist
 
+> **Public Packagist precondition:** `packagist.org` indexes public packages from a public VCS URL. Before submitting this package to public Packagist, make the GitHub repository public. If the repository must remain private, use Private Packagist instead; the public installation instructions below do not apply.
+
 1. **CI is green** on `main` for the commit to be released (`.github/workflows/ci.yml`: PHPUnit on
    PHP 8.1–8.5 with the Roundcube library, `php -l`, `node --check`, PHPStan level 6). Run the
    release checks CI cannot run (E2E, browser UI, interop; see docs/TESTING.md) and record them there.
+   Do not tag a release while the latest post-change E2E, browser UI or interoperability checks are still recorded as not run.
+   Run `composer validate --strict` on the exact release commit before tagging.
 2. **CHANGELOG.md**: rename `## [Unreleased]` to `## [X.Y.Z] – YYYY-MM-DD` (semantic versioning;
    any security fix is at least a patch release), add a new empty `## [Unreleased]`, commit.
 3. **Signed annotated tag** on that commit:
@@ -28,9 +32,11 @@ version constraint. `dev-main` is for development only.
 5. **Push the tag**: `git push origin vX.Y.Z` (the commit must already be on `main`).
 6. **GitHub release** from the tag (`gh release create vX.Y.Z --verify-tag --notes-file <notes>`),
    notes = the CHANGELOG section of the version.
-7. **Packagist**: submit `https://github.com/takenek/mimeshield` once at packagist.org and enable
-   the GitHub hook (Packagist "GitHub Service Hook" / sync), so new tags are published automatically.
-   Check that the version appears on packagist.org/packages/takenek/mimeshield.
+7. **Packagist**: after the repository is public, submit `https://github.com/takenek/mimeshield`
+   once at packagist.org and enable the GitHub hook (Packagist "GitHub Service Hook" / sync),
+   so new tags are published automatically. Check that version `X.Y.Z` appears at
+   packagist.org/packages/takenek/mimeshield and resolves to the exact tag commit. Stable versions
+   are immutable on Packagist, so never move or recreate a published release tag.
 
 ## 2. Installation by version
 
