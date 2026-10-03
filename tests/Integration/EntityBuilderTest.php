@@ -603,8 +603,12 @@ final class EntityBuilderTest extends TestCase
         // no -binary: the CLI's MIME parser keeps a stray CR before the boundary of CRLF messages in
         // binary mode (it fails on its own -crlfeol output too); the text-mode canonicalisation is a
         // no-op for canonical CRLF content. Byte exactness is checked separately.
-        $p = proc_open([self::OPENSSL, 'cms', '-verify', '-in', $in, '-CAfile', TestPki::path('root.crt'),
-            '-certfile', TestPki::path('int.crt'), '-purpose', 'smimesign', '-out', $out], [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+        // root and intermediate as trusted file: OpenSSL 3.0's `cms -verify -certfile` does not use the
+        // extra certificates for chain building (the signature carries only the signer certificate)
+        $ca = $this->work . '/ca-chain.pem';
+        file_put_contents($ca, TestPki::read('root.crt') . TestPki::read('int.crt'));
+        $p = proc_open([self::OPENSSL, 'cms', '-verify', '-in', $in, '-CAfile', $ca,
+            '-purpose', 'smimesign', '-out', $out], [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
         self::assertIsResource($p);
         fclose($pipes[0]);
         stream_get_contents($pipes[1]);

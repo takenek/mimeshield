@@ -154,7 +154,7 @@ final class RevocationChecker
                 $first ??= $r;
             }
         }
-        return $first ?? $leaf ?? new RevocationResult(RevocationResult::UNKNOWN, 'noissuer');
+        return $first ?? $leaf;   // count($path) >= 2: at least one certificate was checked
     }
 
     /**

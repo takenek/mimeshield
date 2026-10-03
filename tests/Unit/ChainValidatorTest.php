@@ -325,14 +325,12 @@ final class ChainValidatorTest extends TestCase
             . "extendedKeyUsage = emailProtection\nsubjectKeyIdentifier = hash\nauthorityKeyIdentifier = keyid:always\nsubjectAltName = email:ec@example.test\n");
         self::sh(['/usr/bin/openssl', 'genpkey', '-algorithm', 'EC', '-pkeyopt', 'ec_paramgen_curve:P-256', '-out', $d . '/k.pem']);
         self::sh(['/usr/bin/openssl', 'req', '-new', '-key', $d . '/k.pem', '-subj', '/CN=ec runtime (TEST ONLY)', '-out', $d . '/r.csr']);
-        $cmd = ['/usr/bin/openssl', 'x509', '-req', '-in', $d . '/r.csr', '-CA', $caCrt, '-CAkey', $caKey,
-            '-set_serial', '0x' . bin2hex(random_bytes(8)), '-extfile', $d . '/ext.cnf', '-extensions', 'e', '-out', $d . '/c.pem'];
         if ($notBefore !== null && $notAfter !== null) {
-            array_push($cmd, '-not_before', $notBefore, '-not_after', $notAfter);
+            TestPki::issueCertificate($d . '/r.csr', $caCrt, $caKey, $d . '/ext.cnf', $notBefore, $notAfter, $d . '/c.pem');
         } else {
-            array_push($cmd, '-days', '30');
+            self::sh(['/usr/bin/openssl', 'x509', '-req', '-in', $d . '/r.csr', '-CA', $caCrt, '-CAkey', $caKey,
+                '-set_serial', '0x' . bin2hex(random_bytes(8)), '-extfile', $d . '/ext.cnf', '-extensions', 'e', '-out', $d . '/c.pem', '-days', '30']);
         }
-        self::sh($cmd);
         return Certificate::fromString((string) file_get_contents($d . '/c.pem'));
     }
 

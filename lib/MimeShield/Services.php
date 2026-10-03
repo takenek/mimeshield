@@ -130,7 +130,7 @@ final class Services
     private function crlNumberStore(): ?SharedCacheCrlNumberStore
     {
         try {
-            $cache = \rcube_cache::factory('db', null, SharedCacheCrlNumberStore::PREFIX, SharedCacheCrlNumberStore::TTL);
+            $cache = \rcube_cache::factory('db', 0, SharedCacheCrlNumberStore::PREFIX, SharedCacheCrlNumberStore::TTL);
             return new SharedCacheCrlNumberStore($cache);
         } catch (\Throwable $e) {
             Log::info('revocation', 'CRL number tracking disabled: shared cache unavailable (' . $e->getMessage() . ')');

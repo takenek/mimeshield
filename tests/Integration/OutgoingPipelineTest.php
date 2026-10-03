@@ -1471,10 +1471,13 @@ final class OutgoingPipelineTest extends TestCase
         foreach ([
             ['genpkey', '-algorithm', 'RSA', '-pkeyopt', 'rsa_keygen_bits:2048', '-out', $d . '/k.pem'],
             ['req', '-new', '-key', $d . '/k.pem', '-subj', '/C=PL/O=MIME Shield TEST ONLY/CN=alice rotated (TEST ONLY)', '-out', $d . '/r.csr'],
-            ['x509', '-req', '-in', $d . '/r.csr', '-CA', TestPki::path('int.crt'), '-CAkey', TestPki::path('int.key'), '-set_serial', '0x' . bin2hex(random_bytes(8)),
-                '-sha256', '-not_before', $nb, '-not_after', $na, '-extfile', $d . '/ext.cnf', '-extensions', 'e', '-out', $d . '/c.pem'],
+            'issue',
             ['pkcs12', '-export', '-inkey', $d . '/k.pem', '-in', $d . '/c.pem', '-certfile', TestPki::path('int.crt'), '-passout', 'pass:rot-pass', '-out', $d . '/a.p12'],
         ] as $cmd) {
+            if ($cmd === 'issue') {
+                TestPki::issueCertificate($d . '/r.csr', TestPki::path('int.crt'), TestPki::path('int.key'), $d . '/ext.cnf', $nb, $na, $d . '/c.pem');
+                continue;
+            }
             [$rc, $o] = $this->openssl($cmd);
             self::assertSame(0, $rc, implode(' ', $cmd) . ': ' . $o);
         }
