@@ -5,6 +5,13 @@ semantic versioning.
 
 ## [Unreleased]
 
+### Fixed
+- Removed the Composer classmap entry for the Roundcube plugin bootstrap `mimeshield.php`. Roundcube
+  loads that file directly from `plugins/mimeshield/mimeshield.php`; keeping it in Composer's
+  classmap caused spurious "Could not scan for classes" warnings because
+  `roundcube/plugin-installer` relocates the package outside Composer's default `vendor/` path.
+  PSR-4 autoloading for `MimeShield\\` classes is unchanged.
+
 ## [1.0.0] – 2026-10-03
 
 ### Security
