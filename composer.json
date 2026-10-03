@@ -5,6 +5,18 @@
     "keywords": ["roundcube", "plugin", "smime", "s-mime", "cms", "pkcs12", "encryption", "signature"],
     "license": "GPL-3.0-or-later",
     "homepage": "https://github.com/takenek/mimeshield",
+    "authors": [
+        {
+            "name": "TaKeN",
+            "homepage": "https://github.com/takenek",
+            "role": "Developer and Maintainer"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/takenek/mimeshield/issues",
+        "source": "https://github.com/takenek/mimeshield",
+        "security": "https://github.com/takenek/mimeshield/security/policy"
+    },
     "require": {
         "php": ">=8.1 <8.6",
         "ext-openssl": "*",
