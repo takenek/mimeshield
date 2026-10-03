@@ -8,7 +8,8 @@ declare(strict_types=1);
  * Sign, verify, encrypt and decrypt e-mail with S/MIME (RFC 8551), PKCS#12 import, encrypted
  * private key store, recipient certificate store, trust validation, multiple identities.
  *
- * @author    MIME Shield contributors
+ * @author    TaKeN
+ * @link      https://github.com/takenek
  * @license   GPL-3.0-or-later
  *
  * This program is free software: you can redistribute it and/or modify it under the terms of the
@@ -137,7 +138,7 @@ class mimeshield extends rcube_plugin
     {
         return [
             'name' => 'MIME Shield',
-            'vendor' => 'MIME Shield contributors',
+            'vendor' => 'TaKeN',
             'version' => '1.0.0',
             'license' => 'GPL-3.0-or-later',
             'uri' => 'https://github.com/takenek/mimeshield',
