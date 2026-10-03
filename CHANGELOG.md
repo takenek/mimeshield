@@ -8,6 +8,7 @@ semantic versioning.
 ## [1.0.0] – 2026-10-03
 
 ### Security
+- `CmsService::decrypt()` now verifies that the supplied private key matches the recipient certificate before calling OpenSSL CMS decryption. This avoids false-success garbage plaintext with RSA PKCS#1 v1.5 implicit rejection and unauthenticated CBC when a mismatched key is supplied.
 Remediation of the final security report of 2026-10-03 (IDs F-xx of that report).
 - F-01/F-13: a `multipart/signed` container is S/MIME only when both its `protocol` parameter and
   its second part name a PKCS#7 signature; data after the CMS structure of the signature part is
