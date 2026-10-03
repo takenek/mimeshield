@@ -1411,8 +1411,18 @@ def c45():
     b = session('bob')
     uid = newest_uid('bob', subject='e2e 17 untrusted')
     rr = b.post_action('plugin.mimeshield-savecert', {'_uid': uid, '_mbox': 'INBOX'}, task='mail', header=True)
-    if 'mimeshield_savecert_confirm' in rr.text:
-        rr = b.post_action('plugin.mimeshield-savecert', {'_uid': uid, '_mbox': 'INBOX', '_confirm': 1}, task='mail', header=True)
+    try:
+        payload = rr.json()
+    except ValueError:
+        payload = {}
+    confirms = Roundcube.callbacks(payload, 'plugin.mimeshield_savecert_confirm')
+    if confirms:
+        changes = confirms[0].get('changes') or []
+        fp = str(changes[-1].get('new') or '') if changes else ''
+        check(re.fullmatch(r'[0-9a-fA-F]{64}', fp) is not None, 'savecert confirmation missing fingerprint: %r' % confirms[0])
+        rr = b.post_action('plugin.mimeshield-savecert',
+                           {'_uid': uid, '_mbox': 'INBOX', '_confirm': 1, '_fingerprint': fp},
+                           task='mail', header=True)
     check('Sender certificate saved.' in rr.text, 'savecert: %s' % rr.text[:300])
     ids, page = b.cert_ids()
     check('observed (not verified)' in page, 'observed badge missing')
