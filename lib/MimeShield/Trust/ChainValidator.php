@@ -19,12 +19,15 @@ use MimeShield\Log;
 /**
  * Certificate chain validation.
  *
- * The decision "trusted" is made by OpenSSL (openssl_x509_checkpurpose against the configured
- * anchors, at the current time, with the S/MIME purpose). OpenSSL does not expose the reason of a
- * failure, so a second, purely diagnostic path builder (issuer name + signature checks) explains
- * WHY it failed: expired / not yet valid certificate in the path, unknown root, incomplete chain or
- * wrong purpose. The diagnostic result never upgrades a failed OpenSSL decision to "trusted"; it can
- * only downgrade it (EKU of the CAs for EC recipients, checked with the "any" purpose).
+ * The decision "trusted" is made by OpenSSL (openssl_x509_checkpurpose against a store holding ONLY
+ * the configured anchors - never OpenSSL's default CA directory - at the current time, with the
+ * S/MIME purpose). A second path builder (issuer name + signature checks) explains WHY a check
+ * failed (expired / not yet valid certificate in the path, unknown root, incomplete chain, wrong
+ * purpose) and provides the path the other decisions are bound to. It never upgrades a failed
+ * OpenSSL decision to "trusted"; it can only downgrade it: the path must end in an anchor of the
+ * configured trust store for every key type and purpose (audit F-02), its certificates must be
+ * within their validity period, and for EC recipients (checked with the "any" purpose) every CA on
+ * it must allow e-mail protection. Revocation checking uses the same path (ChainResult::$certs).
  */
 final class ChainValidator
 {
@@ -32,6 +35,9 @@ final class ChainValidator
     public const PURPOSE_ENCRYPT = 'encrypt';
 
     private const MAX_DEPTH = 8;
+
+    /** Candidate issuer comparisons per path search (bounds work on attacker-supplied pools) */
+    private const PATH_BUDGET = 256;
 
     public function __construct(private readonly TrustStore $store, private readonly string $tempBaseDir)
     {
@@ -49,17 +55,32 @@ final class ChainValidator
             return new ChainResult(ChainResult::NO_TRUST_STORE, []);
         }
 
-        $trusted = $this->opensslCheck($leaf, $pool, $purpose);
+        // one path for every decision: OpenSSL verifies exactly the path that ends in a configured
+        // anchor (only its intermediates are offered as untrusted certificates); without such a path
+        // nothing is trusted, whatever else a verification store might contain (audit F-02/F-05)
         $path = $this->buildPath($leaf, $pool);
+        $anchoredCerts = $path['anchored'] ? $path['certs'] : [];
+        $trusted = $path['anchored'] && $this->opensslCheck($leaf, array_slice($path['certs'], 1, -1), $purpose);
 
+        if ($trusted) {
+            foreach ($path['certs'] as $c) {
+                // the anchored path must be valid now as well (OpenSSL may have used another one)
+                if ($c->isExpired($now)) {
+                    return new ChainResult(ChainResult::EXPIRED, $path['subjects'], false, $anchoredCerts);
+                }
+                if ($c->isNotYetValid($now)) {
+                    return new ChainResult(ChainResult::NOT_YET_VALID, $path['subjects'], false, $anchoredCerts);
+                }
+            }
+        }
         if ($trusted && $this->usesAnyPurpose($leaf, $purpose) && !self::caPathAllowsEmailProtection($path)) {
             // the "any" purpose does not check the CA certificates: a CA restricted by its EKU to other
             // uses (e.g. TLS server authentication) must not issue trusted e-mail recipients (audit MS-03)
-            Log::info('chain', 'EC recipient path contains a CA not allowed for e-mail protection', ['subject' => $leaf->subject]);
-            return new ChainResult(ChainResult::BAD_PURPOSE, $path['subjects']);
+            Log::info('chain', 'EC recipient path contains a CA not allowed for e-mail protection', ['fingerprint' => $leaf->fingerprint]);
+            return new ChainResult(ChainResult::BAD_PURPOSE, $path['subjects'], false, $anchoredCerts);
         }
         if ($trusted) {
-            return new ChainResult(ChainResult::TRUSTED, $path['subjects']);
+            return new ChainResult(ChainResult::TRUSTED, $path['subjects'], false, $anchoredCerts);
         }
 
         // diagnostics
@@ -71,13 +92,13 @@ final class ChainValidator
         if ($path['anchored']) {
             foreach ($path['certs'] as $c) {
                 if ($c->isExpired($now)) {
-                    return new ChainResult(ChainResult::EXPIRED, $path['subjects']);
+                    return new ChainResult(ChainResult::EXPIRED, $path['subjects'], false, $anchoredCerts);
                 }
                 if ($c->isNotYetValid($now)) {
-                    return new ChainResult(ChainResult::NOT_YET_VALID, $path['subjects']);
+                    return new ChainResult(ChainResult::NOT_YET_VALID, $path['subjects'], false, $anchoredCerts);
                 }
             }
-            return new ChainResult(ChainResult::BAD_PURPOSE, $path['subjects']);
+            return new ChainResult(ChainResult::BAD_PURPOSE, $path['subjects'], false, $anchoredCerts);
         }
 
         if ($leaf->isExpired($now)) {
@@ -95,8 +116,17 @@ final class ChainValidator
      */
     private function buildPool(Certificate $leaf, array $untrustedPems): array
     {
+        // administrator-configured intermediates first: path building prefers them over copies
+        // shipped with a message (audit F-05)
         $pool = [];
         $seen = [$leaf->fingerprint => true];
+        foreach ($this->store->intermediates() as $c) {
+            if (!isset($seen[$c->fingerprint])) {
+                $seen[$c->fingerprint] = true;
+                $pool[] = $c;
+            }
+        }
+        $extra = 0;
         foreach ($untrustedPems as $pem) {
             try {
                 $c = Certificate::fromString($pem);
@@ -106,27 +136,23 @@ final class ChainValidator
             if (!isset($seen[$c->fingerprint]) && $c->isCa) {
                 $seen[$c->fingerprint] = true;
                 $pool[] = $c;
+                $extra++;
             }
-            if (count($pool) >= 32) {
+            if ($extra >= 32) {
                 break;
-            }
-        }
-        foreach ($this->store->intermediates() as $c) {
-            if (!isset($seen[$c->fingerprint])) {
-                $seen[$c->fingerprint] = true;
-                $pool[] = $c;
             }
         }
         return $pool;
     }
 
     /**
-     * @param list<Certificate> $pool
+     * @param list<Certificate> $pool intermediates of the anchored path (leaf and anchor excluded)
      */
     private function opensslCheck(Certificate $leaf, array $pool, string $purpose): bool
     {
-        $caInfo = $this->store->caInfo();
-        if ($caInfo === []) {
+        // bundle files + an empty plugin directory: OpenSSL's default CA directory is never consulted
+        $caInfo = $this->store->verifyLocations($this->tempBaseDir);
+        if ($caInfo === null) {
             return false;
         }
         // OpenSSL's SMIME_ENCRYPT purpose rejects keyAgreement (EC) certificates; for EC recipients
@@ -183,6 +209,26 @@ final class ChainValidator
      */
     private function buildPath(Certificate $leaf, array $pool): array
     {
+        // the SHORTEST path ending in a configured anchor, if there is one (iterative deepening,
+        // bounded): a shadowing candidate (same name, other signature) never hides the real issuer,
+        // and a re-signed copy of an issuer cannot insert itself into the path (audit F-05)
+        $budget = self::PATH_BUDGET;
+        $anchoredPath = null;
+        for ($len = 1; $len <= self::MAX_DEPTH && $anchoredPath === null && $budget > 0; $len++) {
+            $anchoredPath = $this->searchAnchored([$leaf], $pool, $budget, $len);
+        }
+        if ($anchoredPath !== null) {
+            $anchor = $anchoredPath[count($anchoredPath) - 1];
+            return [
+                'certs' => $anchoredPath,
+                'subjects' => array_map(static fn (Certificate $c) => $c->subject, $anchoredPath),
+                'anchored' => true,
+                'anchorIsRoot' => $anchor->isSelfIssued() && $anchor->isIssuedBy($anchor),
+                'selfSigned' => false,
+            ];
+        }
+
+        // diagnostics only: greedy path explaining why no anchor is reached
         $certs = [$leaf];
         $subjects = [$leaf->subject];
         $current = $leaf;
@@ -215,6 +261,42 @@ final class ChainValidator
         }
 
         return ['certs' => $certs, 'subjects' => $subjects, 'anchored' => $anchored, 'anchorIsRoot' => $anchorIsRoot, 'selfSigned' => $selfSigned];
+    }
+
+    /**
+     * @param list<Certificate> $certs  path so far (leaf first)
+     * @param list<Certificate> $pool
+     * @param int               $maxLen maximum number of non-anchor certificates on the path
+     *
+     * @return null|list<Certificate>
+     */
+    private function searchAnchored(array $certs, array $pool, int &$budget, int $maxLen): ?array
+    {
+        $current = $certs[count($certs) - 1];
+        $anchor = $this->findIssuer($current, $this->store->anchors());
+        if ($anchor !== null) {
+            if ($anchor->fingerprint !== $current->fingerprint) {
+                $certs[] = $anchor;
+            }
+            return $certs;
+        }
+        if (count($certs) >= $maxLen) {
+            return null;
+        }
+        $used = array_map(static fn (Certificate $c) => $c->fingerprint, $certs);
+        foreach ($pool as $c) {
+            if (--$budget < 0) {
+                return null;
+            }
+            if (in_array($c->fingerprint, $used, true) || $c->subjectNameDer !== $current->issuerNameDer || !$current->isIssuedBy($c)) {
+                continue;
+            }
+            $found = $this->searchAnchored([...$certs, $c], $pool, $budget, $maxLen);
+            if ($found !== null) {
+                return $found;
+            }
+        }
+        return null;
     }
 
     /**

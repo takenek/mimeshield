@@ -38,4 +38,5 @@ final class RateLimiterTest extends TestCase
         self::assertTrue(RateLimiter::allow($store, 'b', 1, 60, 1000));
         self::assertFalse(RateLimiter::allow($store, 'a', 1, 60, 1001));
     }
+
 }

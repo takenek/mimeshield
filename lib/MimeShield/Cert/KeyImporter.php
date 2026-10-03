@@ -162,7 +162,12 @@ final class KeyImporter
         }
         $keyPem = $m[0];
         $isEncrypted = str_contains($keyPem, 'ENCRYPTED');
-        foreach (KdfInspector::encryptedPkcs8Blocks($keyPem) as $der) {
+        $blocks = KdfInspector::encryptedPkcs8Blocks($keyPem);
+        if ($m[1] === 'ENCRYPTED PRIVATE KEY' && $blocks === []) {
+            // never hand an encrypted PKCS#8 key to OpenSSL whose KDF cost was not inspected (F-03)
+            throw new ValidationException('keyinvalid', 'encrypted PEM private key not inspectable');
+        }
+        foreach ($blocks as $der) {
             KdfInspector::check($der, 'keyinvalid');
         }
         $pw = $isEncrypted ? $password : null;

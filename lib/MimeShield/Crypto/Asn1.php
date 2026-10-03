@@ -114,6 +114,18 @@ final class Asn1
     }
 
     /**
+     * Encoded length (header + content, including a BER end-of-contents marker) of the element at
+     * offset 0 of $data; trailing bytes are allowed and not counted. Children are only read where an
+     * indefinite length requires it.
+     */
+    public static function elementLength(string $data, bool $ber = false): int
+    {
+        $p = new self($data, $ber);
+        $p->eager = false;
+        return $p->readNode(0, strlen($data), 0)->end();
+    }
+
+    /**
      * Iterate direct children of a constructed node without the global node limit.
      *
      * @return \Generator<int, Asn1Node>

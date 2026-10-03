@@ -51,6 +51,18 @@ final class Log
     }
 
     /**
+     * Unexpected exception messages may contain user data or infrastructure details. Keep the
+     * exception type in normal logs; emit the sanitised message only with explicit debug logging.
+     *
+     * @param array<string, mixed> $context Fixed operational context, never exception-derived data
+     */
+    public static function exception(string $operation, \Throwable $exception, array $context = []): void
+    {
+        self::error($operation, 'unexpected error', ['exception' => get_class($exception)] + $context);
+        self::debug($operation, $exception->getMessage(), ['exception' => get_class($exception)] + $context);
+    }
+
+    /**
      * @param array<string, mixed> $context
      */
     public static function warning(string $operation, string $message, array $context = []): void

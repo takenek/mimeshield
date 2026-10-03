@@ -10,6 +10,7 @@ declare(strict_types=1);
 
 namespace MimeShield\Mime;
 
+use MimeShield\Crypto\Asn1;
 use MimeShield\Crypto\CmsInspector;
 use MimeShield\Crypto\CmsService;
 use MimeShield\Exception\CryptoException;
@@ -38,6 +39,13 @@ use MimeShield\Trust\VerificationResult;
 final class IncomingProcessor
 {
     private const MAX_DEPTH = 4;
+
+    /**
+     * Signed entities processed per request (clear-signed and opaque): each may cost an IMAP fetch,
+     * CMS verification, chain validation and CRL requests; a message with many small signed
+     * parts must not multiply that work without bound (audit F-07).
+     */
+    public const MAX_SIGNATURE_CHECKS = 8;
 
     private const SIG_TYPES = ['application/pkcs7-signature', 'application/x-pkcs7-signature'];
     private const MIME_TYPES = ['application/pkcs7-mime', 'application/x-pkcs7-mime'];
@@ -70,6 +78,11 @@ final class IncomingProcessor
 
     /** Whether the message root is a single part (root part id '1') */
     private bool $singlePartRoot = false;
+
+    /** @var array<string, null|string> multipart/signed container id => exactly verified content (null: none) */
+    private array $signedContent = [];
+
+    private int $signatureChecks = 0;
 
     public function __construct(
         private readonly KeyService $keys,
@@ -106,8 +119,7 @@ final class IncomingProcessor
                 return $this->handlePkcs7Mime($p, $struct, $msg, $depth);
             }
             if ($mimetype === 'multipart/signed' && $this->isSmimeSigned($struct)) {
-                $this->handleSigned($p, $struct, $msg);
-                $p = $this->unwrapSignedEnvelope($p, $struct, $msg, $depth);
+                return $this->handleSignedContainer($p, $struct, $msg, $depth);
             }
         } catch (MimeShieldException $e) {
             $st = $this->statusOf((string) $struct->mime_id);
@@ -118,8 +130,9 @@ final class IncomingProcessor
             }
             Log::info('incoming', 'S/MIME processing failed: ' . $e->getMessage());
         } catch (\Throwable $e) {
-            // never break message display because of a plugin error
-            Log::error('incoming', 'unexpected error: ' . get_class($e) . ': ' . $e->getMessage());
+            // never break message display because of a plugin error; the message of an unexpected
+            // error (reachable with crafted mail) is logged only in debug mode (audit I-06)
+            Log::exception('incoming', $e);
             $this->statusOf((string) $struct->mime_id)->signatureError = 'internalerror';
         }
 
@@ -221,9 +234,20 @@ final class IncomingProcessor
 
     private function isSmimeSigned(\rcube_message_part $struct): bool
     {
+        // both the declaration of the container (RFC 1847 protocol parameter) and the actual type of
+        // the second part must name an S/MIME signature: anything else is not treated as S/MIME and
+        // can never receive a signature status (audit F-01)
         $protocol = strtolower((string) ($struct->ctype_parameters['protocol'] ?? ''));
+        if (strtolower((string) $struct->mimetype) === 'message/rfc822') {
+            // forwarded message: IMAP does not expose the parameters of the embedded entity; use its
+            // Content-Type header when Roundcube parsed it. Without it only the part type can be
+            // checked - a forwarded signature is never a message-level ("covering") status anyway.
+            $ctype = (string) ($struct->headers['content-type'] ?? '');
+            $protocol = preg_match('/;\s*protocol\s*=\s*"?([^";\s]+)/i', $ctype, $m) ? strtolower($m[1]) : null;
+        }
         $second = isset($struct->parts[1]) ? strtolower((string) $struct->parts[1]->mimetype) : '';
-        return count($struct->parts) === 2 && (in_array($protocol, self::SIG_TYPES, true) || in_array($second, self::SIG_TYPES, true));
+        return count($struct->parts) === 2 && ($protocol === null || in_array($protocol, self::SIG_TYPES, true))
+            && in_array($second, self::SIG_TYPES, true);
     }
 
     /**
@@ -290,13 +314,20 @@ final class IncomingProcessor
 
         if ($type === CmsInspector::OID_SIGNED_DATA) {
             try {
-                $check = $this->cms->verifyOpaque($der);
-                $content = $check->content ?? $this->cms->extractOpaqueContent($der);
-                if ($this->verifier !== null) {
+                if (!$this->signatureBudget()) {
+                    // content is still shown (unwrapped without verification), never with a valid status
+                    $st->signatureError = 'sig_toomany';
+                    $st->partial = !$root;
+                    $content = $this->cms->extractOpaqueContent($der);
+                } else {
+                    $check = $this->cms->verifyOpaque($der);
+                    $content = $check->content ?? $this->cms->extractOpaqueContent($der);
+                }
+                if (isset($check) && $this->verifier !== null) {
                     [$from, $sender, $badFrom] = $this->senderAddresses($struct, $msg);
                     $st->signature = $this->verifier->evaluate($check, $from, $sender, !$root, null, $badFrom);
                     $st->partial = !$root;
-                } elseif (!$check->valid) {
+                } elseif (isset($check) && !$check->valid) {
                     $st->signatureError = 'sig_modified';
                 }
             } catch (MimeShieldException $e) {
@@ -328,13 +359,73 @@ final class IncomingProcessor
     }
 
     /**
-     * Verify a clear-signed (multipart/signed) entity. The structure is left as is (Roundcube shows
-     * the first part); the smime.p7s part is hidden from the attachment list.
+     * multipart/signed (RFC 1847): only the first part is content. The signature part never enters
+     * the displayed tree (a copy of the container holds only the first part). When extraction succeeds,
+     * the first part is rebuilt from the bytes selected for verification, so that what is shown under the
+     * status bar and what was checked come from one parser (audit F-01, F-13). Actions without trust
+     * evaluation (download, inline resources, reply) rebuild the same tree without CMS verification;
+     * this keeps their part ids and bodies consistent with the signed message view.
+     *
+     * @param array<string, mixed> $p
+     *
+     * @return array<string, mixed>
      */
+    private function handleSignedContainer(array $p, \rcube_message_part $struct, \rcube_message $msg, int $depth): array
+    {
+        $id = (string) $struct->mime_id;
+        if (!array_key_exists($id, $this->signedContent)) {
+            $this->signedContent[$id] = null;
+            try {
+                $this->signedContent[$id] = $this->handleSigned($p, $struct, $msg);
+            } catch (MimeShieldException $e) {
+                $this->statusOf($id)->signatureError = $e->getUserLabel();
+                Log::info('incoming', 'S/MIME processing failed: ' . $e->getMessage());
+            } catch (\Throwable $e) {
+                Log::exception('incoming', $e);
+                $this->statusOf($id)->signatureError = 'internalerror';
+            }
+        }
+
+        $first = $struct->parts[0] ?? null;
+        if (!$first instanceof \rcube_message_part) {
+            return $p;
+        }
+        $shown = $first;
+        try {
+            $content = $this->signedContent[$id];
+            if ($content !== null) {
+                $shown = $this->inject(['object' => $msg, 'structure' => $first] + $p, $content, false, false)['structure'];
+            }
+            // Inner S/MIME processing must consume the same bytes as the outer signature, too.
+            // Do not fetch the original first part again through the IMAP parser (F-01/F-13).
+            $inner = $this->unwrapSignedEnvelope($p, $struct, $msg, $depth, $shown);
+            if ($inner['structure'] !== $struct) {
+                return $inner;
+            }
+        } catch (\Throwable $e) {
+            // Falling back to the original parser tree must never retain a valid signature badge.
+            $st = $this->statusOf($id);
+            $st->signature = null;
+            $st->signatureError = 'sig_notverifiable';
+            Log::info('incoming', 'signed content cannot be shown from the verified bytes: ' . get_class($e));
+        }
+        // a copy of the container holding only the content part: Roundcube renders it like the
+        // original container (the cached original part objects are never modified)
+        $container = clone $struct;
+        $container->parts = [$shown];
+        $p['structure'] = $container;
+        return $p;
+    }
+
     /**
+     * Extract a clear-signed entity's first part (including its MIME headers) and optionally verify
+     * it. All actions select the same bytes, including inline resource and attachment requests that
+     * do not evaluate trust. Return null when the bounded extraction cannot be performed. The
+     * smime.p7s part is also hidden from the attachment list.
+     *
      * @param array<string, mixed> $p
      */
-    private function handleSigned(array $p, \rcube_message_part $struct, \rcube_message $msg): void
+    private function handleSigned(array $p, \rcube_message_part $struct, \rcube_message $msg): ?string
     {
         $id = (string) $struct->mime_id;
         $st = $this->statusOf($id);
@@ -343,11 +434,13 @@ final class IncomingProcessor
         if (isset($struct->parts[1])) {
             $this->hidden[(string) $struct->parts[1]->mime_id] = true;
         }
-        if ($this->verifier === null) {
-            return; // verification only on show/preview/print
-        }
         if ($st->signature !== null) {
-            return;
+            return null;
+        }
+        if (!$this->signatureBudget()) {
+            $st->signatureError = 'sig_toomany';
+            $st->partial = !$root;
+            return null;
         }
 
         $boundary = (string) ($struct->ctype_parameters['boundary'] ?? '');
@@ -355,18 +448,30 @@ final class IncomingProcessor
         if ($body === null) {
             $st->signatureError = 'sig_notverifiable';
             $st->partial = true;
-            return;
+            return null;
         }
         if ($boundary === '' && preg_match('/^--([^\s]{1,200})[ \t]*\r?$/m', $body, $bm)) {
             // e.g. forwarded message/rfc822: parameters of the embedded entity are not exposed
             $boundary = $bm[1];
         }
         [$content, $sigPart] = self::splitSigned($body, $boundary);
+        if ($this->verifier === null) {
+            return $content; // same parser for get/download/compose, without a signature claim
+        }
         $sigDer = self::decodeSignaturePart($sigPart);
         $check = $this->cms->verifyDetached($content, $sigDer);
         [$from, $sender, $badFrom] = $this->senderAddresses($struct, $msg);
         $st->partial = !$root;
         $st->signature = $this->verifier->evaluate($check, $from, $sender, !$root, null, $badFrom);
+        return $content;
+    }
+
+    /**
+     * Count one signed entity extraction/verification against the per-request budget.
+     */
+    private function signatureBudget(): bool
+    {
+        return ++$this->signatureChecks <= self::MAX_SIGNATURE_CHECKS;
     }
 
     /**
@@ -379,10 +484,9 @@ final class IncomingProcessor
      *
      * @return array<string, mixed>
      */
-    private function unwrapSignedEnvelope(array $p, \rcube_message_part $struct, \rcube_message $msg, int $depth): array
+    private function unwrapSignedEnvelope(array $p, \rcube_message_part $struct, \rcube_message $msg, int $depth, \rcube_message_part $first): array
     {
-        $first = $struct->parts[0] ?? null;
-        if (!$first instanceof \rcube_message_part || !$this->isRoot($p, $struct)) {
+        if (!$this->isRoot($p, $struct)) {
             return $p;
         }
         $ftype = strtolower((string) $first->mimetype);
@@ -410,6 +514,13 @@ final class IncomingProcessor
         }
         if ($this->isDecryptedPart($id)) {
             return null; // nested deeper inside decrypted content: raw bytes not available
+        }
+        foreach (array_keys($this->raw) as $outer) {
+            // nested inside content rebuilt from verified bytes: the IMAP section would be another
+            // parser's view of those bytes, never display it under the outer status (F-13)
+            if (str_starts_with($id, $outer . '.')) {
+                return null;
+            }
         }
         // IMAP reports size 0 for multipart nodes: bound the fetch by the message size
         if ((int) $struct->size > $this->maxSize || (int) ($msg->headers->size ?? 0) > $this->maxSize) {
@@ -472,9 +583,20 @@ final class IncomingProcessor
             if ($der === false || $der === '') {
                 throw new ValidationException('malformed', 'bad base64 signature');
             }
-            return $der;
+        } else {
+            $der = $body;
         }
-        return $body;
+        // the signature part must be exactly one CMS structure: data after it is never accepted
+        // (it could carry content that is shown but not covered by the signature, audit F-01)
+        try {
+            $len = Asn1::elementLength($der, true);
+        } catch (ValidationException) {
+            throw new ValidationException('malformed', 'signature part is not a CMS structure');
+        }
+        if ($len !== strlen($der)) {
+            throw new ValidationException('malformed', 'trailing data after the CMS signature');
+        }
+        return $der;
     }
 
     /**
@@ -539,7 +661,7 @@ final class IncomingProcessor
      *
      * @return array<string, mixed>
      */
-    private function inject(array $p, string $entity, bool $fromRoot): array
+    private function inject(array $p, string $entity, bool $fromRoot, bool $decrypted = true): array
     {
         $entity = EntityBuilder::canonicalizeLineEndings($entity);
         if (strlen($entity) > $this->maxSize) {
@@ -567,7 +689,9 @@ final class IncomingProcessor
         if ($fromRoot) {
             $this->rootIds[$oldId] = true;
         }
-        $this->decryptedIds[$oldId] = true;
+        if ($decrypted) {
+            $this->decryptedIds[$oldId] = true;
+        }
 
         $p['structure'] = $new;
         $p['mimetype'] = $new->mimetype;

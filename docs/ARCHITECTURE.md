@@ -71,7 +71,7 @@ Roundcube requires the class name to equal the directory name
 | mail | `message_load` | hide `smime.p7s` from the attachment list |
 | mail | `message_part_get` | no persistent thumbnails / caching of decrypted parts |
 | mail | `message_part_before` | force remote-content blocking in decrypted HTML |
-| mail show/preview/print | `message_body_prefix`, `template_object_messagebody` | status bar |
+| mail show/preview/print | `message_body_prefix`, `template_object_messagebody`, `template_object_messageheaders` | status bar, header indicator |
 | mail compose | `message_compose_body`, `template_container` (`composeoptions`) | options, env, draft restore |
 | mail send | `message_ready` | sign / encrypt (and abort on error); with a missing/outdated plugin schema only `message_ready_unavailable`: refuse sends/drafts that are expected to be protected |
 | mail send | `message_before_send` | fail-closed check, Bcc envelopes, dot guard |
@@ -190,6 +190,8 @@ each Bcc recipient gets a separately encrypted copy (Bcc recipient + self), deli
 `message_before_send` through Roundcube's public `rcube_smtp::send_mail()`. The main delivery uses
 a clone without the `Bcc` header; the Sent copy (original object) keeps it. A failure of a Bcc copy
 aborts the whole send (but copies already accepted by the MTA cannot be recalled — documented).
+If the main delivery fails after all Bcc copies were delivered, the `message_send_error` hook
+replaces the SMTP error with `bccmainsendfailed` (the Bcc recipients already have the message).
 
 ## 4. Incoming mail: IMAP → Detect → Decrypt → Verify → Rendering
 
@@ -203,14 +205,21 @@ rcube_message::__construct()  (show, preview, print, get, compose (reply/forward
                under the old id, body_modified=true, encoding='stream' -> $p['structure'] replaced,
                recurse into the new root (core does not call the hook for it)
            signed-data (opaque): openssl_cms_verify -> content injected like above + VerificationResult
-       multipart/signed (protocol (x-)pkcs7-signature, 2 parts):
+       multipart/signed (protocol parameter AND second part (x-)pkcs7-signature, 2 parts):
            exact bytes: storage->get_raw_body(uid, null, 'TEXT' | <id> | <id>.TEXT) or the decrypted raw
-           RFC 2046 split -> content + signature -> verifyDetached(BINARY, NOVERIFY) [text-mode retry]
+           (at most MAX_SIGNATURE_CHECKS = 8 verifications per request, others "sig_toomany")
+           RFC 2046 split -> content + signature (exactly one DER/BER element, no trailing data)
+           -> verifyDetached(BINARY, NOVERIFY) [text-mode retry]
            -> SignatureVerifier: chain (OpenSSL + diagnostics), identity, time, KU/EKU, revocation, policy
-           smime.p7s id recorded -> hidden in message_load
+           -> $p['structure'] = copy of the container holding ONLY the first part, rebuilt from the
+              bytes selected for verification (ids mirror part 1; compose/get use the same raw
+              first-part parser without trust evaluation); the signature part never enters the displayed tree
+           smime.p7s id recorded -> also hidden from the attachment list in message_load
    core renders the (new) tree normally: content parts -> print_body() -> rcube_washtml (HTML sanitiser,
    remote content blocking), attachments -> get action (re-decrypted with the same deterministic ids)
    hook message_body_prefix / template_object_messagebody -> MessageUi status bar (escaped)
+   hook template_object_messageheaders -> MessageUi header indicator (outside the content, also
+       "not signed")
 ```
 
 Important properties (all verified in the Roundcube source):
@@ -230,7 +239,12 @@ Important properties (all verified in the Roundcube source):
   encrypted message pre-checks "Encrypt" and warns when it is switched off.
 * **Decryption is repeated per request** (no plaintext cache). Thumbnails of decrypted images are
   served without writing Roundcube's persistent thumbnail cache.
-* Verification runs only for show/preview/print (and the save-certificate action).
+* Signature trust/identity evaluation runs only for show/preview/print (and the save-certificate
+  action). Clear-signed compose/get/inline-resource requests extract the same first entity from raw
+  MIME without native verification; opaque signed content needs native verification to extract its
+  body. Both paths consume the same eight-entity extraction/verification budget. Signed envelopes are rebuilt from the
+  verified first-part bytes before decryption; if rebuilding fails, no successful signature status
+  is retained for fallback content.
 
 ## 5. Trust model
 
@@ -239,17 +253,30 @@ Four questions are kept separate everywhere (data model, UI, logs):
 1. **Cryptographic signature** — `openssl_cms_verify(..., OPENSSL_CMS_NOVERIFY)` (signature and
    message digest; `NOSIGS` is never used). Retry without `BINARY` only for line-ending
    canonicalisation (shown as information).
-2. **Certificate chain** — `openssl_x509_checkpurpose(SMIME_SIGN|SMIME_ENCRYPT|ANY for EC, ca_info
-   = admin anchors, untrusted = certificates from the message / PKCS#12 / config)`. OpenSSL does not
-   expose the reason of a failure, so a diagnostic path builder (issuer name + `openssl_x509_verify`)
-   explains it: expired / not yet valid / untrusted root / incomplete / wrong purpose. Diagnostics
-   never upgrade a failure. OpenSSL validates at the current time; an expired certificate is shown
+2. **Certificate chain** — one path for every decision: the plugin first builds the shortest path
+   from the leaf to a configured anchor (issuer name + `openssl_x509_verify`, configured
+   intermediates preferred over certificates from the message, bounded search); without such a path
+   nothing is trusted. OpenSSL then verifies exactly that path:
+   `openssl_x509_checkpurpose(SMIME_SIGN|SMIME_ENCRYPT|ANY for EC, ca_info = admin bundle files +
+   an empty plugin directory, untrusted = the intermediates of the path)` - the empty directory stops
+   PHP from adding OpenSSL's default CA directory (`OPENSSLDIR/certs`, `SSL_CERT_DIR`). The path is
+   returned in `ChainResult::$certs` and used for the EKU check of EC recipients and for revocation.
+   Without a trusted result the same builder explains why: expired / not yet valid / untrusted root /
+   incomplete / wrong purpose. Diagnostics never upgrade a failure. OpenSSL validates at the current time; an expired certificate is shown
    as "signature valid, certificate expired" (with the signer-claimed signing time).
 3. **Identity** — From (and Sender) vs SAN `rfc822Name` from DER (subject `emailAddress` only as a
    labelled legacy fallback). Comparison: domain IDNA + case-insensitive, local part
    case-insensitive (RFC 8550 §3 "SHOULD"). SmtpUTF8Mailbox is not supported (never matches).
 4. **Revocation** — off by default ("not checked" is displayed); optional CRL checking only for
-   chains already anchored in the trust store (RFC 8550 §6), SSRF-hardened.
+   chains already anchored in the trust store (RFC 8550 §6), SSRF-hardened, for every certificate of
+   the accepted path below the anchor against the CRL of its issuer on that path
+   (`RevocationChecker::checkPath()`; CA-only CRLs for CAs, user-only CRLs never for CAs). With
+   checking enabled, a missing http(s) CRL DP is "unknown" (never fully OK); a failed distribution
+   point is not requested again for 5 minutes and at most 8 CRLs are fetched per request, within a
+   shared 10-second transfer deadline. Transport errors are cached per URL; issuer/signature errors
+   per URL and issuer fingerprint. The HTTP client caps each transfer to the remaining time and
+   checks the deadline around DNS resolution; a running synchronous DNS call needs an external
+   lifetime bound. Inner and outer CRL AlgorithmIdentifier fields must match.
 
 Trust anchors are configured by the administrator only. End-entity certificates are never added
 to the anchors; a certificate received in a message is never trusted because it was received — it
@@ -311,6 +338,12 @@ case-insensitive, the others are not). Identity deletion is a soft delete in Rou
 FK cascades and the `user_delete` hook. Every statement contains `user_id = ?` with the session
 user id.
 
+Settings binding updates validate the entire selection first and then commit all binds/unbinds in
+one `Database::transaction()` using Roundcube's transaction API. Reads of keys/bindings use the
+writer connection. Key-import quotas use the existing core `users` and `cache` tables: a no-op user
+row update serialises sessions, a dedicated JSON quota row is read/written on the writer, and the
+reservation is committed before KDF work. Storage failures block import; no schema migration is needed.
+
 ## 8. Web security
 
 * Every state-changing action requires **POST + request token** compared with `hash_equals`
@@ -370,6 +403,51 @@ user id.
   named like administrator options are ignored).
 * MS-14/MS-15: `min-version` 1.7.4; `diag` reports the Roundcube release and the OpenSSL library
   loaded by the SAPI (warning below 3.5.9 on the 3.5 branch).
+
+## 8c. Remediation of the final security report (2026-10-03, IDs F-xx)
+
+* F-01/F-13: `IncomingProcessor::isSmimeSigned()` requires both the `protocol` parameter (for a
+  forwarded `message/rfc822` its Content-Type header when available) and the type of the second part;
+  `decodeSignaturePart()` refuses data after the CMS element; `handleSignedContainer()` returns a copy
+  of the container with only the first part, parsed from the verified bytes.
+* F-02/F-05: `TrustStore::verifyLocations()` / `isolationDir()`; `ChainValidator` builds the shortest
+  anchored path (iterative deepening, budget 256 comparisons) and lets OpenSSL verify only that path;
+  `TrustStore::findIssuer()` prefers administrator certificates with cRLSign;
+  `TrustStore::trustedCrlIssuer()` replaces an issuer without cRLSign only by an administrator copy.
+* F-04/F-06/F-14: `RevocationChecker::checkPath()`; `nocrldp` → UNKNOWN; `VerificationResult::level()`
+  accepts "not checked" only for disabled checking; negative cache (memory + `<hash>.fail` marker
+  file, `NEGATIVE_TTL` 300 s, separate URL/issuer validation keys), `maxFetchesPerRequest` (8) and
+  `maxFetchSecondsPerRequest` (10 s, with the synchronous-DNS limitation described above).
+  Disk caching validates both its base and `crl/` directory: no symlinks, no group/other access,
+  PHP ownership where POSIX identity is available. Unsafe directories are left untouched and disk
+  caching is disabled; the memory cache, transfer budget and UNKNOWN policy remain in effect.
+* F-03/F-08: `KdfInspector` walks the PFX schema (authSafe → ContentInfo → SafeContents → bags,
+  MacData incl. PBMAC1) on joined BER content, refuses uninspectable content (including unknown key
+  encryption schemes and PBKDF2 key lengths above 64 bytes), and bounds the real
+  PHP key-derivation work (`MAX_PHP_KDF_WORK`); `RateLimiter::allowForUser()` adds an atomic per-user
+  database reservation to the per-session limit of key imports.
+* F-07: `IncomingProcessor::MAX_SIGNATURE_CHECKS` (8) per request for signed-entity extraction or
+  verification, status `sig_toomany`.
+* F-09: `ComposeUi::markDecryptedCompose()` (session, per compose id) and the option
+  `mimeshield_require_encrypt_for_decrypted`, enforced in `message_ready()` and its schema-unavailable
+  guard (a draft is refused when `mimeshield_encrypt_drafts = false`); `composeBody()` sets the
+  core env `save_localstorage` to false for such a compose. The flag persists in active core compose state, and the compose sidebar warns about
+  unverified sender identity whenever decrypted content is quoted.
+* F-10: header indicator (`template_object_messageheaders`, `MessageUi::headerBadge()`).
+* F-11: `DotGuard::makeSafe()`; `message_before_send()` blocks a clear-signed message that stays
+  unsafe after 8 paddings.
+* F-12: `keygen --append` uses `<key file>.lock` (flock), strict read, complete write + fsync +
+  fclose, read-back comparison before the rename.
+* F-15: saving an untrusted certificate from a message under `encrypt_untrusted = 'warn'` needs a
+  confirmation bound to the shown fingerprint (`_fingerprint`); the dialog shows old/new fingerprints.
+* I-04: settings import confirmation carries `_pending_digest`, the SHA-256 of the complete public
+  file retained in the server session. It must match before the single-use file is consumed. A GET
+  preserves pending state, and a stale confirmation cannot acknowledge another upload.
+* I-06/I-10: unexpected exception details require debug logging; identity binding batches use a
+  transaction after validating every identity.
+* I-01: the message UI adds an explicit warning headline and header indicator for an otherwise
+  valid signature whose revocation was not checked; public verification levels and configured
+  digest policies are unchanged.
 
 ## 9. Differences from the original requirements (and why)
 

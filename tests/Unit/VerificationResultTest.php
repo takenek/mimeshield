@@ -368,4 +368,30 @@ final class VerificationResultTest extends TestCase
         $lines = self::byLabel(self::vr(['signer' => $legacy, 'legacy' => true, 'from' => ['legacy@example.test']]));
         self::assertSame(['email' => 'legacy@example.test'], $lines['identity_match'][0]);
     }
+
+    /**
+     * Audit F-06: "not checked" is a full OK only when checking is disabled.
+     */
+    public function testNotCheckedIsOkOnlyWhenCheckingIsDisabled(): void
+    {
+        self::assertSame(VR::LEVEL_OK, self::vr()->level());
+        foreach (['untrusted', 'nocrldp', ''] as $reason) {
+            self::assertSame(VR::LEVEL_WARNING, self::vr(['rev' => new RevocationResult(RevocationResult::NOT_CHECKED, $reason)])->level(), $reason);
+        }
+        self::assertSame(VR::LEVEL_WARNING, self::vr(['rev' => new RevocationResult(RevocationResult::UNKNOWN, 'nocrldp')])->level());
+        self::assertSame(VR::LEVEL_OK, self::vr(['rev' => new RevocationResult(RevocationResult::GOOD)])->level());
+    }
+
+    /**
+     * Audit I-12: further SignerInfos are not evaluated - flagged, never a full OK.
+     */
+    public function testMultipleSignersAreAWarning(): void
+    {
+        $one = ['digest' => 'sha256', 'signature' => 'rsaEncryption', 'signingTime' => null, 'sid' => []];
+        $info = ['detached' => true, 'digests' => ['sha256'], 'signers' => [$one, $one], 'certificates' => 2];
+        $check = new SignatureCheck(true, SignatureCheck::FAIL_NONE, [TestPki::read('alice.crt')], [TestPki::read('int.crt')], $info, null, false);
+        $r = self::vr(['check' => $check]);
+        self::assertSame(VR::LEVEL_WARNING, $r->level());
+        self::assertSame([['count' => '2'], VR::LEVEL_WARNING], self::byLabel($r)['sig_multiplesigners']);
+    }
 }

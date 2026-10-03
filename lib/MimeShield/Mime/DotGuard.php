@@ -46,4 +46,26 @@ final class DotGuard
         }
         return $risky;
     }
+
+    /**
+     * Pad until no chunk border is risky. $data returns the current DATA payload, $pad shifts it by
+     * one byte. Returns false when the payload is still unsafe after $attempts paddings: the caller
+     * must then refuse to send (fail closed, audit F-11) instead of letting the transport change the
+     * signed bytes.
+     *
+     * @param callable(): string $data
+     * @param callable(): void   $pad
+     */
+    public static function makeSafe(callable $data, callable $pad, int $attempts = 8): bool
+    {
+        for ($i = 0; ; $i++) {
+            if (self::riskyOffsets($data()) === []) {
+                return true;
+            }
+            if ($i >= $attempts) {
+                return false;
+            }
+            $pad();
+        }
+    }
 }

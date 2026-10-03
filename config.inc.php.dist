@@ -69,6 +69,15 @@ $config['mimeshield_bcc_mode'] = 'separate';
 // Decrypt encrypted messages when replying/forwarding/editing (needed to quote them).
 $config['mimeshield_decrypt_in_compose'] = true;
 
+// A reply, forward or draft opened from a DECRYPTED message is encrypted by default (the user can
+// switch it off after a warning). true: the server refuses to send or save such a message without
+// encryption (recipients without a certificate cannot get it; the decision is not left to the
+// compose form; with mimeshield_encrypt_drafts = false saving such a draft is refused as well).
+// Such a compose is never kept in the browser's localStorage (compose_save_localstorage), whatever
+// this option says. Note: encryption does not stop a reply to a crafted message from reaching a
+// sender whose certificate is trusted - review quoted content before replying.
+$config['mimeshield_require_encrypt_for_decrypted'] = false;
+
 // ---------------------------------------------------------------------------------------------
 // ALGORITHMS
 // ---------------------------------------------------------------------------------------------
@@ -99,13 +108,17 @@ $config['mimeshield_min_rsa_bits'] = 2048;
 // TRUST (certificate chain validation)
 // ---------------------------------------------------------------------------------------------
 // PEM bundle file(s) with trusted root CAs for S/MIME. Only administrators can define trust
-// anchors; certificates received in messages are never trusted automatically.
+// anchors; certificates received in messages are never trusted automatically. Chains are validated
+// against these files ONLY: OpenSSL's default CA directory (OPENSSLDIR/certs, SSL_CERT_DIR) is never
+// consulted, and a chain is trusted only when it ends in one of these anchors (for every key type
+// and purpose). The plugin keeps an empty directory <temp>/mimeshield/no-default-ca for this; if it
+// is not empty or not private, nothing is trusted (see bin/mimeshield.sh diag).
 // NOTE: distribution CA bundles (e.g. Debian /etc/ssl/certs/ca-certificates.crt) contain only
 // roots trusted for TLS; add a bundle with S/MIME (e-mail) roots for your correspondents' CAs.
 $config['mimeshield_ca_bundle'] = [];
 
-// Also trust the OpenSSL default CA bundle of the system. Default: false (since the security
-// remediation of 2026-10-02). That bundle holds roots trusted for TLS, not for e-mail: enabling it
+// Also trust the OpenSSL default CA bundle FILE of the system (never its CA directory). Default:
+// false (since the security remediation of 2026-10-02). That bundle holds roots trusted for TLS, not for e-mail: enabling it
 // makes signatures and recipients under any public TLS CA "trusted". Prefer a dedicated bundle of
 // S/MIME roots approved by your organisation in mimeshield_ca_bundle (e.g. roots with the "email"
 // trust bit of a root programme). bin/mimeshield.sh diag warns while this option is enabled.
@@ -129,10 +142,17 @@ $config['mimeshield_encrypt_untrusted'] = 'block';
 // ---------------------------------------------------------------------------------------------
 // 'off' (default): revocation is not checked and the UI says "Revocation status: not checked".
 // 'crl': download CRLs (http/https distribution points only) for certificates whose chain is
-//        already trusted. Requests are protected against SSRF (public IPs only, DNS pinning, no
-//        redirects, ports 80/443, size and time limits). OCSP is not implemented.
+//        already trusted. EVERY certificate of the accepted path below the trust anchor is checked
+//        (end entity and intermediate CAs), each against the CRL of its issuer on that path; CRLs
+//        limited to CA certificates (onlyContainsCACerts) are used for CAs. A distribution point
+//        that could not be used is not requested again for 5 minutes, and at most 8 CRLs are
+//        downloaded per request within a shared 10-second transfer budget. Resolver and PHP-FPM
+//        timeouts must bound an in-progress synchronous DNS lookup. Requests use public IPs only, DNS
+//        pinning, no redirects, ports 80/443, size and time limits. OCSP is not implemented.
+//        Disk caching needs PHP-owned, private 0700 directories <temp>/mimeshield and its crl child;
+//        symlinks, group/other access or a foreign owner disable disk caching without changing policy.
 $config['mimeshield_revocation'] = 'off';
-$config['mimeshield_revocation_timeout'] = 5;            // seconds per request
+$config['mimeshield_revocation_timeout'] = 5;            // seconds per transfer, within aggregate budget
 $config['mimeshield_revocation_max_bytes'] = 10485760;   // maximum CRL size
 $config['mimeshield_revocation_cache_ttl'] = 86400;      // maximum cache age (seconds); also bounded by nextUpdate
 $config['mimeshield_revocation_allow_hosts'] = [];       // e.g. ['.actalis.it'] - if set, only these hosts
@@ -140,11 +160,14 @@ $config['mimeshield_revocation_deny_hosts'] = [];        // always refused
 $config['mimeshield_revocation_proxy'] = '';             // optional HTTP proxy (e.g. 'http://proxy:3128')
 
 // Recipient whose revocation status cannot be determined with 'crl' (CRL unavailable, expired,
-// out of scope, unsupported form):
+// out of scope, unsupported form, NO http(s) CRL distribution point - in the certificate itself or
+// in one of its intermediate CAs; signatures in these cases are shown with a warning, never fully
+// valid):
 //  'warn'  - encryption allowed, compose shows "revocation status could not be checked" (default)
 //  'block' - the certificate is treated as not usable for encryption
-// The issuer for CRL checks is looked up in the stored chain, the configured intermediates and the
-// trust anchors (a contact certificate imported without its chain is checked as well).
+// The issuer for CRL checks is the issuer on the validated path, built from the stored chain, the
+// configured intermediates and the trust anchors (a contact certificate imported without its chain
+// is checked as well); a copy of an issuer shipped in a message never replaces it.
 $config['mimeshield_revocation_unknown'] = 'warn';
 
 // ---------------------------------------------------------------------------------------------
@@ -163,8 +186,9 @@ $config['mimeshield_max_total_envelope_bytes'] = 268435456;
 // PKCS#12 / encrypted PKCS#8 uploads whose KDF costs exceed 2 000 000 iterations (scrypt: N > 2^20,
 // r > 32, p > 4) are always refused (CPU denial-of-service protection). The check also covers keys
 // inside encrypted PKCS#12 layers (inspected with the entered password before OpenSSL reads the
-// file). Key imports are limited to 10 attempts per session within 5 minutes and recipient status
-// checks in compose to 30 per session and minute.
+// file). Key imports are limited to 10 attempts per session AND per account within 5 minutes.
+// Account reservations are atomic across sessions/workers; a storage failure refuses the import.
+// Recipient status checks in compose are limited to 30 per session and minute.
 
 // ---------------------------------------------------------------------------------------------
 // FILES

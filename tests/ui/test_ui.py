@@ -342,6 +342,8 @@ def u12(d):
     wait(d, lambda x: js(x, 'return !!(window.rcmail && rcmail.env.compose_id && document.getElementById("mimeshield-encrypt"))'), msg='compose not ready')
     time.sleep(0.5)
     check(d.find_element(By.ID, 'mimeshield-encrypt').is_selected(), 'encrypt must be pre-checked for a reply to encrypted mail')
+    check('does not authenticate its original sender' in d.find_element(By.ID, 'mimeshield-decrypted-warning').text,
+          'decrypted reply must warn about original sender identity even with encryption selected')
     check('Encrypted for UI reply test' in js(d, 'return $("#composebody").val()'), 'quoted decrypted text missing')
     js(d, '$("#mimeshield-encrypt").prop("checked", false).trigger("change")')
     check('reveals the quoted content' in d.find_element(By.ID, 'mimeshield-status').text, 'warning not shown')

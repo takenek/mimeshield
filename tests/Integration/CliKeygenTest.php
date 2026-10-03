@@ -259,4 +259,111 @@ final class CliKeygenTest extends TestCase
         self::assertStringContainsString('is a symbolic link', $out);
         self::assertFileDoesNotExist($this->base . '/real/keys/mimeshield.key');
     }
+
+    /**
+     * Audit F-12: an empty (or unreadable) key file is never replaced by a file with only the new key.
+     */
+    public function testAppendRefusesAnEmptyKeyFile(): void
+    {
+        $file = $this->base . '/mimeshield.key';
+        file_put_contents($file, '');
+        chmod($file, 0o400);
+        [$code, $out] = $this->keygen(['keygen', 'file' => $file, 'kid' => 'k2', 'append' => true]);
+        self::assertSame(1, $code);
+        self::assertStringContainsString('nothing appended', $out);
+        self::assertSame('', (string) file_get_contents($file));
+        self::assertSame([], glob($file . '.new.*') ?: []);
+    }
+
+    /** F-12: inject read failure and a short write followed by failure without needing disk faults. */
+    public function testAppendIoFailuresPreserveAllExistingKeys(): void
+    {
+        $file = $this->base . '/mimeshield.key';
+        [$code, $out] = $this->keygen(['keygen', 'file' => $file, 'kid' => 'k1']);
+        self::assertSame(0, $code, $out);
+        $original = (string) file_get_contents($file);
+        foreach (['read', 'write'] as $failure) {
+            $script = $this->base . '/io-failure.php';
+            // Namespace wrappers affect this isolated subprocess only; all unrelated I/O is real.
+            $wrappers = <<<'PHP'
+<?php
+namespace MimeShield\Cli {
+    function file_get_contents($path) {
+        if ($GLOBALS['io_failure'] === 'read' && $path === $GLOBALS['key_file']) {
+            return false;
+        }
+        return \file_get_contents($path);
+    }
+    function fwrite($stream, $data) {
+        $path = \stream_get_meta_data($stream)['uri'];
+        if ($GLOBALS['io_failure'] === 'write' && str_starts_with($path, $GLOBALS['key_file'] . '.new.')) {
+            if (!empty($GLOBALS['short_write_done'])) {
+                return false;
+            }
+            $GLOBALS['short_write_done'] = true;
+            return \fwrite($stream, substr($data, 0, 7));
+        }
+        return \fwrite($stream, $data);
+    }
+}
+namespace {
+PHP;
+            file_put_contents($script, $wrappers
+                . '$GLOBALS["io_failure"] = ' . var_export($failure, true) . ';'
+                . '$GLOBALS["key_file"] = ' . var_export($file, true) . ';'
+                . 'require ' . var_export(dirname(__DIR__) . '/bootstrap.php', true) . ';'
+                . 'exit((new MimeShield\Cli\Tool(rcube::get_instance(), ' . var_export(dirname(__DIR__, 2), true) . '))'
+                . '->run(["keygen", "file" => $GLOBALS["key_file"], "kid" => "k2", "append" => true])); }');
+            $proc = proc_open([PHP_BINARY, $script], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null,
+                ['MIMESHIELD_RC' => (string) getenv('MIMESHIELD_RC')]);
+            self::assertIsResource($proc);
+            $output = stream_get_contents($pipes[1]) . stream_get_contents($pipes[2]);
+            fclose($pipes[1]);
+            fclose($pipes[2]);
+            self::assertSame(1, proc_close($proc), $output);
+            self::assertTrue(hash_equals($original, (string) file_get_contents($file)), $failure . ': original keys preserved');
+            self::assertSame([], glob($file . '.new.*') ?: [], $failure . ': partial temporary file removed');
+        }
+    }
+
+    /**
+     * Audit F-12: --append is serialised by a lock file; a second run waits and then keeps both keys.
+     */
+    public function testConcurrentAppendsAreSerialisedAndKeepEveryKey(): void
+    {
+        $file = $this->base . '/mimeshield.key';
+        [$code, $out] = $this->keygen(['keygen', 'file' => $file, 'kid' => 'k1']);
+        self::assertSame(0, $code, $out);
+
+        $lock = fopen($file . '.lock', 'c');
+        self::assertIsResource($lock);
+        self::assertTrue(flock($lock, LOCK_EX));
+
+        $script = $this->base . '/append.php';
+        file_put_contents($script, '<?php require ' . var_export(dirname(__DIR__) . '/bootstrap.php', true) . ';'
+            . '$out = fopen("php://stdout", "w");'
+            . 'exit((new MimeShield\\Cli\\Tool(\\rcube::get_instance(), ' . var_export(dirname(__DIR__, 2), true) . ', $out))'
+            . '->run(["keygen", "file" => ' . var_export($file, true) . ', "kid" => "k3", "append" => true]));');
+        $proc = proc_open([PHP_BINARY, $script], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes, null, ['MIMESHIELD_RC' => (string) getenv('MIMESHIELD_RC')]);
+        self::assertIsResource($proc);
+        usleep(700000);
+        self::assertTrue(proc_get_status($proc)['running'], 'the second run waits for the lock');
+
+        // meanwhile this run appends k2 (as if it held the lock first)
+        flock($lock, LOCK_UN);
+        fclose($lock);
+        [$code, $out] = $this->keygen(['keygen', 'file' => $file, 'kid' => 'k2', 'append' => true]);
+        self::assertSame(0, $code, $out);
+
+        $childOut = stream_get_contents($pipes[1]) . stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        self::assertSame(0, proc_close($proc), $childOut);
+
+        $content = (string) file_get_contents($file);
+        foreach (['k1', 'k2', 'k3'] as $kid) {
+            self::assertMatchesRegularExpression('/^' . $kid . ' /m', $content, 'no key may be lost');
+        }
+        self::assertSame([], glob($file . '.new.*') ?: []);
+    }
 }

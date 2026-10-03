@@ -29,6 +29,9 @@ final class ComposeUi
     /** @var array{restore: ?array{sign: bool, encrypt: bool}, force: bool} */
     private static array $state = ['restore' => null, 'force' => false];
 
+    private const SESSION_DECRYPTED = 'mimeshield_decrypted_compose';
+    private const MAX_DECRYPTED_COMPOSES = 50;
+
     public function __construct(private readonly \mimeshield $plugin)
     {
     }
@@ -66,8 +69,14 @@ final class ComposeUi
         $force = false;
         $services = $this->plugin->services();
         if ($services->hasIncoming() && $services->incoming(false)->hasDecrypted()) {
-            // reply/forward/edit of an encrypted message: keep it encrypted by default
+            // reply/forward/edit of an encrypted message: keep it encrypted by default, and remember
+            // server-side that this compose holds decrypted content (enforced in message_ready when
+            // mimeshield_require_encrypt_for_decrypted is set, audit F-09)
             $force = true;
+            self::markDecryptedCompose((string) $out->get_env('compose_id'));
+            // Roundcube keeps compose bodies unencrypted in the browser's localStorage and offers
+            // them for restore into a new (unmarked) compose: never store decrypted content there
+            $out->set_env('save_localstorage', false);
         }
 
         if ($force && $mode === 'draft' && !empty($p['html']) && is_string($p['body'] ?? null) && $p['body'] !== '') {
@@ -90,6 +99,7 @@ final class ComposeUi
 
         $out->set_env('mimeshield_restore', $restore);
         $out->set_env('mimeshield_force_encrypt', $force);
+        $out->set_env('mimeshield_require_encrypt', $force && $cfg->bool('mimeshield_require_encrypt_for_decrypted'));
         $out->set_env('mimeshield_locks', $cfg->optionsLock());
         $out->set_env('mimeshield_identities', $this->identityMap());
         $out->set_env('mimeshield_bcc_mode', $cfg->bccMode());
@@ -101,6 +111,34 @@ final class ComposeUi
     }
 
     /**
+     * Remember (per session, bounded) that compose $id was opened with decrypted content.
+     */
+    public static function markDecryptedCompose(string $id): void
+    {
+        if ($id === '') {
+            return;
+        }
+        // Preserve the protection for every still-active core compose, even if the bounded recent
+        // lookup below evicts its entry. Roundcube removes this state when the compose is finished.
+        $coreKey = 'compose_data_' . $id;
+        if (is_array($_SESSION[$coreKey] ?? null)) {
+            $_SESSION[$coreKey]['mimeshield_decrypted'] = true;
+        }
+        $list = is_array($_SESSION[self::SESSION_DECRYPTED] ?? null) ? $_SESSION[self::SESSION_DECRYPTED] : [];
+        unset($list[$id]);
+        $list[$id] = time();
+        $_SESSION[self::SESSION_DECRYPTED] = array_slice($list, -self::MAX_DECRYPTED_COMPOSES, null, true);
+    }
+
+    public static function isDecryptedCompose(string $id): bool
+    {
+        return $id !== '' && (
+            !empty($_SESSION['compose_data_' . $id]['mimeshield_decrypted'])
+            || (is_array($_SESSION[self::SESSION_DECRYPTED] ?? null) && isset($_SESSION[self::SESSION_DECRYPTED][$id]))
+        );
+    }
+
+    /**
      * HTML for the compose options sidebar (elastic "composeoptions" container).
      */
     public function optionsHtml(): string
@@ -108,6 +146,12 @@ final class ComposeUi
         $rc = $this->plugin->rcmail();
         $cfg = $this->plugin->config();
         $state = self::$state;
+        // Compose does not authenticate the original sender. Warn for every decrypted source,
+        // including unsigned encrypted mail, even when the reply itself will be encrypted (F-09).
+        $warning = !empty($state['force'])
+            ? \html::p(['id' => 'mimeshield-decrypted-warning', 'class' => 'mimeshield-warning', 'role' => 'alert'],
+                \rcube::Q($this->plugin->text('decryptedreplywarning')))
+            : '';
 
         $locks = $cfg->optionsLock();
         $signDefault = $cfg->optionDefault('sign');
@@ -125,7 +169,7 @@ final class ComposeUi
             $rows .= $this->checkboxRow('_mimeshield_encrypt', 'mimeshield-encrypt', 'encrypt', $encDefault, in_array('encrypt', $locks, true));
         }
         if ($rows === '') {
-            return '';
+            return $warning;
         }
 
         $status = \html::div(['id' => 'mimeshield-status', 'class' => 'mimeshield-compose-status', 'aria-live' => 'polite'], '')
@@ -133,7 +177,7 @@ final class ComposeUi
 
         // a visible, separate "S/MIME" section among the core compose options
         return \html::tag('fieldset', ['id' => 'mimeshield-compose', 'class' => 'mimeshield-compose', 'aria-label' => $this->plugin->text('smimeoptions')],
-            \html::tag('legend', [], \rcube::Q($this->plugin->text('smimesection'))) . $rows . $status);
+            \html::tag('legend', [], \rcube::Q($this->plugin->text('smimesection'))) . $warning . $rows . $status);
     }
 
     private function checkboxRow(string $name, string $id, string $label, bool $checked, bool $locked): string

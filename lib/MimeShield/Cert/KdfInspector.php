@@ -29,6 +29,14 @@ use MimeShield\Exception\ValidationException;
  * whole operation stays within one budget before OpenSSL runs any of it (audit MS-05). A layer the
  * password does not decrypt is reported as a wrong password; a layer using a cipher this PHP/OpenSSL
  * cannot run is reported as legacy (the opt-in CLI converter runs in a separate, time-limited process).
+ *
+ * The PFX is inspected along its schema (RFC 7292: authSafe -> ContentInfo -> SafeContents -> bags,
+ * MacData), always on the content of OCTET STRINGs with BER segments joined - exactly what OpenSSL
+ * reads. Anything the schema requires to be DER that does not parse, and any content type OpenSSL
+ * would process that this class cannot inspect, rejects the import (fail closed, audit F-03).
+ *
+ * Besides the declared iterations (MAX_TOTAL_ITERATIONS), the key derivation this class runs itself
+ * in PHP is bounded by the real work: iterations x hash blocks x password encodings (audit F-08).
  */
 final class KdfInspector
 {
@@ -39,9 +47,24 @@ final class KdfInspector
     private const OID_PBES2 = '1.2.840.113549.1.5.13';
     private const OID_SCRYPT = '1.3.6.1.4.1.11591.4.11';
     private const PKCS12_PBE_PREFIX = '1.2.840.113549.1.12.1.';   // pbeWithSHAAnd... (iterations in params)
-    private const PKCS5_PBES1 = ['1.2.840.113549.1.5.3', '1.2.840.113549.1.5.6', '1.2.840.113549.1.5.10', '1.2.840.113549.1.5.11'];
+    private const PKCS5_PBES1 = [
+        '1.2.840.113549.1.5.1', '1.2.840.113549.1.5.3', '1.2.840.113549.1.5.4',
+        '1.2.840.113549.1.5.6', '1.2.840.113549.1.5.10', '1.2.840.113549.1.5.11',
+    ];
+
+    /** PBKDF2 keyLength above any supported cipher key or HMAC output is never derived */
+    private const MAX_PBKDF2_KEY_LENGTH = 64;
 
     private const OID_DATA = '1.2.840.113549.1.7.1';
+    private const OID_ENCRYPTED_DATA = '1.2.840.113549.1.7.6';
+    private const OID_SHROUDED_KEY_BAG = '1.2.840.113549.1.12.10.1.2';
+    private const OID_SAFE_CONTENTS_BAG = '1.2.840.113549.1.12.10.1.6';
+
+    /**
+     * Hash compression rounds the PKCS#12 PBE key derivation of this class may run in PHP per
+     * inspection (iterations x output blocks x password encodings; about one second of CPU).
+     */
+    public const MAX_PHP_KDF_WORK = 12000000;
 
     /** PBES2 encryption schemes (OID => [OpenSSL cipher, key bytes, iv bytes]) */
     private const PBES2_CIPHERS = [
@@ -78,6 +101,8 @@ final class KdfInspector
 
     private int $layers = 0;
 
+    private int $work = 0;
+
     /** @var array<string, bool> */
     private static array $cipherAvailable = [];
 
@@ -97,7 +122,15 @@ final class KdfInspector
         $self = new self($password);
         try {
             $root = Asn1::parse($der, true, true);
-            $self->walk($root, 0, $errorLabel);
+            $c = $root->isUniversal(Asn1::TAG_SEQUENCE) && $root->constructed ? $root->children() : [];
+            if (count($c) >= 2 && count($c) <= 3 && $c[0]->isUniversal(Asn1::TAG_INTEGER) && $c[1]->isUniversal(Asn1::TAG_SEQUENCE)) {
+                $self->pfx($c, $errorLabel);
+            } elseif (count($c) === 2 && $c[0]->isUniversal(Asn1::TAG_SEQUENCE) && $c[1]->isUniversal(Asn1::TAG_OCTET_STRING)) {
+                // PKCS#8 EncryptedPrivateKeyInfo ::= SEQUENCE { encryptionAlgorithm, encryptedData }
+                $self->encryptionAlgorithm($c[0], $errorLabel, 'malformed');
+            } else {
+                throw new ValidationException('malformed', 'neither PFX nor EncryptedPrivateKeyInfo');
+            }
         } catch (ValidationException $e) {
             if ($e->getUserLabel() === $errorLabel && str_starts_with($e->getMessage(), 'KDF')) {
                 throw $e;
@@ -127,51 +160,177 @@ final class KdfInspector
         return $out;
     }
 
-    private function walk(Asn1Node $node, int $depth, string $label): void
+    /**
+     * PFX ::= SEQUENCE { version INTEGER, authSafe ContentInfo, macData MacData OPTIONAL }
+     *
+     * @param list<Asn1Node> $c
+     */
+    private function pfx(array $c, string $label): void
     {
-        if ($depth > 24 || ++$this->nodes > 20000) {
+        // authSafe: ContentInfo of type data whose OCTET STRING is the AuthenticatedSafe (the
+        // public-key integrity mode with signedData is not supported by openssl_pkcs12_read either)
+        [$type, $content] = $this->contentInfo($c[1], $label);
+        if ($type !== self::OID_DATA) {
+            throw new ValidationException('malformed', 'PFX authSafe is not data');
+        }
+        foreach ($this->derOctets($content, $label)->children() as $ci) {
+            $this->authSafeEntry($ci, $label);
+        }
+        if (isset($c[2])) {
+            // MacData ::= SEQUENCE { mac DigestInfo, macSalt OCTET STRING, iterations INTEGER DEFAULT 1 }
+            $m = $c[2]->isUniversal(Asn1::TAG_SEQUENCE) && $c[2]->constructed ? $c[2]->children() : [];
+            if (count($m) < 2 || !$m[0]->isUniversal(Asn1::TAG_SEQUENCE) || !$m[0]->constructed) {
+                throw new ValidationException('malformed', 'bad MacData');
+            }
+            // DigestInfo.digestAlgorithm (PBMAC1 carries PBKDF2 parameters, RFC 9579)
+            $this->algorithmIdentifier($m[0]->child(0), 0, $label);
+            if (isset($m[2])) {
+                if (!$m[2]->isUniversal(Asn1::TAG_INTEGER)) {
+                    throw new ValidationException($label, 'KDF: MAC iteration count is not an INTEGER');
+                }
+                $this->iterations($m[2], $label);
+            }
+        }
+    }
+
+    /**
+     * One ContentInfo of the AuthenticatedSafe: data (plain SafeContents) or encryptedData; any other
+     * type cannot be inspected and is refused.
+     */
+    private function authSafeEntry(Asn1Node $ci, string $label): void
+    {
+        [$type, $content] = $this->contentInfo($ci, $label);
+        if ($type === self::OID_DATA) {
+            $this->safeContents($this->derOctets($content, $label), 0, $label);
+            return;
+        }
+        if ($type !== self::OID_ENCRYPTED_DATA) {
+            throw new ValidationException('malformed', 'unsupported PKCS#12 content type ' . $type);
+        }
+        // EncryptedData ::= SEQUENCE { version, EncryptedContentInfo ::= SEQUENCE { contentType,
+        // contentEncryptionAlgorithm, encryptedContent [0] IMPLICIT OCTET STRING OPTIONAL } }
+        $ed = $content->isUniversal(Asn1::TAG_SEQUENCE) && $content->constructed ? $content->children() : [];
+        $eci = isset($ed[1]) && $ed[1]->isUniversal(Asn1::TAG_SEQUENCE) && $ed[1]->constructed ? $ed[1]->children() : [];
+        if (count($eci) < 2 || !$eci[1]->isUniversal(Asn1::TAG_SEQUENCE) || !$eci[1]->constructed) {
+            throw new ValidationException('malformed', 'bad EncryptedData');
+        }
+        $this->encryptionAlgorithm($eci[1], $label, 'p12legacy');   // its own cost is counted first
+        if ($this->password !== null && isset($eci[2]) && $eci[2]->isContext(0)) {
+            $plain = $this->decryptLayer($eci[1], self::octets($eci[2]), $label);
+            if ($plain !== null) {
+                // a new structure: shared node / layer / iteration budget
+                $this->safeContents(Asn1::parse($plain, false, true), 0, $label);
+            }
+        }
+    }
+
+    /**
+     * SafeContents ::= SEQUENCE OF SafeBag { bagId, bagValue [0] EXPLICIT, bagAttributes SET OPTIONAL }
+     */
+    private function safeContents(Asn1Node $node, int $depth, string $label): void
+    {
+        if ($depth > 8 || !$node->isUniversal(Asn1::TAG_SEQUENCE) || !$node->constructed) {
+            throw new ValidationException('malformed', 'bad SafeContents');
+        }
+        foreach ($node->children() as $bag) {
+            $this->count($label);
+            $b = $bag->isUniversal(Asn1::TAG_SEQUENCE) && $bag->constructed ? $bag->children() : [];
+            if (count($b) < 2 || !$b[0]->isUniversal(Asn1::TAG_OID) || !$b[1]->isContext(0) || !$b[1]->constructed) {
+                throw new ValidationException('malformed', 'bad SafeBag');
+            }
+            $oid = Asn1::oid($b[0]);
+            $value = $b[1]->child(0);
+            if ($oid === self::OID_SHROUDED_KEY_BAG) {
+                // EncryptedPrivateKeyInfo ::= SEQUENCE { encryptionAlgorithm, encryptedData }
+                if (!$value->isUniversal(Asn1::TAG_SEQUENCE) || !$value->constructed) {
+                    throw new ValidationException('malformed', 'bad shrouded key bag');
+                }
+                $this->encryptionAlgorithm($value->child(0), $label, 'p12legacy');
+            } elseif ($oid === self::OID_SAFE_CONTENTS_BAG) {
+                $this->safeContents($value, $depth + 1, $label);
+            }
+            // keyBag, certBag, crlBag, secretBag and unknown bags run no key derivation
+        }
+    }
+
+    /**
+     * ContentInfo ::= SEQUENCE { contentType OID, content [0] EXPLICIT ANY }
+     *
+     * @return array{0: string, 1: Asn1Node}
+     */
+    private function contentInfo(Asn1Node $node, string $label): array
+    {
+        $this->count($label);
+        $c = $node->isUniversal(Asn1::TAG_SEQUENCE) && $node->constructed ? $node->children() : [];
+        if (count($c) !== 2 || !$c[0]->isUniversal(Asn1::TAG_OID) || !$c[1]->isContext(0) || !$c[1]->constructed) {
+            throw new ValidationException('malformed', 'bad ContentInfo');
+        }
+        return [Asn1::oid($c[0]), $c[1]->child(0)];
+    }
+
+    /**
+     * DER inside an OCTET STRING (primitive, or BER constructed: the segments are joined first).
+     * Content that does not parse is refused, never skipped.
+     */
+    private function derOctets(Asn1Node $node, string $label): Asn1Node
+    {
+        $this->count($label);
+        if (!$node->isUniversal(Asn1::TAG_OCTET_STRING)) {
+            throw new ValidationException('malformed', 'OCTET STRING expected');
+        }
+        $inner = Asn1::parse($node->content(), false, true);
+        if (!$inner->isUniversal(Asn1::TAG_SEQUENCE) || !$inner->constructed) {
+            throw new ValidationException('malformed', 'SEQUENCE expected inside OCTET STRING');
+        }
+        return $inner;
+    }
+
+    /**
+     * Password based encryption AlgorithmIdentifier of a key or SafeContents: only schemes whose cost
+     * parameters this class understands are accepted; anything else would run a key derivation that
+     * was never inspected (fail closed, F-03). $unsupported is the label for an unknown scheme.
+     */
+    private function encryptionAlgorithm(Asn1Node $node, string $label, string $unsupported): void
+    {
+        $c = $node->isUniversal(Asn1::TAG_SEQUENCE) && $node->constructed ? $node->children() : [];
+        $oid = isset($c[0]) && $c[0]->isUniversal(Asn1::TAG_OID) ? Asn1::oid($c[0]) : '';
+        $known = isset(self::PKCS12_PBE[$oid]) || in_array($oid, self::PKCS5_PBES1, true);
+        if ($oid === self::OID_PBES2) {
+            // PBES2-params ::= SEQUENCE { keyDerivationFunc AlgorithmIdentifier, encryptionScheme }
+            $params = isset($c[1]) && $c[1]->isUniversal(Asn1::TAG_SEQUENCE) && $c[1]->constructed ? $c[1]->children() : [];
+            $kdf = isset($params[0]) && $params[0]->constructed ? $params[0]->children() : [];
+            $kdfOid = isset($kdf[0]) && $kdf[0]->isUniversal(Asn1::TAG_OID) ? Asn1::oid($kdf[0]) : '';
+            $known = $kdfOid === self::OID_PBKDF2 || $kdfOid === self::OID_SCRYPT;
+        }
+        if (!$known) {
+            throw new ValidationException($unsupported, 'unsupported key encryption algorithm ' . ($oid !== '' ? $oid : '(none)'));
+        }
+        $this->algorithmIdentifier($node, 0, $label);
+    }
+
+    /**
+     * Cost parameters anywhere inside an AlgorithmIdentifier (PBES2 -> PBKDF2, PBMAC1 -> PBKDF2,
+     * PKCS#12 PBE, PBES1, scrypt).
+     */
+    private function algorithmIdentifier(Asn1Node $node, int $depth, string $label): void
+    {
+        $this->count($label);
+        if ($depth > 6 || !$node->constructed) {
+            return;
+        }
+        $children = $node->children();
+        if ($node->isUniversal(Asn1::TAG_SEQUENCE) && isset($children[0]) && $children[0]->isUniversal(Asn1::TAG_OID)) {
+            $this->algorithm(Asn1::oid($children[0]), $children[1] ?? null, $label);
+        }
+        foreach ($children as $c) {
+            $this->algorithmIdentifier($c, $depth + 1, $label);
+        }
+    }
+
+    private function count(string $label): void
+    {
+        if (++$this->nodes > 20000) {
             throw new ValidationException($label, 'KDF: structure too complex');
-        }
-
-        if ($node->isUniversal(Asn1::TAG_SEQUENCE) && $node->constructed) {
-            $children = $node->children();
-            if (isset($children[0]) && $children[0]->isUniversal(Asn1::TAG_OID)) {
-                $this->algorithm(Asn1::oid($children[0]), $children[1] ?? null, $label);
-            }
-            // PFX MacData ::= SEQUENCE { mac DigestInfo, macSalt OCTET STRING, iterations INTEGER }
-            if (count($children) === 3 && $children[0]->isUniversal(Asn1::TAG_SEQUENCE)
-                && $children[1]->isUniversal(Asn1::TAG_OCTET_STRING) && $children[2]->isUniversal(Asn1::TAG_INTEGER)) {
-                $this->iterations($children[2], $label);
-            }
-        }
-
-        if ($node->constructed) {
-            $children = $node->children();
-            foreach ($children as $c) {
-                $this->walk($c, $depth + 1, $label);
-            }
-            // EncryptedContentInfo ::= SEQUENCE { contentType data, contentEncryptionAlgorithm,
-            // encryptedContent [0] IMPLICIT OCTET STRING } - its own cost was counted just above
-            if ($this->password !== null && $node->isUniversal(Asn1::TAG_SEQUENCE) && count($children) === 3
-                && $children[0]->isUniversal(Asn1::TAG_OID) && Asn1::oid($children[0]) === self::OID_DATA
-                && $children[1]->isUniversal(Asn1::TAG_SEQUENCE) && $children[1]->constructed && $children[2]->isContext(0)) {
-                $plain = $this->decryptLayer($children[1], self::octets($children[2]), $label);
-                if ($plain !== null) {
-                    // a new structure: own depth, shared node / layer / iteration budget
-                    $this->walk(Asn1::parse($plain, false, true), 0, $label);
-                }
-            }
-        } elseif ($node->isUniversal(Asn1::TAG_OCTET_STRING)) {
-            // authSafe / SafeContents / bag values are DER inside OCTET STRINGs
-            $content = $node->content();
-            if ($content !== '' && ($content[0] === "\x30" || $content[0] === "\xA0")) {
-                try {
-                    $inner = Asn1::parse($content, false, true);
-                } catch (ValidationException) {
-                    return; // opaque data (e.g. encrypted bytes)
-                }
-                $this->walk($inner, $depth + 1, $label);
-            }
         }
     }
 
@@ -215,6 +374,11 @@ final class KdfInspector
             if (!self::cipherAvailable($cipher, $keyLen, $ivLen)) {
                 return null;
             }
+            $hashLen = ['sha1' => 20, 'sha224' => 28, 'sha256' => 32, 'sha384' => 48, 'sha512' => 64][$prf];
+            $this->work += $iter * (int) ceil($keyLen / $hashLen);
+            if ($this->work > self::MAX_PHP_KDF_WORK) {
+                throw new ValidationException($label, 'KDF: key derivation work budget exceeded');
+            }
             $key = openssl_pbkdf2((string) $this->password, $kp[0]->content(), $keyLen, $iter, $prf);
             $plain = is_string($key) ? openssl_decrypt($ciphertext, $cipher, $key, OPENSSL_RAW_DATA, $enc[1]->content()) : false;
             if (is_string($plain) && self::isDer($plain)) {
@@ -233,7 +397,15 @@ final class KdfInspector
                 return null;
             }
             $salt = $params[0]->content();
-            foreach (self::bmpPasswords((string) $this->password) as $pw) {
+            $passwords = self::bmpPasswords((string) $this->password);
+            // real work of the PHP derivation below: every output block repeats all iterations, and
+            // every password encoding repeats everything (F-08)
+            $blocks = (int) ceil($keyLen / 20) + ($ivLen > 0 ? (int) ceil($ivLen / 20) : 0);
+            $this->work += $iter * $blocks * count($passwords);
+            if ($this->work > self::MAX_PHP_KDF_WORK) {
+                throw new ValidationException($label, 'KDF: key derivation work budget exceeded');
+            }
+            foreach ($passwords as $pw) {
                 $key = self::pkcs12Kdf($pw, $salt, 1, $iter, $keyLen);
                 $iv = $ivLen > 0 ? self::pkcs12Kdf($pw, $salt, 2, $iter, $ivLen) : '';
                 $plain = openssl_decrypt($ciphertext, $cipher, $key, OPENSSL_RAW_DATA, $iv);
@@ -353,6 +525,11 @@ final class KdfInspector
             // PBKDF2-params / PKCS12PBEParams / PBEParameter: SEQUENCE { salt, iterationCount, ... }
             if (isset($p[1]) && $p[1]->isUniversal(Asn1::TAG_INTEGER)) {
                 $this->iterations($p[1], $label);
+            }
+            // PBKDF2-params keyLength INTEGER OPTIONAL: native code derives that many bytes
+            if ($oid === self::OID_PBKDF2 && isset($p[2]) && $p[2]->isUniversal(Asn1::TAG_INTEGER)
+                && self::bigInt($p[2]) > self::MAX_PBKDF2_KEY_LENGTH) {
+                throw new ValidationException($label, 'KDF: key length out of range');
             }
         } elseif ($oid === self::OID_SCRYPT) {
             // scrypt-params: SEQUENCE { salt, costParameter N, blockSize r, parallelizationParameter p, keyLength? }

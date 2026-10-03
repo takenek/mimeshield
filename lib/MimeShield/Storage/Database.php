@@ -29,6 +29,27 @@ final class Database
         return $this->db;
     }
 
+    /** Run a group of writes atomically; failure to begin must not execute any write. */
+    public function transaction(callable $write): void
+    {
+        if (!$this->db->startTransaction()) {
+            throw new StorageException('dberror', 'cannot start database transaction');
+        }
+        try {
+            $write();
+            if (!$this->db->endTransaction()) {
+                throw new StorageException('dberror', 'cannot commit database transaction');
+            }
+        } catch (\Throwable $e) {
+            try {
+                $this->db->rollbackTransaction();
+            } catch (\Throwable) {
+                // Preserve the original failure. Never report a partially saved operation as success.
+            }
+            throw $e;
+        }
+    }
+
     /**
      * Prefixed, quoted table name ($config['db_prefix'] is applied by rcube_db).
      */

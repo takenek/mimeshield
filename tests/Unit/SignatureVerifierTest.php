@@ -503,19 +503,27 @@ final class SignatureVerifierTest extends TestCase
         self::assertSame([], $this->resolved, 'cached CRL must not trigger a fetch');
     }
 
-    public function testGoodSignerFromCachedCrl(): void
+    /**
+     * The signer is not on its CRL, but the TEST intermediate has no CRL distribution point: with
+     * checking enabled the path status is undetermined (audit F-04/F-06), never a full OK. A path
+     * that is GOOD at every level is covered by RevocationPathTest.
+     */
+    public function testGoodSignerWithUncheckableIntermediateIsUnknown(): void
     {
         $r = $this->verifier($this->revocationCrl(true))->evaluate($this->signedByService('alice'), ['alice@example.test'], []);
-        self::assertSame(RevocationResult::GOOD, $r->revocation->status);
-        self::assertSame(VerificationResult::LEVEL_OK, $r->level());
-        self::assertLine($r, 'revocation_good', VerificationResult::LEVEL_OK, []);
+        self::assertSame(RevocationResult::UNKNOWN, $r->revocation->status);
+        self::assertSame('nocrldp', $r->revocation->reason);
+        self::assertSame(VerificationResult::LEVEL_WARNING, $r->level());
+        self::assertLine($r, 'revocation_unknown', VerificationResult::LEVEL_WARNING, []);
+        self::assertSame([], $this->resolved, 'the leaf CRL came from the cache');
     }
 
     public function testExpiredChainIsStillCheckedForRevocation(): void
     {
         $r = $this->verifier($this->revocationCrl(true))->evaluate($this->signedByCli('expired'), ['expired@example.test'], []);
         self::assertSame(ChainResult::EXPIRED, $r->chain?->status);
-        self::assertSame(RevocationResult::GOOD, $r->revocation->status);
+        self::assertSame(RevocationResult::UNKNOWN, $r->revocation->status);
+        self::assertSame('nocrldp', $r->revocation->reason, 'leaf GOOD on the cached CRL, intermediate without CRL DP');
         self::assertSame(VerificationResult::LEVEL_WARNING, $r->level());
     }
 

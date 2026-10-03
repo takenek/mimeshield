@@ -177,6 +177,17 @@ final class KeyImporterTest extends TestCase
         self::assertSame(TestPki::cert('int')->fingerprint, $k->chain[0]->fingerprint);
     }
 
+    /**
+     * Audit F-03: an encrypted PKCS#8 block the cost inspection cannot read is refused before
+     * OpenSSL sees it (no uninspected key derivation).
+     */
+    public function testUninspectableEncryptedPkcs8PemIsRefused(): void
+    {
+        $key = str_replace("-----BEGIN ENCRYPTED PRIVATE KEY-----\n", "-----BEGIN ENCRYPTED PRIVATE KEY-----\nComment: x\n\n", TestPki::read('alice-enc.key'));
+        self::assertNotSame(TestPki::read('alice-enc.key'), $key);
+        self::expectLabel('keyinvalid', static fn () => (new KeyImporter())->import(TestPki::read('alice.crt') . $key, TestPki::PASSWORD));
+    }
+
     public function testTraditionalEncryptedPemKey(): void
     {
         $enc = self::opensslOk(['rsa', '-aes256', '-traditional', '-passout', 'pass:trad-pass'], TestPki::key('alice'));

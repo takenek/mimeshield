@@ -151,6 +151,157 @@ final class AuditRegressionTest extends TestCase
         }
     }
 
+    /**
+     * Audit F-03: an authSafe OCTET STRING encoded as BER segments (each segment alone is not DER) is
+     * inspected on the joined content - the expensive key bag inside is found and rejected before
+     * OpenSSL runs anything.
+     */
+    public function testSegmentedBerAuthSafeIsInspectedOnTheJoinedContent(): void
+    {
+        [$seq, $oid, $octets, $int, $explicit0] = self::builders();
+        $epki = $seq(
+            $seq($oid('1.2.840.113549.1.5.13'), $seq(
+                $seq($oid('1.2.840.113549.1.5.12'), $seq($octets('saltsalt'), $int(2500000))),
+                $seq($oid('2.16.840.1.101.3.4.1.42'), $octets(str_repeat("\x00", 16))),
+            )),
+            $octets(str_repeat("\x11", 64)),
+        );
+        $safeContents = $seq($seq($oid('1.2.840.113549.1.12.10.1.2'), $explicit0($epki)));
+        $authSafe = $seq($seq($oid('1.2.840.113549.1.7.1'), $explicit0($octets($safeContents))));
+        // constructed OCTET STRING (0x24): three segments split at points where no segment is DER
+        $segments = '';
+        foreach (str_split($authSafe, intdiv(strlen($authSafe), 3) + 1) as $chunk) {
+            $segments .= Asn1::encode("\x04", $chunk);
+        }
+        $pfx = $seq($int(3), $seq($oid('1.2.840.113549.1.7.1'), $explicit0(Asn1::encode("\x24", $segments))));
+
+        $t = microtime(true);
+        foreach ([null, 'any-password'] as $password) {
+            try {
+                KdfInspector::check($pfx, 'p12invalid', $password);
+                self::fail('expected rejection');
+            } catch (ValidationException $e) {
+                self::assertSame('p12invalid', $e->getUserLabel());
+                self::assertStringContainsString('KDF', $e->getMessage());
+            }
+        }
+        try {
+            (new KeyImporter())->import($pfx, 'any-password');
+            self::fail('expected rejection');
+        } catch (ValidationException $e) {
+            self::assertSame('p12invalid', $e->getUserLabel());
+        }
+        self::assertLessThan(1.0, microtime(true) - $t, 'no key derivation may run');
+    }
+
+    /** F-03: benign segmented BER stays compatible with the native parser at normal KDF cost. */
+    public function testNormalSegmentedBerPkcs12ImportsTheSameCertificate(): void
+    {
+        $original = TestPki::read('alice.p12');
+        $pfx = Asn1::parse($original, true, true)->children();
+        $ci = $pfx[1]->children();
+        $content = $ci[1]->child(0)->content();
+        $segments = '';
+        foreach (str_split($content, 37) as $chunk) {
+            $segments .= Asn1::encode("\x04", $chunk);
+        }
+        $expected = (new KeyImporter())->import($original, TestPki::PASSWORD)->certificate->fingerprint;
+        foreach ([Asn1::encode("\x24", $segments), "\x24\x80" . $segments . "\x00\x00"] as $octets) {
+            $segmented = Asn1::encode("\x30", $pfx[0]->raw()
+                . Asn1::encode("\x30", $ci[0]->raw() . Asn1::encode("\xA0", $octets))
+                . $pfx[2]->raw());
+            $imported = (new KeyImporter())->import($segmented, TestPki::PASSWORD);
+            self::assertSame($expected, $imported->certificate->fingerprint);
+        }
+    }
+
+    /**
+     * Audit F-03: content the PFX schema requires to be DER but that does not parse is refused
+     * (fail closed), never skipped as "opaque".
+     */
+    public function testUnparsableAuthSafeContentIsRefused(): void
+    {
+        [$seq, $oid, $octets, $int, $explicit0] = self::builders();
+        foreach (["\x30\x84garbage", 'not DER at all', ''] as $content) {
+            $pfx = $seq($int(3), $seq($oid('1.2.840.113549.1.7.1'), $explicit0($octets($content))));
+            try {
+                KdfInspector::check($pfx, 'p12invalid');
+                self::fail('expected rejection');
+            } catch (ValidationException $e) {
+                self::assertSame('p12invalid', $e->getUserLabel());
+                self::assertStringContainsString('not inspectable', $e->getMessage());
+            }
+        }
+        // a content type the inspector cannot look into (e.g. envelopedData) is refused too
+        $pfx = $seq($int(3), $seq($oid('1.2.840.113549.1.7.1'), $explicit0($octets($seq(
+            $seq($oid('1.2.840.113549.1.7.3'), $explicit0($seq($int(0))))
+        )))));
+        $this->expectException(ValidationException::class);
+        KdfInspector::check($pfx, 'p12invalid');
+    }
+
+    /**
+     * Audit F-08: the PKCS#12 PBE derivation the inspector runs in PHP is bounded by its real work
+     * (iterations x output blocks x password encodings), not only by the declared iterations.
+     */
+    public function testPhpKeyDerivationWorkIsBounded(): void
+    {
+        [$seq, $oid, $octets, $int, $explicit0] = self::builders();
+        $password = 'zażółć';   // non-ASCII: two password encodings are tried
+        $iter = 1500000;        // declared total 3 000 000 (< MAX_TOTAL_ITERATIONS)
+        $kdf = new \ReflectionMethod(KdfInspector::class, 'pkcs12Kdf');
+        $bmp = mb_convert_encoding($password, 'UTF-16BE', 'UTF-8') . "\x00\x00";
+        $salt = random_bytes(8);
+        $inner = $seq($seq($oid('1.2.840.113549.1.12.10.1.3'), $explicit0($seq($oid('1.2.840.113549.1.9.22.1'), $explicit0($octets('x'))))));
+        $ct = (string) openssl_encrypt($inner, 'des-ede3-cbc', (string) $kdf->invoke(null, $bmp, $salt, 1, $iter, 24),
+            OPENSSL_RAW_DATA, (string) $kdf->invoke(null, $bmp, $salt, 2, $iter, 8));
+        $layer = $seq($oid('1.2.840.113549.1.7.6'), $explicit0($seq($int(0), $seq(
+            $oid('1.2.840.113549.1.7.1'),
+            $seq($oid('1.2.840.113549.1.12.1.3'), $seq($octets($salt), $int($iter))),
+            Asn1::encode("\x80", $ct),
+        ))));
+        $pfx = $seq($int(3), $seq($oid('1.2.840.113549.1.7.1'), $explicit0($octets($seq($layer, $layer)))));
+
+        // one layer: 1.5M x 3 blocks x 2 encodings = 9M <= budget; the second one exceeds it
+        self::assertLessThanOrEqual(KdfInspector::MAX_PHP_KDF_WORK, $iter * 3 * 2);
+        self::assertGreaterThan(KdfInspector::MAX_PHP_KDF_WORK, 2 * $iter * 3 * 2);
+        try {
+            KdfInspector::check($pfx, 'p12invalid', $password);
+            self::fail('expected rejection');
+        } catch (ValidationException $e) {
+            self::assertSame('p12invalid', $e->getUserLabel());
+            self::assertStringContainsString('work budget', $e->getMessage());
+        }
+    }
+
+    /**
+     * @return array{0: \Closure, 1: \Closure, 2: \Closure, 3: \Closure, 4: \Closure}
+     */
+    private static function builders(): array
+    {
+        $seq = static fn (string ...$c): string => Asn1::encode("\x30", implode('', $c));
+        $oid = static function (string $dotted): string {
+            $parts = array_map('intval', explode('.', $dotted));
+            $body = chr(40 * $parts[0] + $parts[1]);
+            foreach (array_slice($parts, 2) as $n) {
+                $enc = chr($n & 0x7F);
+                for ($n >>= 7; $n > 0; $n >>= 7) {
+                    $enc = chr(0x80 | ($n & 0x7F)) . $enc;
+                }
+                $body .= $enc;
+            }
+            return Asn1::encode("\x06", $body);
+        };
+        $octets = static fn (string $c): string => Asn1::encode("\x04", $c);
+        $int = static function (int $n): string {
+            $b = ltrim(pack('J', $n), "\x00");
+            $b = $b === '' ? "\x00" : ((ord($b[0]) & 0x80) ? "\x00" . $b : $b);
+            return Asn1::encode("\x02", $b);
+        };
+        $explicit0 = static fn (string $c): string => Asn1::encode("\xA0", $c);
+        return [$seq, $oid, $octets, $int, $explicit0];
+    }
+
     public function testNormalKeyBagInEncryptedLayerPassesTheInspection(): void
     {
         $pfx = $this->pfxWithEncryptedKeyBag(2048, 'outer-pass');
@@ -216,6 +367,71 @@ final class AuditRegressionTest extends TestCase
             self::fail('expected rejection');
         } catch (ValidationException $e) {
             self::assertSame('keyinvalid', $e->getUserLabel());
+        }
+    }
+
+    /**
+     * F-03 (Stage 6 pass 05): a key encryption scheme whose cost parameters are not understood is
+     * refused instead of being passed to OpenSSL uninspected; every PKCS#5 PBES1 variant is counted,
+     * and a PBKDF2 keyLength beyond any supported key or MAC size is refused.
+     */
+    public function testUninspectableKeyEncryptionSchemesAreRefused(): void
+    {
+        [$seq, $oid, $octets, $int] = self::builders();
+        $pkcs8 = static fn (string $alg): string => $seq($alg, $octets(str_repeat("\x00", 32)));
+        $pbkdf2 = static fn (int $iter, ?int $keyLength = null): string => $seq($oid('1.2.840.113549.1.5.12'), $seq(
+            $octets(str_repeat("\x01", 8)),
+            $int($iter),
+            ...($keyLength !== null ? [$int($keyLength)] : []),
+        ));
+        $pbes2 = static fn (string $kdf): string => $seq($oid('1.2.840.113549.1.5.13'), $seq(
+            $kdf,
+            $seq($oid('2.16.840.1.101.3.4.1.42'), $octets(str_repeat("\x02", 16))),
+        ));
+        $refused = static function (string $der, string $label, string $message): void {
+            try {
+                KdfInspector::check($der, 'keyinvalid');
+                self::fail('expected rejection: ' . $message);
+            } catch (ValidationException $e) {
+                self::assertSame($label, $e->getUserLabel(), $message);
+                self::assertStringContainsString($message, $e->getMessage());
+            }
+        };
+
+        // PBES1 with MD2 (pbeWithMD2AndDES-CBC / -RC2-CBC): the iteration count is inspected
+        foreach (['1.2.840.113549.1.5.1', '1.2.840.113549.1.5.4'] as $pbes1) {
+            $refused($pkcs8($seq($oid($pbes1), $seq($octets(str_repeat("\x01", 8)), $int(1 << 30)))), 'keyinvalid', 'KDF');
+        }
+        // unknown scheme, or PBES2 with an unknown key derivation function
+        $refused($pkcs8($seq($oid('1.2.3.4.5'), $seq($octets(str_repeat("\x01", 8)), $int(1 << 30)))), 'keyinvalid', 'unsupported key encryption algorithm');
+        $refused($pkcs8($pbes2($seq($oid('1.2.3.4.6'), $seq($octets(str_repeat("\x01", 8)), $int(1 << 30))))), 'keyinvalid', 'unsupported key encryption algorithm');
+        // PBKDF2 keyLength far beyond any cipher key / HMAC output
+        $refused($pkcs8($pbes2($pbkdf2(2048, 1 << 20))), 'keyinvalid', 'KDF');
+
+        // ordinary PBES2/PBKDF2 (with and without an explicit AES-256 keyLength) still passes
+        KdfInspector::check($pkcs8($pbes2($pbkdf2(2048))), 'keyinvalid');
+        KdfInspector::check($pkcs8($pbes2($pbkdf2(2048, 32))), 'keyinvalid');
+        $this->addToAssertionCount(2);
+    }
+
+    /**
+     * F-03 (Stage 6 pass 05): inside a PKCS#12, a shrouded key bag with an unknown scheme is not
+     * handed to the in-process OpenSSL parser ('p12legacy': only the optional, time-limited converter
+     * process may try it).
+     */
+    public function testUnknownSchemeInPkcs12KeyBagIsNotPassedToOpenSsl(): void
+    {
+        [$seq, $oid, $octets, $int, $explicit0] = self::builders();
+        $epki = $seq($seq($oid('1.2.3.4.5'), $seq($octets(str_repeat("\x01", 8)), $int(1 << 30))), $octets(str_repeat("\x00", 32)));
+        $safeContents = $seq($seq($oid('1.2.840.113549.1.12.10.1.2'), $explicit0($epki)));
+        $authSafe = $seq($oid('1.2.840.113549.1.7.1'), $explicit0($octets($seq(
+            $seq($oid('1.2.840.113549.1.7.1'), $explicit0($octets($safeContents))),
+        ))));
+        try {
+            KdfInspector::check($seq($int(3), $authSafe), 'p12invalid', 'any');
+            self::fail('expected rejection');
+        } catch (ValidationException $e) {
+            self::assertSame('p12legacy', $e->getUserLabel());
         }
     }
 

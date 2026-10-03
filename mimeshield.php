@@ -41,6 +41,9 @@ class mimeshield extends rcube_plugin
 
     private bool $schemaOk = false;
 
+    /** Bcc envelopes already delivered in this send request (reported if the main delivery fails) */
+    private int $bccDelivered = 0;
+
     #[\Override]
     public function init(): void
     {
@@ -66,7 +69,8 @@ class mimeshield extends rcube_plugin
             'missingtitle', 'missingintro', 'sendunencrypted', 'cancel', 'confirmdeletekey', 'confirmdeletecert',
             'confirmreplace', 'saving', 'loading', 'bccwarning', 'forceencryptwarning', 'sendwithoutencrypt',
             'signdisabledidentity', 'importkey', 'importcert', 'certsaved', 'replacetitle', 'replacebutton',
-            'enigmaconflict', 'expiresat', 'encryptlocked', 'signingcert',
+            'enigmaconflict', 'expiresat', 'encryptlocked', 'signingcert', 'decryptedwarning',
+            'fingerprintold', 'fingerprintnew', 'confirmuntrusted',
         ]);
 
         $this->schemaOk = $this->checkSchema();
@@ -94,6 +98,7 @@ class mimeshield extends rcube_plugin
             if (in_array($action, ['show', 'preview', 'print'], true)) {
                 $this->add_hook('message_body_prefix', [$this, 'message_body_prefix']);
                 $this->add_hook('template_object_messagebody', [$this, 'template_messagebody']);
+                $this->add_hook('template_object_messageheaders', [$this, 'template_messageheaders']);
                 $this->includeAssets();
             } elseif ($action === 'compose') {
                 $this->add_hook('message_compose_body', [$this, 'message_compose_body']);
@@ -102,6 +107,7 @@ class mimeshield extends rcube_plugin
             } elseif ($action === 'send') {
                 $this->add_hook('message_ready', [$this, 'message_ready']);
                 $this->add_hook('message_before_send', [$this, 'message_before_send']);
+                $this->add_hook('message_send_error', [$this, 'message_send_error']);
             }
 
             $this->register_action('plugin.mimeshield-recipients', [$this, 'action_recipients']);
@@ -283,6 +289,11 @@ class mimeshield extends rcube_plugin
         return (new MessageUi($this))->messageBody($p);
     }
 
+    public function template_messageheaders(array $p): array
+    {
+        return (new MessageUi($this))->messageHeaders($p);
+    }
+
     // ------------------------------------------------------------------ compose
 
     public function message_compose_body(array $p): array
@@ -335,6 +346,14 @@ class mimeshield extends rcube_plugin
             if ($encrypt && !$cfg->bool('mimeshield_enable_encryption')) {
                 throw new \MimeShield\Exception\ValidationException('encryptiondisabled', 'encryption disabled by administrator');
             }
+            // content of a decrypted message (reply / forward / draft) leaves only encrypted when the
+            // administrator requires it - decided server-side, not by the compose form (audit F-09);
+            // with mimeshield_encrypt_drafts = false a draft would be stored in plaintext anyway
+            if ((!$encrypt || ($draft && !$cfg->bool('mimeshield_encrypt_drafts')))
+                && $cfg->bool('mimeshield_require_encrypt_for_decrypted')
+                && ComposeUi::isDecryptedCompose((string) rcube_utils::get_input_string('_id', rcube_utils::INPUT_GPC))) {
+                throw new \MimeShield\Exception\ValidationException('decryptedplaintext', 'decrypted content must not be sent or saved unencrypted');
+            }
             if (!$sign && !$encrypt) {
                 if ($draft) {
                     // still remember (unchecked) options in the draft
@@ -359,8 +378,8 @@ class mimeshield extends rcube_plugin
         } catch (MimeShieldException $e) {
             $this->abortSend($e, $draft);
         } catch (Throwable $e) {
-            Log::error('send', 'unexpected error: ' . get_class($e) . ': ' . $e->getMessage());
-            $this->abortSend(new \MimeShield\Exception\CryptoException('internalerror', $e->getMessage()), $draft);
+            Log::exception('send', $e);
+            $this->abortSend(new \MimeShield\Exception\CryptoException('internalerror', 'unexpected send failure'), $draft);
         }
 
         return $p;
@@ -374,7 +393,9 @@ class mimeshield extends rcube_plugin
     {
         $cfg = $this->config();   // configuration only, no plugin tables needed
         $required = (bool) rcube_utils::get_input_value('_mimeshield_sign', rcube_utils::INPUT_POST)
-            || (bool) rcube_utils::get_input_value('_mimeshield_encrypt', rcube_utils::INPUT_POST);
+            || (bool) rcube_utils::get_input_value('_mimeshield_encrypt', rcube_utils::INPUT_POST)
+            || ($cfg->bool('mimeshield_require_encrypt_for_decrypted')
+                && ComposeUi::isDecryptedCompose((string) rcube_utils::get_input_string('_id', rcube_utils::INPUT_GPC)));
         foreach (['sign' => 'mimeshield_enable_signing', 'encrypt' => 'mimeshield_enable_encryption'] as $opt => $enabled) {
             // locked options: administrator value; otherwise the default the compose form would show
             if ($cfg->bool($enabled) && $cfg->optionDefault($opt)) {
@@ -407,14 +428,16 @@ class mimeshield extends rcube_plugin
             return ['abort' => true, 'result' => false, 'error' => ['label' => 'mimeshield.internalerror', 'vars' => []]] + $p;
         }
 
-        // Net_SMTP string path: keep chunk borders away from mid-line dots (clear-signed only)
+        // Net_SMTP string path: keep chunk borders away from mid-line dots (clear-signed only); a
+        // message that cannot be made safe is not sent (its signature would break in transit, F-11)
         if ($msg->isSigned() && !$msg->isEncrypted()) {
-            for ($i = 0; $i < 8; $i++) {
-                $data = (clone $msg)->txtHeaders(['Bcc' => null], true) . "\r\n" . $msg->body();
-                if (DotGuard::riskyOffsets($data) === []) {
-                    break;
-                }
-                $msg->padPreamble(1);
+            $safe = DotGuard::makeSafe(
+                static fn (): string => (clone $msg)->txtHeaders(['Bcc' => null], true) . "\r\n" . $msg->body(),
+                static fn () => $msg->padPreamble(1),
+            );
+            if (!$safe) {
+                Log::error('send', 'signed message cannot be made transport-safe (Net_SMTP chunk border) - blocking');
+                return ['abort' => true, 'result' => false, 'error' => ['label' => 'mimeshield.internalerror', 'vars' => []]] + $p;
             }
         }
 
@@ -431,6 +454,7 @@ class mimeshield extends rcube_plugin
                     Log::error('send', 'Bcc envelope delivery failed', ['response' => implode(' ', (array) $rc->smtp->get_response())]);
                     return ['abort' => true, 'result' => false, 'error' => ['label' => 'mimeshield.bccsendfailed', 'vars' => []]] + $p;
                 }
+                $this->bccDelivered++;
             }
             // main delivery without the Bcc recipients (they got their own envelopes); the Sent copy
             // (original object) keeps the Bcc header
@@ -446,6 +470,20 @@ class mimeshield extends rcube_plugin
             }
         }
 
+        return $p;
+    }
+
+    /**
+     * The main SMTP delivery failed after every Bcc envelope was delivered: the generic SMTP error
+     * would hide that the Bcc recipients already have the message (I-07) - say so, so that a retry
+     * does not send them duplicates.
+     */
+    public function message_send_error(array $p): array
+    {
+        if ($this->bccDelivered > 0) {
+            Log::error('send', 'main delivery failed after the Bcc envelopes were delivered', ['envelopes' => (string) $this->bccDelivered]);
+            $p['error'] = ['label' => 'mimeshield.bccmainsendfailed', 'vars' => []];
+        }
         return $p;
     }
 
@@ -549,7 +587,7 @@ class mimeshield extends rcube_plugin
                 }
             }
         } catch (Throwable $e) {
-            Log::error('identity', 'cannot remove bindings of deleted identity: ' . $e->getMessage());
+            Log::exception('identity', $e);
         }
         return $p;
     }
@@ -566,7 +604,7 @@ class mimeshield extends rcube_plugin
                 }
             }
         } catch (Throwable $e) {
-            Log::error('user_delete', 'cleanup failed: ' . $e->getMessage());
+            Log::exception('user_delete', $e);
             $p['abort'] = true;
         }
         return $p;

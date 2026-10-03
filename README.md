@@ -89,7 +89,10 @@ directories afterwards so the PHP process can read the key.
 
 Back this file up **separately from database backups** (without it stored keys are unusable;
 with it plus a DB dump all keys are exposed). Alternative: provide the key in the environment
-variable `MIMESHIELD_MASTER_KEY` (`kid:base64`) of the PHP-FPM pool.
+variable `MIMESHIELD_MASTER_KEY` (`kid:base64`) of the PHP-FPM pool. Prefer the file (outside the
+web root, readable only by the PHP user, e.g. 0440 root:www-data): an environment variable takes
+precedence when both are set and is visible to every script of the pool and to diagnostics such as
+`phpinfo()` (audit I-13).
 
 ### 2.3 Create the database tables
 
@@ -150,6 +153,9 @@ for the same message.
   user; the plugin creates a private `mimeshield/` subdirectory with mode `0700`. A tmpfs is
   recommended (e.g. `$config['mimeshield_temp_dir'] = '/dev/shm/roundcube';`, directory owned by
   the PHP user, mode 0700).
+* The CRL disk cache (`<temp>/mimeshield/crl`) and its `mimeshield` parent must be private
+  directories, owned by the PHP user with mode 0700. An unsafe directory disables disk caching;
+  review its ownership and contents before restoring access. The plugin does not repair it.
 * Logs: `<log_dir>/mimeshield` (or syslog, depending on `log_driver`).
 * Web server: only `plugins/mimeshield/{js,skins}` need to be reachable over HTTP. Deny HTTP access
   to `plugins/mimeshield/{bin,lib,SQL,tests,docs,localization}` and the configuration, e.g. for
@@ -210,7 +216,8 @@ openssl pkcs12 -legacy -in old.pfx -nodes | openssl pkcs12 -export -out new.p12
   Importing the same certificate again together with its CA chain updates the stored chain.
 
 If a different certificate already exists for an address, the import shows both fingerprints and
-requires confirmation.
+requires confirmation. Confirmation applies only to the file shown in that dialog. Opening another
+import form preserves it; a stale dialog from another tab cannot confirm a replacement file.
 
 ### 3.3 Compose
 
@@ -220,7 +227,13 @@ the administrator locked it (`mimeshield_options_lock`).
 The *Options and attachments* sidebar contains **Sign S/MIME** and **Encrypt S/MIME** with the
 certificate status of the selected identity and the certificate status of each recipient.
 If encryption is requested and a recipient has no usable certificate, the message is **not sent**;
-you can cancel or explicitly choose *Send without encryption*.
+you can cancel or explicitly choose *Send without encryption*. Replies and forwards of decrypted
+messages are encrypted by default and the dialog warns that the quoted content was encrypted; with
+`mimeshield_require_encrypt_for_decrypted = true` the server refuses to send or save them without
+encryption, including when the plugin database schema is unavailable. Such a compose is never kept
+in the browser's local storage (Roundcube's `compose_save_localstorage`). The compose sidebar also
+warns that decryption does not establish the original sender's identity: review recipients and
+quoted content before sending.
 
 ### 3.4 Reading
 
@@ -228,6 +241,19 @@ Signed and encrypted messages show a status bar with icon and text (not only col
 "S/MIME signature valid. Certificate trusted. Sender address matches.", or warnings such as
 "certificate expired", "issuer not trusted", "certificate does not match the sender",
 "Revocation status: not checked". *Certificate details* expands the full certificate data.
+In addition, every message shows a compact S/MIME indicator in the header area, outside the message
+content (also "Not signed with S/MIME"): a status bar drawn by the content of a message cannot
+replace it. If revocation was not checked, the headline and header indicator explicitly warn about
+that limitation even when the signature and chain are otherwise valid. For `multipart/signed`
+messages only the signed first part is shown, rebuilt from the
+verified bytes; the container must declare `protocol="application/pkcs7-signature"` (or the `x-`
+variant) and its second part must be the signature. Downloads, inline resources and compose use
+the same first-part parser even when they do not evaluate signature trust. At most 8 signed
+entities are extracted or verified per request.
+
+When the plugin offers *Save sender certificate* for a certificate whose issuer is not trusted and
+`mimeshield_encrypt_untrusted = 'warn'`, the certificate is stored only after a confirmation that
+shows its fingerprint (and the fingerprints of certificates it replaces).
 
 ### 3.5 Key rotation
 
@@ -246,6 +272,10 @@ plugins/mimeshield/bin/mimeshield.sh check-keystore
 # then remove the line of the old key id from the key file (keygen's default id is k<YYYYMMDD>;
 # key ids are 1-16 characters a-z0-9)
 ```
+
+`--append` refuses an unreadable or empty key file, serialises concurrent runs with the lock file
+`<key file>.lock` (mode 0600, may stay in place) and replaces the key file only after the new file
+was completely written, synced and read back with every existing key line.
 
 ## 5. Upgrade
 
@@ -295,8 +325,9 @@ available". Messages without expected protection are sent normally.
 | "key store is not configured" | master key file missing, unreadable, world-readable or inside the web root – run `diag` |
 | "database schema missing" | run `bin/initdb.sh --dir=plugins/mimeshield/SQL` |
 | "S/MIME protection is required ... MIME Shield is not available" on send | schema missing or outdated after an upgrade: run `bin/updatedb.sh --package=mimeshield --dir=plugins/mimeshield/SQL` |
-| Recipient shown "revocation status could not be checked" | CRL checking is on and no current CRL could be used for that certificate — check egress/proxy, `mimeshield_revocation_allow_hosts`; with `mimeshield_revocation_unknown = 'block'` such recipients are refused |
-| "Too many attempts" | per-session limit of key imports (10 / 5 min) or recipient checks (30 / min); wait and retry |
+| Recipient shown "revocation status could not be checked" | CRL checking is on and no current CRL could be used for that certificate **or one of its intermediate CAs** (every certificate of the path is checked; a CA certificate without an http(s) CRL distribution point is undetermined) — check egress/proxy, `mimeshield_revocation_allow_hosts`; an unreachable distribution point is retried after 5 minutes; with `mimeshield_revocation_unknown = 'block'` such recipients are refused |
+| "Too many attempts" | limit of key imports (10 / 5 min per session and per user) or recipient checks (30 / min per session); wait and retry |
+| Signature "not verified: too many signatures" | the message contains more than 8 signed parts; only the first 8 are verified |
 | Valid signatures shown as "issuer not trusted" | add the CA root to `mimeshield_ca_bundle` |
 | "chain incomplete" for Outlook on the web mail | OWA does not include intermediates by default – add them to `mimeshield_intermediates` |
 | PFX import "outdated algorithm (RC2)" | see 3.1 |
@@ -328,9 +359,16 @@ checklist is provided.
 * Decrypted attachments that are forwarded/re-edited are written by Roundcube core to its temp
   directory in plaintext (core `filesystem_attachments` behaviour).
 * With `bcc_mode = separate`, if the delivery of the main message fails after Bcc copies were
-  accepted, a retry can send duplicate Bcc copies.
-* Rate limits for key import and recipient checks are per session; limits per user/IP belong to
-  the reverse proxy / WAF in front of Roundcube.
+  accepted, a retry can send duplicate Bcc copies. The error message then says that the Bcc
+  recipients already have the message.
+* Recipient checks are limited per session, key imports per session and atomically per user (the
+  account quota is committed before import; a quota storage failure blocks imports); limits per IP
+  and request time limits belong to the reverse proxy / WAF and PHP-FPM in front of Roundcube.
+* CRL transfers share a 10-second budget and an 8-download limit per request. A synchronous DNS
+  lookup already in progress cannot be interrupted by the plugin; configure resolver timeouts and
+  PHP-FPM's `request_terminate_timeout` as the hard request lifetime bound.
+* `multipart/signed` messages without the `protocol` parameter (non-conforming senders) are not
+  verified; the signature part is then shown as an attachment.
 
 ## 11. License
 

@@ -6,6 +6,81 @@ semantic versioning.
 ## [Unreleased]
 
 ### Security
+Remediation of the final security report of 2026-10-03 (IDs F-xx of that report).
+- F-01/F-13: a `multipart/signed` container is S/MIME only when both its `protocol` parameter and
+  its second part name a PKCS#7 signature; data after the CMS structure of the signature part is
+  refused; only the first part is displayed, rebuilt from exactly the verified bytes (the signature
+  part can no longer be shown as content under a "signature valid" status). Signed envelopes are
+  rebuilt before decryption; a failed rebuild clears the success status before fallback display.
+  A `multipart/signed` nested inside verified content is not re-read through the IMAP parser.
+  Downloaded attachments, inline resources and compose use the same first-part parser as the
+  message view, even when trust evaluation is disabled.
+- F-02: chain validation never consults OpenSSL's default CA directory and trusts a chain only when
+  it ends in a configured anchor; OpenSSL verifies exactly that path (all key types and purposes).
+- F-03: PKCS#12 KDF inspection follows the PFX structure on joined BER segments (what OpenSSL
+  reads) and refuses content it cannot inspect, including an encrypted PKCS#8 PEM key, a key
+  encryption scheme whose cost parameters are unknown (only PKCS#12-PBE, PKCS#5 PBES1 and PBES2 with
+  PBKDF2/scrypt are accepted) and a PBKDF2 key length above 64 bytes.
+- F-04/F-05: with CRL checking, every certificate of the accepted path (including intermediate
+  CAs) is checked against the CRL of its issuer on that path; CA-only CRLs are used for CAs; a copy
+  of an issuer without cRLSign shipped in a message can no longer hide a revocation.
+- F-06: with CRL checking, a certificate without an http(s) CRL distribution point is "unknown"
+  (subject to `mimeshield_revocation_unknown`), never "not checked" / fully valid.
+- F-07: at most 8 signed entities are extracted or verified per request, including clear-signed
+  and opaque content in compose/get.
+- F-08: the PHP key derivation of the PKCS#12 inspection is bounded by its real work; key imports
+  are limited per user account as well as per session. Account reservations are atomic across
+  concurrent sessions, committed before KDF work, and fail closed on storage errors.
+- F-09: new option `mimeshield_require_encrypt_for_decrypted` (default `false`): the server refuses
+  to send or save a reply/forward/draft of a decrypted message without encryption; the "send
+  without encryption" dialog warns that the quoted content was encrypted. The sidebar warns about
+  unverified original sender identity even with encryption selected. Enforcement survives recent
+  compose lookup eviction and an unavailable plugin schema; with `mimeshield_encrypt_drafts = false`
+  such a draft is refused. A compose holding decrypted content is never kept in the browser's
+  localStorage (it could be restored into an unprotected compose).
+- F-10: an S/MIME indicator in the message header area (outside the content), also "Not signed
+  with S/MIME".
+- F-11: a clear-signed message that cannot be made safe for Net_SMTP chunking is not sent.
+- F-12: `keygen --append` refuses an unreadable/empty key file, serialises concurrent runs with a
+  lock file and replaces the key file only after a complete, synced and verified write.
+- F-14: an unavailable CRL distribution point is not requested again for 5 minutes; at most 8 CRLs
+  are downloaded per request within a shared 10-second transfer budget (synchronous DNS still needs
+  resolver/PHP-FPM time limits). Issuer validation failures are cached separately from URL failures;
+  an outdated CRL is cached as a failure, and a transfer cut short by the budget is not.
+  Disk caching is disabled if its base or `crl/` directory is a symlink, has a foreign owner
+  (where ownership checking is available), or grants group/other access.
+- F-15: saving an untrusted sender certificate under `mimeshield_encrypt_untrusted = 'warn'` needs a
+  confirmation bound to the shown fingerprint; the dialog shows old and new fingerprints.
+- F-16: SECURITY.md and the threat model document the minimum OpenSSL versions with the
+  CVE-2026-35189 fix (environment update; `diag` warns).
+- I-05: security audit working documents (`FINAL_SECURITY_REPORT.md`, `STAGE_*.md`, `DOSTARCZONE/`)
+  are excluded from release archives.
+- I-17: "save sender certificate" requests are limited per session (20 per minute).
+- I-03/I-08: `diag` warns for a CRL proxy without `mimeshield_revocation_allow_hosts` and for
+  `mimeshield_bcc_mode = 'single'`.
+- I-11/I-12: decrypted content using any cipher other than AES (3DES, DES, RC2, unknown) and signatures with more than one SignerInfo
+  are shown with a warning (never fully OK).
+- I-16: tests now prove the isolation of the trust store from OpenSSL's default CA directory.
+- I-13: README recommends the master key file over the environment variable.
+- I-01: the message status headline and header indicator explicitly warn when certificate
+  revocation has not been checked; algorithm defaults remain unchanged.
+- I-04: settings import confirmation is bound to the complete pending public file; stale
+  confirmations are refused, and opening an import form preserves the pending state.
+- I-06: unexpected exception messages (also from incoming mail processing) are logged only in debug
+  mode; normal logs retain the type.
+- I-09: CRL inner and outer signature AlgorithmIdentifier values must agree.
+- I-10: identity binding selections are fully validated before any write, then committed atomically.
+- I-07: the Bcc delivery error says that Bcc copies delivered before the failure may have arrived;
+  when every Bcc copy was delivered but the main delivery fails, the error says that the Bcc
+  recipients already have the message (`message_send_error` hook).
+
+### Changed (behaviour, 2026-10-03)
+- With `mimeshield_revocation = 'crl'`, signatures and recipients whose intermediate CA has no
+  usable CRL now get "revocation status could not be checked" (warning / `block` policy) instead of
+  a full OK.
+- `multipart/signed` without a `protocol` parameter is no longer verified.
+
+### Security (2026-10-02)
 Remediation of the final security report of 2026-10-02 (IDs MS-xx / INF-xx of that report).
 - MS-01: with a missing or outdated plugin database schema, sending or saving a draft that is
   expected to be signed/encrypted (user request, `mimeshield_*_default`, `mimeshield_options_lock`)

@@ -29,8 +29,12 @@ use MimeShield\Log;
  * issuer name must match, thisUpdate/nextUpdate must be current, delta and indirect CRLs and unknown
  * critical extensions lead to "unknown" (never to "good").
  *
- * OCSP is not implemented (PHP has no OCSP API); a certificate without a usable CRL DP is reported as
- * "not checked".
+ * Every certificate of the accepted path below its anchor is checked (RFC 5280 6.3, audit F-04), each
+ * against the CRL of its issuer ON THAT PATH (audit F-05). OCSP is not implemented (PHP has no OCSP
+ * API); with checking enabled, a certificate without a usable (http/https) CRL DP has an UNKNOWN
+ * status - "not checked" is reserved for disabled checking (audit F-06). A CRL that could not be
+ * obtained is not requested again for NEGATIVE_TTL seconds, and the number of network fetches per
+ * request is bounded (audit F-14).
  */
 final class RevocationChecker
 {
@@ -58,8 +62,21 @@ final class RevocationChecker
 
     private const CLOCK_SKEW = 300;
 
+    /** Seconds a CRL URL that could not be fetched / validated is not requested again */
+    public const NEGATIVE_TTL = 300;
+    /** Failures this close to the request's transfer deadline may be caused by the shortened timeout (seconds). */
+    private const DEADLINE_MARGIN = 0.1;
+
     /** @var array<string, string> per-request memory cache url => DER */
     private array $memory = [];
+
+    /** @var array<string, int> per-request negative cache (URL or URL + issuer) => failure time */
+    private array $failed = [];
+
+    private int $fetches = 0;
+
+    /** Monotonic deadline shared by all network fetches in this request. Cached CRLs remain usable. */
+    private ?float $fetchDeadline = null;
 
     public function __construct(
         private readonly string $mode,
@@ -68,12 +85,53 @@ final class RevocationChecker
         private readonly int $maxCrlBytes = 10485760,
         private readonly int $maxCacheAge = 86400,
         private readonly int $maxUrls = 2,
+        private readonly int $maxFetchesPerRequest = 8,
+        private readonly float $maxFetchSecondsPerRequest = 10.0,
     ) {
     }
 
     public function isEnabled(): bool
     {
         return $this->mode === self::MODE_CRL && $this->http !== null;
+    }
+
+    /**
+     * Revocation status of a validated path: every certificate below the anchor is checked against
+     * the CRL of its issuer on the same path. REVOKED anywhere wins; otherwise the first status that
+     * is not GOOD (UNKNOWN) is returned, so the caller's revocation_unknown policy applies to the
+     * intermediates as well. The leaf result is returned when the whole path is GOOD.
+     *
+     * When the issuer on the path may not sign CRLs, an administrator-controlled certificate of the
+     * same CA that may sign them is used instead ($store); never a certificate from a message.
+     *
+     * @param list<Certificate> $path leaf first, trust anchor last (ChainResult::$certs)
+     */
+    public function checkPath(array $path, ?TrustStore $store = null, ?int $now = null): RevocationResult
+    {
+        if (!$this->isEnabled()) {
+            return new RevocationResult(RevocationResult::NOT_CHECKED, 'disabled');
+        }
+        if (count($path) < 2) {
+            return new RevocationResult(RevocationResult::UNKNOWN, 'noissuer');
+        }
+        $leaf = null;
+        $first = null;
+        for ($i = 0, $n = count($path) - 1; $i < $n; $i++) {
+            $cert = $path[$i];
+            $issuer = $path[$i + 1];
+            if (!$issuer->hasKeyUsage(Certificate::KU_CRL_SIGN) && $store !== null) {
+                $issuer = $store->trustedCrlIssuer($cert) ?? $issuer;
+            }
+            $r = $this->check($cert, $issuer, $now);
+            if ($r->status === RevocationResult::REVOKED) {
+                return $r;
+            }
+            $leaf ??= $r;
+            if ($r->status !== RevocationResult::GOOD) {
+                $first ??= $r;
+            }
+        }
+        return $first ?? $leaf ?? new RevocationResult(RevocationResult::UNKNOWN, 'noissuer');
     }
 
     /**
@@ -91,7 +149,8 @@ final class RevocationChecker
 
         $urls = array_values(array_filter($cert->crlUrls, static fn (string $u) => preg_match('~^https?://~i', $u) === 1));
         if ($urls === []) {
-            return new RevocationResult(RevocationResult::NOT_CHECKED, 'nocrldp');
+            // checking is enabled but there is no evidence: undetermined, never "not checked" (F-06)
+            return new RevocationResult(RevocationResult::UNKNOWN, 'nocrldp');
         }
 
         $lastReason = 'unavailable';
@@ -124,6 +183,14 @@ final class RevocationChecker
         // (e.g. directoryName) is still a scope restriction, never "no IDP" (audit MS-06).
         if ($crl['idpScoped'] && array_intersect($crl['idpUris'], $cert->crlUrls) === []) {
             throw new ValidationException('revocationunavailable', 'CRL scope (distribution point) mismatch');
+        }
+        // RFC 5280 6.3.3 (b)(2): a CRL limited to CA certificates covers only CAs (audit F-04), one
+        // limited to end-entity certificates never covers a CA
+        if ($crl['onlyCa'] && !$cert->isCa) {
+            throw new ValidationException('revocationunavailable', 'CA-only CRL');
+        }
+        if ($crl['onlyUser'] && $cert->isCa) {
+            throw new ValidationException('revocationunavailable', 'end-entity-only CRL for a CA certificate');
         }
 
         if ($crl['thisUpdate'] > $now + self::CLOCK_SKEW) {
@@ -166,15 +233,63 @@ final class RevocationChecker
             }
         }
 
-        $der = $this->http->get($url, $this->maxCrlBytes);
-        if (str_starts_with(ltrim($der), '-----BEGIN X509 CRL-----')) {
-            if (!preg_match('/-----BEGIN X509 CRL-----([A-Za-z0-9+\/=\s]+)-----END X509 CRL-----/', $der, $m)) {
-                throw new ValidationException('revocationunavailable', 'bad PEM CRL');
+        // Transport failures apply to the URL; validation failures apply only to this issuer. A
+        // CRL unavailable for one CA must not suppress a valid CRL check for another CA (F-14).
+        $failFile = $cacheFile !== null ? substr($cacheFile, 0, -4) . '.fail' : null;
+        $issuerKey = $url . "\0" . $issuer->fingerprint;
+        $issuerFailFile = $cacheFile !== null ? dirname($cacheFile) . '/' . hash('sha256', $issuerKey) . '.fail' : null;
+        foreach ([$url => $failFile, $issuerKey => $issuerFailFile] as $key => $file) {
+            $failedAt = $this->failed[$key] ?? ($file !== null && is_file($file) && !is_link($file) ? (int) @filemtime($file) : null);
+            if ($failedAt !== null && $failedAt <= $now && $now - $failedAt < self::NEGATIVE_TTL) {
+                $this->failed[$key] = $failedAt;
+                throw new ValidationException('revocationunavailable', 'CRL recently unavailable');
             }
-            $der = (string) base64_decode(preg_replace('/\s+/', '', $m[1]) ?? '', true);
         }
-        // validate before caching
-        $this->parse($der, $issuer);
+        $this->fetchDeadline ??= hrtime(true) / 1e9 + $this->maxFetchSecondsPerRequest;
+        if (hrtime(true) / 1e9 >= $this->fetchDeadline) {
+            throw new ValidationException('revocationunavailable', 'CRL time budget of this request exhausted');
+        }
+        if (++$this->fetches > $this->maxFetchesPerRequest) {
+            throw new ValidationException('revocationunavailable', 'CRL fetch budget of this request exhausted');
+        }
+        if ($this->http === null) {
+            throw new ValidationException('revocationunavailable', 'no HTTP client');
+        }
+
+        try {
+            $der = $this->http->get($url, $this->maxCrlBytes, $this->fetchDeadline);
+            if (str_starts_with(ltrim($der), '-----BEGIN X509 CRL-----')) {
+                if (!preg_match('/-----BEGIN X509 CRL-----([A-Za-z0-9+\/=\s]+)-----END X509 CRL-----/', $der, $m)) {
+                    throw new ValidationException('revocationunavailable', 'bad PEM CRL');
+                }
+                $der = (string) base64_decode(preg_replace('/\s+/', '', $m[1]) ?? '', true);
+            }
+        } catch (ValidationException | \TypeError | \ValueError $e) {
+            // An exhausted request budget says nothing about the URL's availability for a new
+            // request. In particular, a shortened transfer timeout must not poison its cache: curl's
+            // millisecond timeout can end a clamped transfer just before the deadline itself.
+            if (hrtime(true) / 1e9 < $this->fetchDeadline - self::DEADLINE_MARGIN) {
+                $this->rememberFailure($url, $failFile, $now);
+            }
+            throw $e;
+        }
+        try {
+            // validate before caching; issuer-dependent errors must not poison the URL-wide cache
+            $crl = $this->parse($der, $issuer);
+            // an outdated CRL is as unusable as an unreachable one: do not fetch it again (F-14)
+            if ($crl['nextUpdate'] === null || $crl['nextUpdate'] < $now - self::CLOCK_SKEW) {
+                throw new ValidationException('revocationunavailable', 'CRL expired');
+            }
+        } catch (ValidationException | \TypeError | \ValueError $e) {
+            $this->rememberFailure($issuerKey, $issuerFailFile, $now);
+            throw $e;
+        }
+        foreach ([$failFile, $issuerFailFile] as $file) {
+            if ($file !== null && is_file($file)) {
+                @unlink($file);
+            }
+        }
+        unset($this->failed[$url], $this->failed[$issuerKey]);
 
         if ($cacheFile !== null) {
             $tmp = $cacheFile . '.' . bin2hex(random_bytes(6));
@@ -186,19 +301,41 @@ final class RevocationChecker
         return $this->memory[$url] = $der;
     }
 
+    private function rememberFailure(string $key, ?string $file, int $now): void
+    {
+        $this->failed[$key] = $now;
+        if ($file !== null && !is_link($file)) {
+            @touch($file, $now);
+            @chmod($file, 0600);
+        }
+    }
+
     private function cacheFile(string $url): ?string
     {
         if ($this->cacheDir === '') {
             return null;
         }
-        $dir = rtrim($this->cacheDir, '/') . '/crl';
-        if (!is_dir($dir)) {
-            $old = umask(0077);
-            @mkdir($dir, 0700, true);
-            umask($old);
-        }
-        if (!is_dir($dir) || is_link($dir)) {
-            return null;
+        $base = rtrim($this->cacheDir, '/');
+        $dir = $base . '/crl';
+        // Both the cache and its immediate parent must be private. Otherwise another local user
+        // could replace a CRL or plant a failure marker (audit F-14). Do not repair permissions on
+        // existing directories: their entries may already be untrusted. Continue without disk cache.
+        foreach ([$base, $dir] as $path) {
+            if (!file_exists($path) && !is_link($path)) {
+                $old = umask(0077);
+                try {
+                    @mkdir($path, 0700, true);
+                } finally {
+                    umask($old);
+                }
+            }
+            clearstatcache(true, $path);
+            $st = @lstat($path);
+            if ($st === false || is_link($path) || !is_dir($path)
+                || (function_exists('posix_geteuid') && $st['uid'] !== posix_geteuid()) || ($st['mode'] & 0077) !== 0) {
+                Log::warning('revocation', 'CRL disk cache disabled: unsafe directory');
+                return null;
+            }
         }
         return $dir . '/' . hash('sha256', $url) . '.crl';
     }
@@ -206,7 +343,7 @@ final class RevocationChecker
     /**
      * Parse and verify a CRL against $issuer.
      *
-     * @return array{thisUpdate: int, nextUpdate: ?int, entries: list<array{serial: string, date: ?int, reason: string}>, idpUris: list<string>, idpScoped: bool}
+     * @return array{thisUpdate: int, nextUpdate: ?int, entries: list<array{serial: string, date: ?int, reason: string}>, idpUris: list<string>, idpScoped: bool, onlyUser: bool, onlyCa: bool}
      */
     private function parse(string $der, Certificate $issuer): array
     {
@@ -250,7 +387,10 @@ final class RevocationChecker
         if (isset($fields[0]) && $fields[0]->isUniversal(Asn1::TAG_INTEGER)) {
             $i = 1; // version
         }
-        $i++; // inner signature algorithm
+        $innerSigAlg = $fields[$i++] ?? throw new ValidationException('revocationunavailable', 'bad CRL');
+        if ($innerSigAlg->raw() !== $sigAlgNode->raw()) {
+            throw new ValidationException('revocationunavailable', 'CRL signature algorithms differ');
+        }
         $issuerName = $fields[$i++] ?? throw new ValidationException('revocationunavailable', 'bad CRL');
         if ($issuerName->raw() !== $issuer->subjectNameDer) {
             throw new ValidationException('revocationunavailable', 'CRL issuer mismatch');
@@ -264,7 +404,7 @@ final class RevocationChecker
         if (isset($fields[$i]) && $fields[$i]->isUniversal(Asn1::TAG_SEQUENCE)) {
             $revoked = $fields[$i++];
         }
-        $idp = ['uris' => [], 'scoped' => false];
+        $idp = ['uris' => [], 'scoped' => false, 'onlyUser' => false, 'onlyCa' => false];
         if (isset($fields[$i]) && $fields[$i]->isContext(0)) {
             $idp = $this->checkCrlExtensions($fields[$i]);
         }
@@ -294,19 +434,23 @@ final class RevocationChecker
             }
         }
 
-        return ['thisUpdate' => $thisUpdate, 'nextUpdate' => $nextUpdate, 'entries' => $entries, 'idpUris' => $idp['uris'], 'idpScoped' => $idp['scoped']];
+        return ['thisUpdate' => $thisUpdate, 'nextUpdate' => $nextUpdate, 'entries' => $entries, 'idpUris' => $idp['uris'], 'idpScoped' => $idp['scoped'],
+            'onlyUser' => $idp['onlyUser'], 'onlyCa' => $idp['onlyCa']];
     }
 
     /**
-     * Validate CRL extensions; returns the URIs of the IssuingDistributionPoint fullName (if any) and
-     * whether a fullName (in any name form) restricts the scope of the CRL.
+     * Validate CRL extensions; returns the URIs of the IssuingDistributionPoint fullName (if any),
+     * whether a fullName (in any name form) restricts the scope of the CRL and whether the CRL only
+     * covers end-entity (onlyContainsUserCerts) or CA (onlyContainsCACerts) certificates.
      *
-     * @return array{uris: list<string>, scoped: bool}
+     * @return array{uris: list<string>, scoped: bool, onlyUser: bool, onlyCa: bool}
      */
     private function checkCrlExtensions(Asn1Node $wrapper): array
     {
         $uris = [];
         $scoped = false;
+        $onlyUser = false;
+        $onlyCa = false;
         foreach ($wrapper->child(0)->children() as $ext) {
             $x = self::extension($ext);
             $oid = Asn1::oid($x[0]);
@@ -334,8 +478,10 @@ final class RevocationChecker
                         throw new ValidationException('revocationunavailable', 'partitioned CRL (onlySomeReasons) not supported');
                     } elseif (($f->isContext(4) || $f->isContext(5)) && $f->content() !== "\x00") {
                         throw new ValidationException('revocationunavailable', 'indirect or attribute CRL not supported');
+                    } elseif ($f->isContext(1) && $f->content() !== "\x00") {
+                        $onlyUser = true;
                     } elseif ($f->isContext(2) && $f->content() !== "\x00") {
-                        throw new ValidationException('revocationunavailable', 'CA-only CRL');
+                        $onlyCa = true;
                     }
                 }
                 continue;
@@ -344,7 +490,7 @@ final class RevocationChecker
                 throw new ValidationException('revocationunavailable', 'unknown critical CRL extension');
             }
         }
-        return ['uris' => $uris, 'scoped' => $scoped];
+        return ['uris' => $uris, 'scoped' => $scoped, 'onlyUser' => $onlyUser, 'onlyCa' => $onlyCa];
     }
 
     /**

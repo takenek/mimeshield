@@ -134,6 +134,11 @@ final class Tool
             $cfg->bool('mimeshield_use_system_ca') ? 'ENABLED - TLS CAs are trusted for e-mail; configure mimeshield_ca_bundle with S/MIME CAs instead' : 'not used', true);
         $this->ok('configured intermediates', (string) count($store->intermediates()));
         $this->ok('revocation checking', $cfg->revocationMode());
+        if ($cfg->revocationMode() === 'crl' && (string) $cfg->get('mimeshield_revocation_proxy') !== '') {
+            // through a proxy the plugin cannot pin addresses: the proxy enforces egress (audit I-03)
+            $this->check($cfg->list('mimeshield_revocation_allow_hosts') !== [], 'CRL proxy host allow-list',
+                $cfg->list('mimeshield_revocation_allow_hosts') !== [] ? 'set' : 'EMPTY - the proxy must restrict CRL egress, or set mimeshield_revocation_allow_hosts', true);
+        }
 
         $this->section('Master key');
         try {
@@ -172,7 +177,8 @@ final class Tool
         $this->check(is_file($this->pluginDir . '/config.inc.php') || is_file(RCUBE_CONFIG_DIR . 'mimeshield.inc.php'), 'plugin config file',
             is_file($this->pluginDir . '/config.inc.php') ? 'plugins/mimeshield/config.inc.php' : (is_file(RCUBE_CONFIG_DIR . 'mimeshield.inc.php') ? 'config/mimeshield.inc.php' : 'not found - defaults are used'), true);
         $this->ok('encrypt-to-self', $cfg->bool('mimeshield_encrypt_to_self') ? 'on' : 'off');
-        $this->ok('Bcc mode', $cfg->bccMode());
+        // 'single' reveals the certificates of Bcc recipients to To/Cc recipients (audit I-08)
+        $this->check($cfg->bccMode() !== 'single', 'Bcc mode', $cfg->bccMode() === 'single' ? 'single - Bcc recipients are identifiable in RecipientInfos' : $cfg->bccMode(), true);
         $this->ok('untrusted recipients', $cfg->encryptUntrusted());
 
         $this->out("\n" . ($this->failures === 0 ? 'Result: OK' : 'Result: ' . $this->failures . ' problem(s) found') . "\n");
@@ -208,39 +214,20 @@ final class Tool
                 $this->out("File {$file} does not exist\n");
                 return 1;
             }
-            $existing = (string) file_get_contents($file);
-            if (preg_match('/^' . preg_quote($kid, '/') . '\s/m', $existing)) {
-                $this->out("Key id {$kid} already exists in {$file}\n");
+            // serialise read-modify-rename (a stable lock file: the key file itself is replaced)
+            $lock = $this->lockFile($file . '.lock');
+            if ($lock === null) {
                 return 1;
             }
-            // atomic: write a new file next to the old one, then rename (never truncate the only copy)
-            $perms = fileperms($file) & 0o777;
-            $tmp = $file . '.new.' . bin2hex(random_bytes(4));
-            $old = umask(0o277);
-            $fh = @fopen($tmp, 'x');
-            umask($old);
-            $ok = $fh !== false && fwrite($fh, rtrim($existing, "\n") . "\n" . $line . "\n") !== false && fflush($fh);
-            $written = $fh !== false ? fstat($fh) : false;
-            if ($fh !== false) {
-                fclose($fh);
-            }
-            if ($ok) {
-                @chown($tmp, (int) fileowner($file));
-                @chgrp($tmp, (int) filegroup($file));
-                @chmod($tmp, $perms);
-                // the file renamed over the key file must still be the one written above
-                clearstatcache(true, $tmp);
-                $now = @lstat($tmp);
-                $ok = is_array($written) && is_array($now) && ($now['mode'] & 0o170000) === 0o100000
-                    && $now['ino'] === $written['ino'] && $now['dev'] === $written['dev'];
-                if (!$ok) {
-                    $this->out("Refusing to continue: {$tmp} was replaced while it was being written\n");
-                } else {
-                    $ok = @rename($tmp, $file);
-                }
+            try {
+                $ok = $this->appendKey($file, $kid, $line);
+            } finally {
+                flock($lock, LOCK_UN);
+                fclose($lock);
             }
             if (!$ok) {
-                @unlink($tmp);
+                KeyVault::wipe($line);
+                return 1;
             }
         } else {
             $old = umask(0o277);
@@ -267,6 +254,109 @@ final class Tool
             . ($append ? "Set \$config['mimeshield_master_key_active'] = '{$kid}'; and run: plugins/mimeshield/bin/mimeshield.sh rotate\n" : '')
             . "BACK UP THIS FILE: without it no stored private key can be used.\n");
         return 0;
+    }
+
+    /**
+     * keygen --append (caller holds the lock): read the existing file strictly, write old content +
+     * new line to a new file (every byte checked, fsync, fclose), verify that the new file holds
+     * exactly that content - in particular every existing key line - and only then rename it over the
+     * key file. Any failure leaves the original untouched (audit F-12). Prints the reason on failure.
+     */
+    private function appendKey(string $file, string $kid, #[\SensitiveParameter] string $line): bool
+    {
+        clearstatcache(true, $file);
+        $existing = @file_get_contents($file);
+        if (!is_string($existing) || trim($existing) === '') {
+            $this->out("Cannot read {$file} (or it is empty) - nothing appended\n");
+            return false;
+        }
+        if (preg_match('/^' . preg_quote($kid, '/') . '\s/m', $existing)) {
+            $this->out("Key id {$kid} already exists in {$file}\n");
+            return false;
+        }
+        $payload = rtrim($existing, "\n") . "\n" . $line . "\n";
+        // atomic: write a new file next to the old one, then rename (never truncate the only copy)
+        $perms = fileperms($file) & 0o777;
+        $tmp = $file . '.new.' . bin2hex(random_bytes(4));
+        $old = umask(0o277);
+        $fh = @fopen($tmp, 'x');
+        umask($old);
+        if ($fh === false) {
+            $this->out("Cannot create {$tmp}\n");
+            return false;
+        }
+        $ok = true;
+        for ($done = 0, $len = strlen($payload); $ok && $done < $len; $done += $w) {
+            $w = @fwrite($fh, substr($payload, $done));
+            $ok = is_int($w) && $w > 0;
+            $w = (int) $w;
+        }
+        $ok = $ok && fflush($fh) && (!function_exists('fsync') || fsync($fh));
+        $written = fstat($fh);
+        $ok = fclose($fh) && $ok;
+        if ($ok) {
+            @chown($tmp, (int) fileowner($file));
+            @chgrp($tmp, (int) filegroup($file));
+            @chmod($tmp, $perms);
+            // the file renamed over the key file must still be the one written above, with exactly
+            // the intended content (all previous keys + the new one)
+            clearstatcache(true, $tmp);
+            $now = @lstat($tmp);
+            $ok = is_array($written) && is_array($now) && ($now['mode'] & 0o170000) === 0o100000
+                && $now['ino'] === $written['ino'] && $now['dev'] === $written['dev'];
+            if (!$ok) {
+                $this->out("Refusing to continue: {$tmp} was replaced while it was being written\n");
+            } else {
+                $check = @file_get_contents($tmp);
+                $ok = is_string($check) && hash_equals($payload, $check);
+                if (is_string($check)) {
+                    KeyVault::wipe($check);
+                }
+                if (!$ok) {
+                    $this->out("Refusing to continue: {$tmp} does not contain the expected keys\n");
+                }
+            }
+            $ok = $ok && @rename($tmp, $file);
+        }
+        KeyVault::wipe($payload);
+        KeyVault::wipe($existing);
+        if (!$ok) {
+            @unlink($tmp);
+            $this->out("Writing {$file} failed - the original file is unchanged\n");
+        }
+        return $ok;
+    }
+
+    /**
+     * Exclusive lock on a stable lock file next to the key file (created 0600, never a symlink).
+     *
+     * @return null|resource
+     */
+    private function lockFile(string $path)
+    {
+        if (is_link($path)) {
+            $this->out("Refusing to use a symbolic link as lock file: {$path}\n");
+            return null;
+        }
+        $old = umask(0o177);
+        $fh = @fopen($path, 'c');
+        umask($old);
+        $st = $fh !== false ? fstat($fh) : false;
+        $ls = @lstat($path);
+        if ($fh === false || !is_array($st) || !is_array($ls) || ($ls['mode'] & 0o170000) !== 0o100000
+            || $st['ino'] !== $ls['ino'] || $st['dev'] !== $ls['dev']) {
+            if ($fh !== false) {
+                fclose($fh);
+            }
+            $this->out("Cannot open lock file {$path}\n");
+            return null;
+        }
+        if (!flock($fh, LOCK_EX)) {
+            fclose($fh);
+            $this->out("Cannot lock {$path}\n");
+            return null;
+        }
+        return $fh;
     }
 
     /**

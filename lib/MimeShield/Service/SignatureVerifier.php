@@ -110,11 +110,11 @@ final class SignatureVerifier
             }
         }
 
-        // revocation: only for chains anchored in the configured trust store (RFC 8550 section 6)
+        // revocation: only for chains anchored in the configured trust store (RFC 8550 section 6), for
+        // every certificate of that accepted path, each against its issuer on the path (F-04/F-05)
         $rev = new RevocationResult(RevocationResult::NOT_CHECKED, $this->revocation->isEnabled() ? 'untrusted' : 'disabled');
         if ($this->revocation->isEnabled() && in_array($chain->status, [ChainResult::TRUSTED, ChainResult::EXPIRED], true)) {
-            $issuer = $this->findIssuer($signer, $check->embeddedPems);
-            $rev = $this->revocation->check($signer, $issuer, $now);
+            $rev = $this->revocation->checkPath($chain->certs, $this->store, $now);
         }
 
         $small = $signer->keyType === 'RSA' && $signer->keyBits > 0 && $signer->keyBits < $this->minRsaBits;

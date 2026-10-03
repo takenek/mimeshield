@@ -76,8 +76,12 @@ final class VerificationResult
         if ($this->chain !== null && $this->chain->isTrusted()
             && $this->certTime === self::TIME_VALID
             && $this->identity === self::IDENTITY_MATCH
-            && in_array($this->revocation->status, [RevocationResult::GOOD, RevocationResult::NOT_CHECKED], true)
-            && !$this->weakDigest && !$this->smallKey && !$this->partial) {
+            // "not checked" is fully OK only when checking is disabled (F-06); see also lines()
+            && ($this->revocation->status === RevocationResult::GOOD
+                || ($this->revocation->status === RevocationResult::NOT_CHECKED && $this->revocation->reason === 'disabled'))
+            && !$this->weakDigest && !$this->smallKey && !$this->partial
+            // only the first SignerInfo is evaluated: further signers are flagged (audit I-12)
+            && $this->check->signerCount() <= 1) {
             return self::LEVEL_OK;
         }
         return self::LEVEL_WARNING;
@@ -160,6 +164,9 @@ final class VerificationResult
             $out[] = $this->check->info === null
                 ? ['sig_digestunverified', [], self::LEVEL_WARNING]
                 : ['sig_weakdigest', ['digest' => strtoupper($this->check->digest())], self::LEVEL_WARNING];
+        }
+        if ($this->check->signerCount() > 1) {
+            $out[] = ['sig_multiplesigners', ['count' => (string) $this->check->signerCount()], self::LEVEL_WARNING];
         }
         if ($this->smallKey && $signer !== null) {
             $out[] = ['cert_smallkey', ['bits' => (string) $signer->keyBits], self::LEVEL_WARNING];

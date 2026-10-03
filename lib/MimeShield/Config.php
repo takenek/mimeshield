@@ -61,6 +61,7 @@ final class Config
         'mimeshield_pkcs12_legacy_cli' => false,
         'mimeshield_openssl_bin' => '/usr/bin/openssl',
         'mimeshield_decrypt_in_compose' => true,
+        'mimeshield_require_encrypt_for_decrypted' => false,
         'mimeshield_debug' => false,
     ];
 

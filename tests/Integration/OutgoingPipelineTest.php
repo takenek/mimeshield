@@ -291,6 +291,13 @@ final class OutgoingPipelineTest extends TestCase
         $unguarded = self::mtaReceive(self::netSmtpDataCopy((clone $msg)->txtHeaders(['Bcc' => null], true) . "\r\n" . $msg->body()));
         self::assertNull($this->opensslVerify($unguarded), 'unguarded message must be corrupted by Net_SMTP chunking');
 
+        // the real mimeshield::message_before_send hook pads the message (audit F-11: the hook itself,
+        // not a copy of its loop)
+        $hooked = self::messageBeforeSend($msg);
+        self::assertArrayNotHasKey('abort', $hooked);
+        self::assertSame($msg, $hooked['message']);
+        self::assertSame([], DotGuard::riskyOffsets(self::smtpString($msg)));
+
         // with the plugin's message_before_send guard it verifies (wire and Sent copy)
         $d = $this->deliver($msg);
         self::assertSame([], DotGuard::riskyOffsets(self::smtpString($msg)));
@@ -300,6 +307,99 @@ final class OutgoingPipelineTest extends TestCase
             $leaves = self::leaves(self::crlf($content));
             self::assertSame(rtrim($m->getTXTBody(), "\r\n"), rtrim($leaves[0]['data'], "\r\n"));
         }
+    }
+
+    /**
+     * Audit F-11: when padding cannot move the chunk border off a dot, the real
+     * mimeshield::message_before_send hook refuses to send (fail closed) instead of letting Net_SMTP
+     * change the signed bytes.
+     */
+    public function testMessageBeforeSendHookBlocksAPayloadThatCannotBeMadeTransportSafe(): void
+    {
+        $line = rtrim(str_repeat('a.', 34)) . "\r\n";
+        $text = 'Kropki/dots: zażółć.' . "\r\n" . str_repeat($line, 9500);
+        $found = null;
+        for ($attempt = 0; $attempt < 40 && $found === null; $attempt++) {
+            $m = $this->buildMessage($this->headers(['Subject' => 'dots ' . str_repeat('x', $attempt), 'Bcc' => null]), $text, false);
+            $msg = $this->outgoing($this->aliceKeys, $this->aliceCerts)->process($m, $this->aliceIdentity(), true, false, false);
+            self::assertInstanceOf(SmimeMessage::class, $msg);
+            if (DotGuard::riskyOffsets(self::smtpString($msg)) !== []) {
+                $found = [$m, $msg];
+            }
+        }
+        self::assertNotNull($found, 'could not produce a message with a dot at a chunk border');
+        [$m, $msg] = $found;
+        $contentHeaders = (new \ReflectionProperty(SmimeMessage::class, 'smimeContentHeaders'))->getValue($msg);
+        // the same signed message, but padding has no effect (stands for a payload no padding fixes)
+        $stuck = new class ($m, $contentHeaders, $msg->body(), true, false) extends SmimeMessage {
+            public function padPreamble(int $n): void
+            {
+            }
+        };
+        self::assertNotSame([], DotGuard::riskyOffsets(self::smtpString($stuck)));
+
+        $hooked = self::messageBeforeSend($stuck);
+
+        self::assertTrue($hooked['abort'] ?? false, 'unsafe signed payload must not be sent');
+        self::assertFalse($hooked['result']);
+        self::assertSame('mimeshield.internalerror', $hooked['error']['label'] ?? null);
+    }
+
+    /**
+     * I-07 (Stage 6 pass 05): when the Bcc envelopes were delivered and the main delivery then fails,
+     * the real message_send_error hook replaces the generic SMTP error with a message telling the user
+     * that the Bcc recipients already have the message; without delivered envelopes nothing changes.
+     */
+    public function testMainDeliveryFailureAfterBccEnvelopesIsReported(): void
+    {
+        [$m] = $this->scenario('plain');
+        $msg = $this->outgoing($this->aliceKeys, $this->aliceCerts)->process($m, $this->aliceIdentity(), false, true, false);
+        self::assertInstanceOf(SmimeMessage::class, $msg);
+        self::assertNotSame([], $msg->bccEnvelopes());
+
+        require_once dirname(__DIR__, 2) . '/mimeshield.php';
+        $rc = (new \ReflectionClass(\rcmail::class))->newInstanceWithoutConstructor();
+        $rc->smtp = new class () {
+            /** @var list<string> */
+            public array $to = [];
+
+            public function send_mail(string $from, array $to, string $headers, string $body, array $options = []): bool
+            {
+                array_push($this->to, ...$to);
+                return true;
+            }
+        };
+        $plugin = (new \ReflectionClass(\mimeshield::class))->newInstanceWithoutConstructor();
+        (new \ReflectionProperty(\mimeshield::class, 'rc'))->setValue($plugin, $rc);
+        (new \ReflectionProperty(\mimeshield::class, 'expect'))->setValue($plugin, ['sign' => false, 'encrypt' => true]);
+        $smtpError = ['error' => ['label' => 'smtperror', 'vars' => ['msg' => 'x']]];
+
+        // nothing delivered yet: the core error is kept
+        self::assertSame($smtpError['error'], $plugin->message_send_error($smtpError)['error']);
+
+        $p = $plugin->message_before_send(['message' => $msg, 'from' => 'alice@example.test', 'mailto' => ['bob@example.test']]);
+        self::assertEmpty($p['abort'] ?? false, 'main delivery is left to Roundcube');
+        self::assertSame(array_column($msg->bccEnvelopes(), 'address'), $rc->smtp->to, 'only the Bcc envelopes went out');
+
+        $before = count($GLOBALS['mimeshield_test_log'] ?? []);   // bootstrap log sink
+        $error = $plugin->message_send_error($smtpError + ['message' => $p['message']])['error'];
+        self::assertSame(['label' => 'mimeshield.bccmainsendfailed', 'vars' => []], $error);
+        self::assertStringContainsString('main delivery failed after the Bcc envelopes', (string) end($GLOBALS['mimeshield_test_log']));
+        self::assertSame($before + 1, count($GLOBALS['mimeshield_test_log']));
+    }
+
+    /**
+     * Run the real mimeshield::message_before_send hook for a clear-signed send (no Bcc envelopes).
+     *
+     * @return array<string, mixed>
+     */
+    private static function messageBeforeSend(SmimeMessage $msg): array
+    {
+        require_once dirname(__DIR__, 2) . '/mimeshield.php';
+        $plugin = (new \ReflectionClass(\mimeshield::class))->newInstanceWithoutConstructor();
+        (new \ReflectionProperty(\mimeshield::class, 'expect'))->setValue($plugin, ['sign' => true, 'encrypt' => false]);
+        self::assertSame([], $msg->bccEnvelopes());
+        return $plugin->message_before_send(['message' => $msg, 'from' => 'alice@example.test', 'mailto' => ['bob@example.test']]);
     }
 
     /**
@@ -830,10 +930,15 @@ final class OutgoingPipelineTest extends TestCase
         self::assertSame(CertificateService::R_INVALID, $r['status']);
         self::assertSame('revoked', $r['detail']);
 
-        // a certificate that is not on the CRL stays usable
+        // a certificate that is not on the CRL stays usable; the TEST intermediate has no CRL
+        // distribution point, so the path status is undetermined (audit F-04/F-06) - signalled
+        // under the 'warn' policy
         $r = $certs->resolveOne('bob@example.test');
         self::assertSame(CertificateService::R_OK, $r['status']);
-        self::assertSame('trusted', $r['detail']);
+        self::assertSame(CertificateService::D_REVOCATION_UNKNOWN, $r['detail']);
+        $block = $this->revocationCerts('block', true);
+        $block->importFile(TestPki::read('bob.crt'), false);
+        self::assertSame(CertificateService::R_INVALID, $block->resolveOne('bob@example.test')['status']);
     }
 
     public function testUnknownRecipientRevocationIsSignalledOrBlockedByPolicy(): void
@@ -847,6 +952,50 @@ final class OutgoingPipelineTest extends TestCase
         $r = $block->resolveOne('bob@example.test');
         self::assertSame(CertificateService::R_INVALID, $r['status']);
         self::assertSame('revocationunknown', $r['detail']);
+    }
+
+    // ================================================================== audit F-15: certificate saved from a message
+
+    private function untrustedSignerResult(): \MimeShield\Trust\VerificationResult
+    {
+        $content = "Content-Type: text/plain\r\n\r\nhello\r\n";
+        $sig = $this->cms->signDetached($content, TestPki::cert('untrusted'), TestPki::key('untrusted'), []);
+        $verifier = new \MimeShield\Service\SignatureVerifier(new ChainValidator($this->trust, $this->dir), $this->trust,
+            new RevocationChecker(RevocationChecker::MODE_OFF, null, ''));
+        $r = $verifier->evaluate($this->cms->verifyDetached($content, $sig), ['alice@example.test'], []);
+        self::assertTrue($r->cryptoValid());
+        self::assertFalse($r->chain?->isTrusted());
+        return $r;
+    }
+
+    private function certsWithPolicy(string $untrustedPolicy): CertificateService
+    {
+        return new CertificateService(new CertRepository($this->db, self::ALICE), new PublicCertImporter(),
+            new ChainValidator($this->trust, $this->dir), new RevocationChecker(RevocationChecker::MODE_OFF, null, ''),
+            $this->aliceKeys, 100, $untrustedPolicy);
+    }
+
+    public function testUntrustedCertificateFromMessageNeedsConfirmationUnderWarnPolicy(): void
+    {
+        $result = $this->untrustedSignerResult();
+        $certs = $this->certsWithPolicy('warn');
+
+        $r = $certs->saveFromMessage($result, false);
+        self::assertSame(0, $r['id']);
+        self::assertSame([['email' => 'alice@example.test', 'old' => [], 'new' => TestPki::cert('untrusted')->fingerprint, 'untrusted' => true]], $r['confirm']);
+        self::assertNull($certs->repository()->findByFingerprint(TestPki::cert('untrusted')->fingerprint), 'nothing stored without confirmation');
+
+        $r = $certs->saveFromMessage($result, true);
+        self::assertGreaterThan(0, $r['id']);
+        self::assertSame(CertRepository::TRUST_OBSERVED, $r['trust']);
+    }
+
+    public function testUntrustedCertificateFromMessageUnderBlockPolicyIsStoredButNeverUsable(): void
+    {
+        $certs = $this->certsWithPolicy('block');
+        $r = $certs->saveFromMessage($this->untrustedSignerResult(), false);
+        self::assertSame([], $r['confirm']);
+        self::assertSame(CertRepository::TRUST_OBSERVED, $r['trust']);
     }
 
     // ================================================================== service graph
@@ -1079,15 +1228,13 @@ final class OutgoingPipelineTest extends TestCase
      */
     private function deliver(SmimeMessage $msg): array
     {
-        // --- message_before_send (plugin) ---
+        // --- message_before_send (plugin; same DotGuard::makeSafe() call, the hook itself is run in
+        // testMessageBeforeSendHook*) ---
         if ($msg->isSigned() && !$msg->isEncrypted()) {
-            for ($i = 0; $i < 8; $i++) {
-                $data = (clone $msg)->txtHeaders(['Bcc' => null], true) . "\r\n" . $msg->body();
-                if (DotGuard::riskyOffsets($data) === []) {
-                    break;
-                }
-                $msg->padPreamble(1);
-            }
+            self::assertTrue(DotGuard::makeSafe(
+                static fn (): string => (clone $msg)->txtHeaders(['Bcc' => null], true) . "\r\n" . $msg->body(),
+                static fn () => $msg->padPreamble(1),
+            ), 'the plugin would block this send (F-11)');
         }
         $toDeliver = $msg;
         $bcc = [];

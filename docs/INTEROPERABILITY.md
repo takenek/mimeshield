@@ -20,6 +20,12 @@ emits is the standard RFC 8551 layout used by Thunderbird (clear-signed `multipa
 `application/pkcs7-signature`, `smime.p7s`, `micalg=sha-256`; `application/pkcs7-mime;
 smime-type=enveloped-data`, `smime.p7m`; sign-then-encrypt).
 
+Incoming `multipart/signed` (since the remediation of 2026-10-03, audit F-01): verified only when the
+container declares `protocol="application/pkcs7-signature"` (or `application/x-pkcs7-signature`)
+AND its second part has one of these types, as RFC 1847 / RFC 8551 require and Thunderbird, Outlook
+and Apple Mail emit. A non-conforming sender without the `protocol` parameter is no longer verified
+(the signature part is shown as an attachment). Include this case in the manual checklist below.
+
 **Not tested automatically:** Microsoft Outlook (Windows/Mac/new Outlook/OWA) and the Thunderbird
 application itself (only its crypto library NSS) — they were not available in the Linux test
 environment. Use the manual checklist below before relying on them in production.
@@ -44,6 +50,11 @@ certificate (e.g. Actalis S/MIME Mailbox Validated) imported in both; the corres
 certificate known on both sides; the Actalis root in `mimeshield_ca_bundle`.
 
 Record client version, OS and result (✔/✘ + screenshot) for every line.
+
+In the checklist, a green signature status assumes a trusted, valid certificate path and a
+successful revocation check for every certificate below the trust anchor. With the default
+`mimeshield_revocation = 'off'`, an otherwise valid signature shows a revocation-not-checked
+warning instead. Record that warning as the expected result for that configuration.
 
 ### 3.1 Roundcube (MIME Shield) → Outlook
 

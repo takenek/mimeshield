@@ -56,15 +56,20 @@ final class SafeHttpClient
     }
 
     /**
-     * Fetch $url and return the body (at most $maxBytes).
+     * Fetch $url and return the body (at most $maxBytes). An optional monotonic deadline in seconds
+     * (hrtime(true) / 1e9) caps the transfer to the caller's remaining aggregate budget. Synchronous
+     * DNS cannot be interrupted here; check the deadline before and after it and leave the hard
+     * worker lifetime bound to PHP-FPM / the deployment's resolver configuration.
      */
-    public function get(string $url, int $maxBytes): string
+    public function get(string $url, int $maxBytes, ?float $deadline = null): string
     {
         if (!function_exists('curl_init')) {
             throw new ValidationException('revocationunavailable', 'ext-curl not available');
         }
         [$host, $port, $scheme] = $this->checkUrl($url);
+        $this->timeoutMillis($deadline);
         $ip = $this->resolveSafe($host);
+        $timeoutMillis = $this->timeoutMillis($deadline);
 
         $body = '';
         $tooLarge = false;
@@ -77,8 +82,8 @@ final class SafeHttpClient
             CURLOPT_HTTPGET => true,
             CURLOPT_FOLLOWLOCATION => false,
             CURLOPT_MAXREDIRS => 0,
-            CURLOPT_TIMEOUT => $this->timeout,
-            CURLOPT_CONNECTTIMEOUT => $this->connectTimeout,
+            CURLOPT_TIMEOUT_MS => $timeoutMillis,
+            CURLOPT_CONNECTTIMEOUT_MS => min($this->connectTimeout * 1000, $timeoutMillis),
             CURLOPT_NOSIGNAL => true,
             CURLOPT_RETURNTRANSFER => false,
             CURLOPT_HEADER => false,
@@ -140,6 +145,15 @@ final class SafeHttpClient
             throw new ValidationException('revocationunavailable', 'HTTP status ' . $code);
         }
         return $body;
+    }
+
+    private function timeoutMillis(?float $deadline): int
+    {
+        $remaining = $deadline === null ? $this->timeout : min($this->timeout, $deadline - hrtime(true) / 1e9);
+        if ($remaining <= 0) {
+            throw new ValidationException('revocationunavailable', 'CRL time budget of this request exhausted');
+        }
+        return max(1, (int) floor($remaining * 1000));
     }
 
     /**

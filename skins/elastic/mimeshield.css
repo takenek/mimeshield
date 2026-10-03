@@ -177,3 +177,20 @@ fieldset.mimeshield-compose > legend {
     margin: 0 .5rem .5rem 0;
     white-space: normal;
 }
+
+/* ---------------------------------------------------------------- header indicator (audit F-10) */
+.mimeshield-badge {
+    display: inline-block;
+    margin: .25rem 0;
+    padding: .1rem .5rem;
+    border: 1px solid currentColor;
+    border-radius: .25rem;
+    font-size: .9em;
+    line-height: 1.4;
+}
+.mimeshield-badge .mimeshield-mark { font-weight: bold; }
+.mimeshield-badge-ok { color: #2e7d32; }
+.mimeshield-badge-warning { color: #9a6700; }
+.mimeshield-badge-error { color: #c62828; }
+.mimeshield-badge-none { color: #555; }
+html.dark-mode .mimeshield-badge-none { color: #bbb; }

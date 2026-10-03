@@ -12,6 +12,8 @@ namespace MimeShield\Trust;
 
 use MimeShield\Cert\Certificate;
 use MimeShield\Config;
+use MimeShield\Crypto\SecureTemp;
+use MimeShield\Exception\MimeShieldException;
 use MimeShield\Exception\ValidationException;
 use MimeShield\Log;
 
@@ -23,8 +25,11 @@ use MimeShield\Log;
  * certificates are never added to the anchors. Intermediates (configured file + certificates
  * shipped in messages / PKCS#12 files) are "untrusted" helpers for path building only.
  *
- * Note: OpenSSL treats an empty ca_info array as "use the default store", so the list passed to
- * OpenSSL is always built explicitly here and is never empty (a placeholder is used otherwise).
+ * Isolation from the OpenSSL default store (audit F-02): PHP adds OpenSSL's default CA FILE when
+ * ca_info names no file and its default hash DIRECTORY (OPENSSLDIR/certs, SSL_CERT_DIR) when ca_info
+ * names no directory. verifyLocations() therefore always adds an empty, plugin-owned directory, so
+ * the verification store holds only the configured bundle files; in addition ChainValidator accepts
+ * a path only when it ends in one of anchors() (defence in depth).
  */
 final class TrustStore
 {
@@ -78,6 +83,53 @@ final class TrustStore
             $files[] = $sys;
         }
         return $files;
+    }
+
+    /**
+     * Locations for OpenSSL's verification store: the bundle files plus an empty directory owned by
+     * the plugin (disables the implicit default CA directory). null when the isolation directory
+     * cannot be guaranteed (fail closed: nothing is trusted).
+     *
+     * @return null|list<string>
+     */
+    public function verifyLocations(string $tempBaseDir): ?array
+    {
+        $files = $this->caInfo();
+        if ($files === []) {
+            return null;
+        }
+        $dir = self::isolationDir($tempBaseDir);
+        return $dir === null ? null : [...$files, $dir];
+    }
+
+    /**
+     * Empty directory (mode 0700, owned by the PHP user, not a symlink) under the plugin temp dir.
+     */
+    public static function isolationDir(string $tempBaseDir): ?string
+    {
+        try {
+            $base = SecureTemp::prepareDir($tempBaseDir);
+        } catch (MimeShieldException) {
+            return null;
+        }
+        $dir = $base . '/no-default-ca';
+        if (!file_exists($dir) && !is_link($dir)) {
+            $old = umask(0077);
+            @mkdir($dir, 0700);
+            umask($old);
+        }
+        clearstatcache(true, $dir);
+        $st = @lstat($dir);
+        if ($st === false || is_link($dir) || !is_dir($dir)
+            || (function_exists('posix_geteuid') && $st['uid'] !== posix_geteuid()) || ($st['mode'] & 0077) !== 0) {
+            Log::error('truststore', 'CA isolation directory is unsafe', ['dir' => $dir]);
+            return null;
+        }
+        if (array_diff(@scandir($dir) ?: ['?'], ['.', '..']) !== []) {
+            Log::error('truststore', 'CA isolation directory is not empty', ['dir' => $dir]);
+            return null;
+        }
+        return $dir;
     }
 
     /**
@@ -148,9 +200,11 @@ final class TrustStore
     }
 
     /**
-     * Issuer certificate of $cert among the given (untrusted) certificates, the configured
-     * intermediates and the trust anchors. Shared by signature verification and recipient
-     * resolution, so that revocation checking finds the same issuer in both paths (audit MS-04).
+     * Issuer certificate of $cert among the configured intermediates, the trust anchors and the given
+     * (untrusted) certificates - administrator-controlled certificates first, and among equal
+     * candidates one that may sign CRLs (a copy without cRLSign shipped in a message never shadows
+     * the real issuer, audit F-05). Revocation checking uses the accepted chain path instead
+     * (ChainResult::$certs); this lookup remains for diagnostics.
      *
      * @param list<string> $extraPems e.g. certificates embedded in a message or stored with a record
      */
@@ -163,8 +217,27 @@ final class TrustStore
             } catch (ValidationException) {
             }
         }
-        foreach (array_merge($candidates, $this->intermediates(), $this->anchors()) as $c) {
+        $found = null;
+        foreach (array_merge($this->intermediates(), $this->anchors(), $candidates) as $c) {
             if ($c->fingerprint !== $cert->fingerprint && $cert->isIssuedBy($c)) {
+                if ($c->hasKeyUsage(Certificate::KU_CRL_SIGN)) {
+                    return $c;
+                }
+                $found ??= $c;
+            }
+        }
+        return $found;
+    }
+
+    /**
+     * An administrator-controlled certificate (configured intermediate or anchor) that issued $cert
+     * and may sign CRLs.
+     */
+    public function trustedCrlIssuer(Certificate $cert): ?Certificate
+    {
+        foreach (array_merge($this->intermediates(), $this->anchors()) as $c) {
+            if ($c->fingerprint !== $cert->fingerprint && $c->subjectNameDer === $cert->issuerNameDer
+                && $c->hasKeyUsage(Certificate::KU_CRL_SIGN) && $cert->isIssuedBy($c)) {
                 return $c;
             }
         }

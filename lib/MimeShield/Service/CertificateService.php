@@ -121,7 +121,11 @@ final class CertificateService
      * signature whose certificate matches the From address. The certificate is NOT trusted because
      * of this: its trust flag reflects chain validation only.
      *
-     * @return array{id: int, trust: string, confirm: list<array{email: string, old: list<string>, new: string}>}
+     * Confirmation (showing the fingerprints) is required when another certificate exists for an
+     * address and - with mimeshield_encrypt_untrusted = 'warn' - also when the chain is not trusted,
+     * because such a certificate becomes usable for encryption (audit F-15).
+     *
+     * @return array{id: int, trust: string, confirm: list<array{email: string, old: list<string>, new: string, untrusted: bool}>}
      */
     public function saveFromMessage(VerificationResult $result, bool $confirmed): array
     {
@@ -136,7 +140,13 @@ final class CertificateService
         if ($existing !== null) {
             return ['id' => $existing->id(), 'trust' => $existing->trust(), 'confirm' => []];
         }
-        $confirm = $this->fingerprintChanges($cert);
+        $untrusted = $result->chain === null || !$result->chain->isTrusted();
+        $confirm = array_map(static fn (array $c) => $c + ['untrusted' => $untrusted], $this->fingerprintChanges($cert));
+        if ($confirm === [] && $untrusted && $this->untrustedPolicy === 'warn') {
+            foreach ($cert->emails($this->subjectEmailFallback) as $email) {
+                $confirm[] = ['email' => $email, 'old' => [], 'new' => $cert->fingerprint, 'untrusted' => true];
+            }
+        }
         if ($confirm !== [] && !$confirmed) {
             return ['id' => 0, 'trust' => '', 'confirm' => $confirm];
         }
@@ -222,10 +232,9 @@ final class CertificateService
         $chain = $this->chains->validate($cert, $rec->chainPems(), ChainValidator::PURPOSE_ENCRYPT);
         $revocationUnknown = false;
         if ($chain->isTrusted() && $this->revocation->isEnabled()) {
-            // same issuer lookup as signature verification: stored chain + configured intermediates
-            // + trust anchors (a certificate imported without its chain is still checked, audit MS-04)
-            $issuer = $this->findIssuer($cert, $rec->chainPems());
-            $rev = $this->revocation->check($cert, $issuer);
+            // same as signature verification: every certificate of the accepted path (stored chain +
+            // configured intermediates + trust anchors), each against its issuer on it (F-04/F-05)
+            $rev = $this->revocation->checkPath($chain->certs, $this->trust);
             if ($rev->status === RevocationResult::REVOKED) {
                 return ['status' => self::R_INVALID, 'cert' => $cert, 'detail' => 'revoked'];
             }
@@ -253,27 +262,6 @@ final class CertificateService
             (array) ($this->identityEmails)()
         )));
         return AddressMatcher::matchesAny($email, $mine);
-    }
-
-    /**
-     * @param list<string> $chainPems
-     */
-    private function findIssuer(Certificate $cert, array $chainPems): ?Certificate
-    {
-        if ($this->trust !== null) {
-            return $this->trust->findIssuer($cert, $chainPems);
-        }
-        foreach ($chainPems as $pem) {
-            try {
-                $c = Certificate::fromString($pem);
-            } catch (ValidationException) {
-                continue;
-            }
-            if ($c->fingerprint !== $cert->fingerprint && $cert->isIssuedBy($c)) {
-                return $c;
-            }
-        }
-        return null;
     }
 
     /**

@@ -49,8 +49,9 @@ USERS = ['alice', 'bob', 'carol', 'mallory']
 IMAP_PASS = 'testpass'
 
 # UI texts (localization/en_US.inc)
-T_SIG_OK = 'S/MIME signature valid. Certificate trusted. Sender address matches.'
-T_SIG_OK_ENC = 'Encrypted message. S/MIME signature valid, certificate trusted, sender address matches.'
+# This test deployment keeps the default revocation mode (off): verification has a visible warning.
+T_SIG_OK = 'S/MIME signature valid. Certificate trusted. Sender address matches. Certificate revocation was not checked.'
+T_SIG_OK_ENC = 'Encrypted message. S/MIME signature valid, certificate trusted, sender address matches. Certificate revocation was not checked.'
 T_SIG_INVALID = 'The S/MIME signature is invalid or the message has been modified.'
 T_SIG_UNTRUSTED = 'Signature cryptographically valid, but the certificate chain cannot be confirmed as trusted.'
 T_DECRYPTED = 'This message was encrypted with S/MIME and has been decrypted.'
@@ -625,7 +626,7 @@ def sign_and_check(subject, body, html_body=False, attachments=None, expect_in_c
     uid = newest_uid('bob', subject=subject)
     page = session('bob').show(uid)
     lvl, txt = status(page)
-    eq(lvl, 'ok', 'UI status level (%s)' % txt[:200])
+    eq(lvl, 'warning', 'UI status level (%s)' % txt[:200])
     check(T_SIG_OK in txt, 'UI headline: %s' % txt[:300])
     return m, inner, uid, page
 
@@ -692,13 +693,13 @@ def c14():
 
 # =========================================================================== cases: verification UI
 
-@case('15 valid detached signature shown green; sender certificate can be saved')
+@case('15 valid detached signature warns that revocation is unchecked; sender certificate can be saved')
 def c15():
     b = session('bob')
     uid = E.state['signed09_uid']
     page = b.show(uid)
     lvl, txt = status(page)
-    eq(lvl, 'ok', 'status level')
+    eq(lvl, 'warning', 'status level')
     check('mimeshield-savecert' in page, 'save sender certificate link missing')
     check('smime.p7s' not in Roundcube.text_of(re.sub(r'<script.*?</script>', '', page, flags=re.S)), 'signature part must be hidden')
     rr = b.post_action('plugin.mimeshield-savecert', {'_uid': uid, '_mbox': 'INBOX'}, task='mail', header=True)
@@ -735,7 +736,7 @@ def c17():
     check(T_SIG_UNTRUSTED in txt, 'headline: %s' % txt[:300])
 
 
-@case('18 trusted chain (carol EC, intermediate embedded) -> green with full path')
+@case('18 trusted chain (carol EC, intermediate embedded) -> full path and unchecked-revocation warning')
 def c18():
     entity = smime_sign(inner_text('Trusted chain 18 from carol'), 'carol')
     msg = mail({'From': 'Carol <%s>' % addr('carol'), 'To': addr('alice'), 'Subject': 'e2e 18 chain'}, entity)
@@ -743,7 +744,7 @@ def c18():
     check(ok, 'openssl verify: %s' % err)
     uid, page = deliver_and_show('alice', msg)
     lvl, txt = status(page)
-    eq(lvl, 'ok', 'status level (%s)' % txt[:200])
+    eq(lvl, 'warning', 'status level (%s)' % txt[:200])
     check('MIME Shield Test Intermediate CA' in txt and 'MIME Shield Test Root CA' in txt, 'chain path not shown: %s' % txt[-600:])
 
 
@@ -898,7 +899,7 @@ def c26():
     uid = newest_uid('bob', subject='e2e 25 signenc')
     page = session('bob').show(uid)
     lvl, txt = status(page)
-    eq(lvl, 'ok', 'level (%s)' % txt[:200])
+    eq(lvl, 'warning', 'level (%s)' % txt[:200])
     check(T_SIG_OK_ENC in txt, 'headline: %s' % txt[:300])
     check('signed and encrypted 25' in page, 'body')
 
@@ -1109,7 +1110,7 @@ def c34():
     msg = mail({'From': addr('mallory'), 'To': addr('alice'), 'Subject': 'e2e 34 xss'}, entity)
     uid, page = deliver_and_show('alice', msg)
     lvl, txt = status(page)
-    eq(lvl, 'ok', 'xss-signed message status (%s)' % txt[:200])
+    eq(lvl, 'warning', 'xss-signed message status (%s)' % txt[:200])
     check('&lt;script&gt;alert(1)&lt;/script&gt;' in Roundcube.status_html(page), 'escaped CN not in status bar details')
     assert_no_raw_xss(page, 'message view')
     assert_no_raw_xss(session('alice').show(uid, action='preview'), 'message preview')
@@ -1134,7 +1135,7 @@ def c36():
     b = session('bob')
     page = b.show(newest_uid('bob', subject='e2e 25 signenc'), action='print')
     lvl, txt = status(page)
-    eq(lvl, 'ok', 'print status level')
+    eq(lvl, 'warning', 'print status level')
     check(T_SIG_OK_ENC in txt, 'print headline: %s' % txt[:200])
     check('mimeshield-savecert' not in page, 'no save action in print view')
 
@@ -1173,7 +1174,7 @@ def ci1():
     msg, uid, page = interop_show(entity, 'interop I1 opaque')
     check(cms_verify(msg)[0], 'openssl verify')
     lvl, txt = status(page)
-    eq(lvl, 'ok', 'level (%s)' % txt[:200])
+    eq(lvl, 'warning', 'level (%s)' % txt[:200])
     check(T_SIG_OK in txt and 'Outlook opaque I1' in page, 'status/body')
 
 
@@ -1184,7 +1185,7 @@ def ci2():
     check(entity.count(b'x-pkcs7-signature') >= 2, 'fixture format')
     msg, uid, page = interop_show(entity, 'interop I2 x-pkcs7')
     lvl, txt = status(page)
-    eq(lvl, 'ok', 'level (%s)' % txt[:200])
+    eq(lvl, 'warning', 'level (%s)' % txt[:200])
     check('Outlook x-pkcs7 I2' in page, 'body')
 
 
@@ -1208,7 +1209,7 @@ def ci4():
     check(plain is not None and cms_verify(plain)[0], 'openssl decrypt+verify: %s' % err)
     lvl, txt = status(page)
     check(T_SIG_OK_ENC in txt, 'headline (%s)' % txt[:300])
-    eq(lvl, 'ok', 'level')
+    eq(lvl, 'warning', 'level')
     check('Enveloped opaque I4' in page, 'body')
 
 
@@ -1224,7 +1225,7 @@ def ci5():
     check(plain is not None and cms_verify(plain)[0], 'openssl inner layers: %s' % err)
     lvl, txt = status(page)
     check('Triple wrapped I5' in page, 'inner body not displayed (status: %s)' % txt[:300])
-    check(lvl == 'ok', 'level %s (%s)' % (lvl, txt[:300]))
+    check(lvl == 'warning', 'level %s (%s)' % (lvl, txt[:300]))
 
 
 @case('I6 Thunderbird: enveloped containing multipart/signed micalg=sha-256')
@@ -1234,7 +1235,7 @@ def ci6():
     entity = smime_encrypt(signed, ['alice'])
     msg, uid, page = interop_show(entity, 'interop I6 tb')
     lvl, txt = status(page)
-    eq(lvl, 'ok', 'level (%s)' % txt[:200])
+    eq(lvl, 'warning', 'level (%s)' % txt[:200])
     check(T_SIG_OK_ENC in txt and 'Thunderbird style I6 – zażółć' in page, 'status/body')
 
 
@@ -1321,7 +1322,7 @@ def ci9():
     check(r.returncode == 0 and r.stdout[1] == 0x80, 'signed BER fixture')
     msg, uid, page = interop_show(p7m_entity(r.stdout, 'signed-data'), 'interop I9b ber signed')
     lvl, txt = status(page)
-    eq(lvl, 'ok', 'BER signed-data level (%s)' % txt[:200])
+    eq(lvl, 'warning', 'BER signed-data level (%s)' % txt[:200])
     check('BER signed I9b' in page, 'body')
 
 

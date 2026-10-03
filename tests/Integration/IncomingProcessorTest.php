@@ -429,9 +429,19 @@ final class IncomingProcessorTest extends TestCase
 
         $res = self::hook($proc, $msg, $orig);
 
-        // structure left as is: Roundcube displays the first part
-        self::assertSame($orig, $res['structure']);
+        // audit F-01/F-13: a copy of the container with ONLY the content part, rebuilt from exactly
+        // the verified bytes (ids mirror IMAP); the signature part never enters the displayed tree
+        self::assertNotSame($orig, $res['structure']);
         self::assertSame('multipart/signed', $res['mimetype']);
+        self::assertSame('0', $res['structure']->mime_id);
+        self::assertCount(1, $res['structure']->parts);
+        $shown = $res['structure']->parts[0];
+        self::assertSame('1', $shown->mime_id);
+        self::assertSame('text/plain', $shown->mimetype);
+        self::assertTrue($shown->body_modified);
+        self::assertStringContainsString('SECRET-PLAINTEXT-MARKER', (string) $shown->body);
+        self::assertSame($shown, $msg->mime_parts['1']);
+        self::assertCount(2, $orig->parts, 'the original (cached) structure is not modified');
         self::assertSame(['2'], self::ids(array_flip($proc->hiddenParts())));
 
         $st = self::partStatus($proc, '0');
@@ -458,6 +468,241 @@ final class IncomingProcessorTest extends TestCase
         self::assertContains(['get_raw_body', 'TEXT'], $this->calls);
         self::assertContains(['set_folder', self::FOLDER], $this->calls);
         $this->assertNoInternalError($proc);
+    }
+
+    /**
+     * Audit F-01: a container whose second part is not a signature (here text/plain) is not S/MIME,
+     * even when the protocol parameter claims so - no status, nothing verified, nothing hidden.
+     */
+    public function testContainerWithNonSignatureSecondPartIsNotTreatedAsSmime(): void
+    {
+        $sig = $this->cms()->signDetached(self::TEXT, TestPki::cert('alice'), TestPki::key('alice'), [TestPki::read('int.crt')]);
+        $b = 'sig-' . bin2hex(random_bytes(4));
+        $raw = self::headers()
+            . 'Content-Type: multipart/signed; protocol="application/pkcs7-signature"; micalg=sha-256; boundary="' . $b . "\"\r\n\r\n"
+            . '--' . $b . "\r\n" . self::TEXT . "\r\n"
+            . '--' . $b . "\r\n"
+            . "Content-Type: text/plain; charset=us-ascii\r\n\r\nPay to account X - text not covered by the signature.\r\n"
+            . chunk_split(base64_encode($sig), 76, "\r\n")
+            . '--' . $b . "--\r\n";
+        $msg = self::message($raw);
+        $proc = $this->processor($raw);
+
+        $res = self::hook($proc, $msg, $msg->headers->structure);
+
+        self::assertSame($msg->headers->structure, $res['structure']);
+        self::assertSame([], $proc->statuses());
+        self::assertSame([], $proc->hiddenParts());
+        self::assertNull($proc->rootSignature());
+        self::assertSame([], $this->calls);
+    }
+
+    /**
+     * Audit F-01: the protocol parameter of the container must name a signature too.
+     */
+    public function testContainerWithoutProtocolParameterIsNotTreatedAsSmime(): void
+    {
+        $raw = (string) preg_replace('/protocol="application\/pkcs7-signature";\s*/', '', $this->clearSignedMessage());
+        self::assertStringNotContainsString('protocol=', $raw);
+        $msg = self::message($raw);
+        $proc = $this->processor($raw);
+
+        self::hook($proc, $msg, $msg->headers->structure);
+
+        self::assertSame([], $proc->statuses());
+        self::assertNull($proc->rootSignature());
+    }
+
+    /**
+     * Audit F-01: data after the DER structure of the signature part is refused (never verified).
+     */
+    public function testTrailingDataAfterSignatureDerIsRejected(): void
+    {
+        $sig = $this->cms()->signDetached(self::TEXT, TestPki::cert('alice'), TestPki::key('alice'), [TestPki::read('int.crt')]);
+        $part = "Content-Type: application/pkcs7-signature; name=\"smime.p7s\"\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+            . chunk_split(base64_encode($sig . 'APPENDED'), 76, "\r\n");
+        try {
+            IncomingProcessor::decodeSignaturePart($part);
+            self::fail('expected rejection');
+        } catch (\MimeShield\Exception\ValidationException $e) {
+            self::assertSame('malformed', $e->getUserLabel());
+        }
+        $ok = "Content-Transfer-Encoding: base64\r\n\r\n" . chunk_split(base64_encode($sig), 76, "\r\n");
+        self::assertSame($sig, IncomingProcessor::decodeSignaturePart($ok));
+
+        $b = 'sig-' . bin2hex(random_bytes(4));
+        $raw = self::headers()
+            . 'Content-Type: multipart/signed; protocol="application/pkcs7-signature"; micalg=sha-256; boundary="' . $b . "\"\r\n\r\n"
+            . '--' . $b . "\r\n" . self::TEXT . "\r\n"
+            . '--' . $b . "\r\n" . $part
+            . '--' . $b . "--\r\n";
+        $msg = self::message($raw);
+        $proc = $this->processor($raw);
+        $res = self::hook($proc, $msg, $msg->headers->structure);
+
+        self::assertSame('malformed', self::partStatus($proc, '0')->signatureError);
+        self::assertNull(self::partStatus($proc, '0')->signature);
+        self::assertCount(1, $res['structure']->parts, 'the signature part is never displayed');
+    }
+
+    /**
+     * Audit F-13: the displayed content is parsed from exactly the verified bytes, so a line that
+     * only starts with the boundary (no delimiter for RFC 2046) never truncates what is shown.
+     */
+    public function testDisplayedContentIsTheVerifiedBytesWithBoundaryPrefixLine(): void
+    {
+        $b = 'sig-' . bin2hex(random_bytes(4));
+        $inner = "Content-Type: text/plain; charset=us-ascii\r\n\r\nFirst line.\r\n--" . $b . "-not-a-delimiter\r\nSIGNED-DISCLAIMER-MARKER\r\n";
+        $sig = $this->cms()->signDetached($inner, TestPki::cert('alice'), TestPki::key('alice'), [TestPki::read('int.crt')]);
+        $raw = self::headers()
+            . 'Content-Type: multipart/signed; protocol="application/pkcs7-signature"; micalg=sha-256; boundary="' . $b . "\"\r\n\r\n"
+            . '--' . $b . "\r\n" . $inner . "\r\n"
+            . '--' . $b . "\r\nContent-Type: application/pkcs7-signature; name=\"smime.p7s\"\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+            . chunk_split(base64_encode($sig), 76, "\r\n")
+            . '--' . $b . "--\r\n";
+        // Roundcube's own parser matches boundary prefixes: it sees 3 parts, so the container is not
+        // recognised at all (no status) - safe
+        $proc = $this->processor($raw);
+        self::hook($proc, $msg = self::message($raw), $msg->headers->structure);
+        self::assertSame([], $proc->statuses());
+
+        // a server parser that agrees on two parts but ends part 1 at the prefix line: the structure
+        // comes from it, the bytes from BODY[TEXT]
+        $truncated = str_replace("--" . $b . "-not-a-delimiter\r\nSIGNED-DISCLAIMER-MARKER\r\n", '', $raw);
+        $msg = self::message($truncated);
+        self::assertCount(2, $msg->headers->structure->parts);
+        $proc = $this->processor($raw);
+
+        $res = self::hook($proc, $msg, $msg->headers->structure);
+
+        self::assertTrue(self::partStatus($proc, '0')->signature?->cryptoValid());
+        $shown = $res['structure']->parts[0];
+        self::assertStringContainsString('SIGNED-DISCLAIMER-MARKER', (string) $shown->body);
+        self::assertStringContainsString('-not-a-delimiter', (string) $shown->body);
+    }
+
+    /**
+     * Audit F-07: at most MAX_SIGNATURE_CHECKS signatures are verified per request; the others get
+     * an explicit status and are never shown as valid.
+     */
+    public function testSignatureVerificationsPerMessageAreBounded(): void
+    {
+        $b = 'outer-' . bin2hex(random_bytes(4));
+        $entity = $this->clearSignedEntity();
+        $n = IncomingProcessor::MAX_SIGNATURE_CHECKS + 2;
+        $raw = self::headers() . 'Content-Type: multipart/mixed; boundary="' . $b . "\"\r\n\r\n";
+        for ($i = 0; $i < $n; $i++) {
+            $raw .= '--' . $b . "\r\n" . $entity . "\r\n";
+        }
+        $raw .= '--' . $b . "--\r\n";
+        $msg = self::message($raw);
+        $proc = $this->processor($raw);
+
+        self::walk($proc, $msg);
+
+        $verified = 0;
+        $skipped = 0;
+        for ($i = 1; $i <= $n; $i++) {
+            $st = self::partStatus($proc, (string) $i);
+            if ($st->signature !== null) {
+                $verified++;
+            } elseif ($st->signatureError === 'sig_toomany') {
+                $skipped++;
+                self::assertTrue($st->partial);
+            }
+        }
+        self::assertSame(IncomingProcessor::MAX_SIGNATURE_CHECKS, $verified);
+        self::assertSame(2, $skipped);
+        $fetches = array_filter($this->calls, static fn ($c) => $c[0] === 'get_raw_body');
+        self::assertCount(IncomingProcessor::MAX_SIGNATURE_CHECKS, $fetches, 'no IMAP fetch beyond the budget');
+    }
+
+    /** The non-display path still verifies opaque CMS to extract content: share the same budget. */
+    public function testOpaqueSignatureBudgetAlsoAppliesWithoutTrustVerifier(): void
+    {
+        $entity = self::pkcs7Entity($this->opaqueSign(self::TEXT), 'application/pkcs7-mime; smime-type=signed-data');
+        $n = IncomingProcessor::MAX_SIGNATURE_CHECKS + 2;
+        $raw = self::headers() . "Content-Type: multipart/mixed; boundary=opaque-budget\r\n\r\n";
+        for ($i = 0; $i < $n; $i++) {
+            $raw .= "--opaque-budget\r\nContent-Type: message/rfc822\r\n\r\n" . self::headers() . $entity . "\r\n";
+        }
+        $raw .= "--opaque-budget--\r\n";
+        $msg = self::message($raw);
+        $proc = $this->processor($raw, verify: false);
+
+        self::walk($proc, $msg);
+
+        for ($i = 1; $i <= $n; $i++) {
+            $st = self::partStatus($proc, (string) $i);
+            self::assertNull($st->signature, 'non-display requests do not produce trust results');
+            self::assertSame($i > IncomingProcessor::MAX_SIGNATURE_CHECKS ? 'sig_toomany' : null, $st->signatureError);
+        }
+    }
+
+    /** Outer signatures cover the inner envelope bytes actually decrypted, not another parser view. */
+    public function testSignedEnvelopeUsesTheVerifiedFirstPart(): void
+    {
+        $der = $this->cms()->encrypt(self::TEXT, [TestPki::cert('alice')], CmsService::CIPHER_AES_256_CBC);
+        $raw = self::headers() . $this->clearSignedEntity(self::envelopedEntity($der));
+        $msg = self::message($raw);
+        $orig = $msg->headers->structure;
+        // Model a different cached first-part interpretation without modifying the signed bytes.
+        $orig->parts[0]->body = $this->cms()->encrypt(
+            "Content-Type: text/plain\r\n\r\nDifferent cached content.\r\n",
+            [TestPki::cert('alice')], CmsService::CIPHER_AES_256_CBC,
+        );
+        $orig->parts[0]->body_modified = true;
+        $proc = $this->processor($raw);
+
+        $res = self::hook($proc, $msg, $orig);
+
+        self::assertTrue(self::partStatus($proc, '0')->signature?->cryptoValid());
+        self::assertTrue($proc->hasDecrypted());
+        self::assertStringContainsString('SECRET-PLAINTEXT-MARKER', (string) $res['structure']->body);
+        self::assertStringNotContainsString('Different cached content.', (string) $res['structure']->body);
+        self::assertCount(0, array_filter($this->calls, static fn ($c) => $c[0] === 'get_message_part'));
+    }
+
+    /**
+     * Audit F-13: a multipart/signed nested inside content rebuilt from verified bytes is never
+     * re-read through the IMAP parser (another view of the same bytes) and never verified from it.
+     */
+    public function testNestedSignedPartInsideVerifiedContentIsNotRefetchedFromImap(): void
+    {
+        $b = 'mix-' . bin2hex(random_bytes(4));
+        $inner = 'Content-Type: multipart/mixed; boundary="' . $b . "\"\r\n\r\n"
+            . '--' . $b . "\r\nContent-Type: text/plain\r\n\r\nOuter text.\r\n"
+            . '--' . $b . "\r\n" . $this->clearSignedEntity(self::TEXT, 'bob') . "\r\n"
+            . '--' . $b . "--\r\n";
+        $raw = self::headers() . $this->clearSignedEntity($inner);
+        $msg = self::message($raw);
+        $proc = $this->processor($raw);
+
+        self::walk($proc, $msg);
+
+        self::assertTrue(self::partStatus($proc, '0')->signature?->cryptoValid());
+        $nested = self::partStatus($proc, '1.2');
+        self::assertNull($nested->signature);
+        self::assertSame('sig_notverifiable', $nested->signatureError);
+        self::assertTrue($nested->partial);
+        self::assertCount(1, array_filter($this->calls, static fn ($c) => $c[0] === 'get_raw_body'), 'only the outer signed bytes are fetched');
+    }
+
+    public function testFailedVerifiedContentRebuildCannotKeepAValidStatus(): void
+    {
+        $raw = $this->clearSignedMessage();
+        $msg = self::message($raw);
+        $msg->headers->structure->size = 0; // IMAP multipart size is not populated
+        $storage = $this->storage($raw);
+        $proc = new IncomingProcessor(self::keyService(self::USER_ALICE), $this->cms(), $this->verifier(),
+            static fn () => $storage, strlen(self::TEXT) - 1);
+
+        $res = self::hook($proc, $msg, $msg->headers->structure);
+
+        self::assertCount(1, $res['structure']->parts, 'signature bytes remain hidden on failure');
+        self::assertNull(self::partStatus($proc, '0')->signature);
+        self::assertSame('sig_notverifiable', self::partStatus($proc, '0')->signatureError);
+        self::assertNull($proc->rootSignature());
     }
 
     public function testHiddenSignaturePartIsRemovedByMessageLoadFilter(): void
@@ -515,17 +760,94 @@ final class IncomingProcessorTest extends TestCase
         self::assertSame(['2'], self::ids(array_flip($proc->hiddenParts())));
     }
 
-    public function testWithoutVerifierSignatureIsOnlyHidden(): void
+    public function testWithoutVerifierContentIsRebuiltWithoutASignatureClaim(): void
     {
         $raw = $this->clearSignedMessage();
         $msg = self::message($raw);
         $proc = $this->processor($raw, self::USER_ALICE, false);
 
-        self::hook($proc, $msg, $msg->headers->structure);
+        $res = self::hook($proc, $msg, $msg->headers->structure);
 
         self::assertSame(['2'], self::ids(array_flip($proc->hiddenParts())));
         self::assertNull(self::partStatus($proc, '0')->signature);
-        self::assertSame([], $this->calls, 'no IMAP fetch when signatures are not verified');
+        self::assertSame('stream', $res['structure']->parts[0]->encoding);
+        self::assertCount(1, array_filter($this->calls, static fn ($c) => $c[0] === 'get_raw_body'));
+        self::assertCount(0, array_filter($this->calls, static fn ($c) => $c[0] === 'get_message_part'));
+    }
+
+    /** F-13: attachment/inline resource requests use the same bytes and ids as the verified view. */
+    public function testWithoutVerifierAttachmentBodiesComeFromTheSignedEntity(): void
+    {
+        $entity = "Content-Type: multipart/mixed; boundary=related-content\r\n\r\n"
+            . "--related-content\r\nContent-Type: text/plain\r\n\r\nMessage body.\r\n"
+            . "--related-content\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename=note.txt\r\n\r\n"
+            . "Canonical attachment content.\r\n--related-content--\r\n";
+        $raw = self::headers() . $this->clearSignedEntity($entity);
+        foreach ([true, false] as $verify) {
+            // Model another IMAP parser's interpretation; the raw signed entity stays unchanged.
+            $msg = self::message($raw);
+            $attachment = $msg->headers->structure->parts[0]->parts[1];
+            $attachment->body = 'Different parser content.';
+            $attachment->body_modified = true;
+            $proc = $this->processor($raw, verify: $verify);
+
+            self::hook($proc, $msg, $msg->headers->structure);
+
+            self::assertSame('Canonical attachment content.', trim((string) $msg->get_part_content('1.2')));
+            self::assertSame($verify, self::partStatus($proc, '0')->signature !== null);
+            self::assertSame('Different parser content.', $attachment->body, 'cached objects remain untouched');
+        }
+    }
+
+    public function testWithoutVerifierSignedExtractionRemainsSizeBounded(): void
+    {
+        $raw = $this->clearSignedMessage();
+        $msg = self::message($raw);
+        $storage = $this->storage($raw);
+        $proc = new IncomingProcessor(self::keyService(self::USER_ALICE), $this->cms(), null,
+            static fn () => $storage, 1);
+
+        $res = self::hook($proc, $msg, $msg->headers->structure);
+
+        self::assertNull(self::partStatus($proc, '0')->signature);
+        self::assertSame('messagetoolarge', self::partStatus($proc, '0')->signatureError);
+        self::assertCount(1, $res['structure']->parts);
+        self::assertSame([], $this->calls, 'oversized content is refused before fetching');
+    }
+
+    public function testWithoutVerifierExtractionFailureNeverCreatesASignatureClaim(): void
+    {
+        $msg = self::message($this->clearSignedMessage());
+        $proc = new IncomingProcessor(self::keyService(self::USER_ALICE), $this->cms(), null,
+            static fn () => throw new \RuntimeException('Synthetic storage failure'), self::MAX);
+
+        $res = self::hook($proc, $msg, $msg->headers->structure);
+
+        self::assertNull(self::partStatus($proc, '0')->signature);
+        self::assertSame('internalerror', self::partStatus($proc, '0')->signatureError);
+        self::assertCount(1, $res['structure']->parts);
+    }
+
+    public function testWithoutVerifierSignedExtractionUsesTheSharedBudget(): void
+    {
+        $entity = $this->clearSignedEntity();
+        $count = IncomingProcessor::MAX_SIGNATURE_CHECKS + 1;
+        $raw = self::headers() . "Content-Type: multipart/mixed; boundary=extraction-budget\r\n\r\n";
+        for ($i = 0; $i < $count; $i++) {
+            $raw .= "--extraction-budget\r\n" . $entity . "\r\n";
+        }
+        $raw .= "--extraction-budget--\r\n";
+        $msg = self::message($raw);
+        $proc = $this->processor($raw, verify: false);
+
+        self::walk($proc, $msg);
+
+        self::assertCount(IncomingProcessor::MAX_SIGNATURE_CHECKS,
+            array_filter($this->calls, static fn ($c) => $c[0] === 'get_raw_body'));
+        foreach ($proc->statuses() as $status) {
+            self::assertNull($status->signature);
+        }
+        self::assertSame('sig_toomany', self::partStatus($proc, (string) $count)->signatureError);
     }
 
     public function testFromMismatchIsDetected(): void
@@ -908,7 +1230,10 @@ final class IncomingProcessorTest extends TestCase
 
         self::assertSame('multipart/signed', $res['mimetype']);
         self::assertSame('1', $res['structure']->mime_id);
-        self::assertSame(['1', '1.1', '1.2'], self::ids($msg->mime_parts));
+        self::assertSame(['1.1'], self::ids(array_flip(array_map(static fn ($c) => (string) $c->mime_id, $res['structure']->parts))));
+        $ids = self::ids($msg->mime_parts);
+        sort($ids);
+        self::assertSame(['1', '1.1', '1.2'], $ids);
         $st = self::partStatus($proc, '1');
         self::assertTrue($st->decryption);
         self::assertSame('aes-256-cbc', $st->cipher);

@@ -440,6 +440,22 @@ final class SafeHttpClientTest extends TestCase
         self::assertSame(0, $called);
     }
 
+    public function testExpiredDeadlinePreventsDnsLookup(): void
+    {
+        $called = 0;
+        $client = new SafeHttpClient(resolver: static function (string $h) use (&$called): array {
+            $called++;
+            return ['8.8.8.8'];
+        });
+        try {
+            $client->get('http://crl.example.test/x', 1000, hrtime(true) / 1e9 - 1.0);
+            self::fail('expired deadline accepted');
+        } catch (ValidationException $e) {
+            self::assertStringContainsString('time budget', $e->getMessage());
+        }
+        self::assertSame(0, $called);
+    }
+
     // ------------------------------------------------------------------ get() against a local server
 
     public function testLocalServerIsReachableSanityCheck(): void
@@ -587,6 +603,19 @@ final class SafeHttpClientTest extends TestCase
             self::assertStringStartsWith('transfer failed', $e->getMessage());
         }
         self::assertLessThan(2.5, microtime(true) - $t);
+    }
+
+    public function testRemainingDeadlineCapsTransferTimeout(): void
+    {
+        $client = self::proxyClient();
+        $start = hrtime(true) / 1e9;
+        try {
+            $client->get('http://crl.example.test/slow', 1000, $start + 0.05);
+            self::fail('slow response accepted despite the remaining aggregate budget');
+        } catch (ValidationException $e) {
+            self::assertStringStartsWith('transfer failed', $e->getMessage());
+        }
+        self::assertLessThan(1.0, hrtime(true) / 1e9 - $start, 'remaining budget is shorter than the normal request timeout');
     }
 
     public function testDirectConnectionPinningToPublicAddressRequiresInternet(): void

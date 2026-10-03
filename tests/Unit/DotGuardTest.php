@@ -295,4 +295,42 @@ final class DotGuardTest extends TestCase
         }
         @rmdir($dir);
     }
+
+    /**
+     * Audit F-11: padding stops as soon as the payload is safe ...
+     */
+    public function testMakeSafePadsUntilSafe(): void
+    {
+        $buf = str_repeat('a', DotGuard::CHUNK) . '.tail';
+        $pads = 0;
+        $ok = DotGuard::makeSafe(static function () use (&$buf): string {
+            return $buf;
+        }, static function () use (&$buf, &$pads): void {
+            $buf = ' ' . $buf;
+            $pads++;
+        });
+        self::assertTrue($ok);
+        self::assertSame(1, $pads);
+        self::assertSame([], DotGuard::riskyOffsets($buf));
+    }
+
+    /**
+     * ... and reports failure (the caller blocks the send) when it cannot be made safe.
+     */
+    public function testMakeSafeReportsAnUnfixablePayload(): void
+    {
+        // a run of dots longer than the number of attempts straddles the chunk border
+        $buf = str_repeat('a', DotGuard::CHUNK - 20) . str_repeat('.', 40) . "\r\n";
+        $pads = 0;
+        $ok = DotGuard::makeSafe(static function () use (&$buf): string {
+            return $buf;
+        }, static function () use (&$buf, &$pads): void {
+            $buf = ' ' . $buf;
+            $pads++;
+        });
+        self::assertFalse($ok);
+        self::assertSame(8, $pads);
+        self::assertNotSame([], DotGuard::riskyOffsets($buf));
+        self::assertTrue(DotGuard::makeSafe(static fn () => 'small', static fn () => null), 'small payloads are always safe');
+    }
 }

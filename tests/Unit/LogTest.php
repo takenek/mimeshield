@@ -224,6 +224,27 @@ final class LogTest extends TestCase
         self::assertCount(1, $this->lines);
     }
 
+    public function testUnexpectedExceptionDetailsRequireDebugLogging(): void
+    {
+        $exception = new \RuntimeException('private diagnostic detail');
+        Log::exception('settings', $exception, ['action' => 'import']);
+        self::assertSame(['ERROR settings: unexpected error exception=RuntimeException action=import'], $this->lines);
+
+        Log::setDebug(true);
+        Log::exception('settings', $exception, ['action' => 'import']);
+        self::assertSame('DEBUG settings: private diagnostic detail exception=RuntimeException action=import', $this->lines[2]);
+    }
+
+    public function testUnexpectedExceptionDebugDetailsStillUseRedaction(): void
+    {
+        Log::setDebug(true);
+        Log::exception('import', new \RuntimeException("failed\n" . TestPki::key('alice')));
+        self::assertCount(2, $this->lines);
+        self::assertStringContainsString('[PEM-REDACTED]', $this->lines[1]);
+        self::assertStringNotContainsString('BEGIN', $this->lines[1]);
+        self::assertStringNotContainsString("\n", $this->lines[1]);
+    }
+
     public function testSinkNullFallsBackWithoutCrashingCaller(): void
     {
         // with the sink removed, the line goes to Roundcube's log / error_log; redirect error_log to a temp file

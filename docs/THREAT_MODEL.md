@@ -76,12 +76,29 @@
   quoted back (decryption oracle, cf. CVE-2019-10740). The "root" decision follows the origin of a
   part through every unwrapped layer: content unwrapped from a forwarded opaque-signed message stays
   "forwarded" (partial signature, nested ciphertext not decrypted — audit MS-02). Replies to encrypted mail default to
-  encryption and warn when switched off.
+  encryption and warn when switched off; `mimeshield_require_encrypt_for_decrypted` makes the server
+  refuse to send or save them unencrypted (audit F-09); their decrypted body is excluded from
+  Roundcube's unencrypted localStorage copy, which could otherwise be restored into a new compose
+  without the server-side marker. Replying to a crafted message from a sender
+  whose certificate is trusted still encrypts quoted content for that sender (inherent to S/MIME
+  replies; users should review quoted content).
+* Signature scope (audit F-01/F-13): a `multipart/signed` container is S/MIME only when both the
+  `protocol` parameter and the second part name a signature; the signature part must be exactly one
+  CMS element; only the first part is displayed, rebuilt from the bytes that were verified, so content
+  outside the signed range never appears under a signature status and the server's MIME parser cannot
+  change what is shown. The verified first part is rebuilt before decrypting a signed envelope;
+  rebuilding failure clears the success status before any fallback display.
+  Downloads, inline resources and compose use the same bounded raw first-part extraction, even
+  without trust evaluation, so the IMAP parser cannot substitute the body of a signed attachment.
+* Status spoofing (audit F-10): besides the bar above the content, a compact indicator in the header
+  area (outside the content frame) shows the S/MIME state of every message, including "not signed".
 * Partial signatures (signed part inside an unsigned multipart, e.g. list footers) are shown as
   "only part of this message is signed".
 * "Signature valid" is never shown as "sender trusted": chain, sender address, time validity, key
   usage and revocation are evaluated and displayed separately. From/Sender spoofing with a valid
   certificate for another address is shown in red ("certificate does not match the sender").
+  When revocation is not checked, the headline and header indicator carry an explicit warning,
+  including for an otherwise valid signature (I-01).
 * Weak/unsupported algorithms: MD5 rejected, SHA-1 warned, RC2/DES not decrypted unless the admin
   enables the OpenSSL legacy provider. A signature whose digest algorithm cannot be determined by the
   plugin's parser is never shown as fully valid ("algorithm could not be checked", audit MS-08).
@@ -100,7 +117,12 @@
 * Purpose restrictions of CAs: for RSA recipients OpenSSL's S/MIME purpose checks the EKU of every
   CA; for EC (keyAgreement) recipients, which need OpenSSL's "any" purpose, the plugin checks that
   every CA on the path allows e-mail protection (audit MS-03). The system TLS CA bundle is not a
-  trust anchor by default (`mimeshield_use_system_ca = false`, audit MS-07).
+  trust anchor by default (`mimeshield_use_system_ca = false`, audit MS-07), and OpenSSL's default CA
+  directory is never part of the verification store: a chain is trusted only when it ends in a
+  configured anchor and OpenSSL verified exactly that path (audit F-02).
+* A certificate saved from a message whose chain is not trusted becomes usable for encryption only
+  with `mimeshield_encrypt_untrusted = 'warn'`, and then only after a confirmation that shows its
+  fingerprint (audit F-15).
 
 ### T7 SSRF via CRL / OCSP / AIA URLs
 * Revocation checking is **off by default**; AIA/OCSP URLs are never fetched.
@@ -117,6 +139,20 @@
   issuer for recipient CRL checks is resolved like for signatures (stored chain, configured
   intermediates, anchors); an undetermined status is shown or blocks (`mimeshield_revocation_unknown`,
   MS-04).
+* Every certificate of the accepted path below the anchor is checked, each against the CRL of its
+  issuer on that path - a revoked intermediate CA revokes the path, and a copy of an issuer without
+  cRLSign shipped in a message cannot turn "revoked" into "unknown" (audit F-04/F-05). With checking
+  enabled, a certificate without an http(s) CRL DP is "unknown", never fully valid (F-06).
+* An unavailable distribution point is not requested again for 5 minutes; at most 8 CRLs are fetched
+  per request within a shared 10-second transfer deadline (F-14). Transport failures are cached per
+  URL; signature/issuer validation failures per URL and issuer, so one issuer cannot suppress another.
+  Exhausting the current request's deadline does not mark a URL as unavailable for later requests.
+  An in-progress synchronous DNS lookup needs an external resolver/PHP-FPM lifetime bound.
+  The on-disk cache is used only when its base and `crl/` child are private directories (no symlinks,
+  no group/other access, PHP ownership where checkable). An unsafe directory disables disk caching
+  without altering UNKNOWN handling; it is never repaired or trusted automatically.
+* The inner and outer CRL signature AlgorithmIdentifier values must agree (I-09). SHA-1 CRL
+  signatures remain accepted for compatibility; disabling them is a separate policy decision.
 * When `mimeshield_revocation_proxy` is set, pinning and the connected-address check are performed
   by the proxy, not by the plugin: the proxy must enforce the egress policy (or use
   `mimeshield_revocation_allow_hosts`).
@@ -146,21 +182,39 @@
   visibly). The plugin never unchecks encryption on its own.
 * Drafts of messages marked for encryption are stored encrypted to the sender (or refused) while
   `mimeshield_encrypt_drafts = true` (default); with `false` they are stored on the IMAP server in
-  plaintext.
+  plaintext, except that `mimeshield_require_encrypt_for_decrypted = true` refuses such a draft
+  when the compose holds decrypted content.
+* Every compose quoting decrypted content displays a warning that sender authenticity was not
+  established in compose. Server-side enforcement, when enabled, also covers schema-unavailable
+  requests and active compose sessions beyond the bounded recent-compose lookup.
 
 ### T11 Log leakage
 * The logger redacts PEM blocks, long base64 runs and binary data, strips control characters (log
   injection), truncates values; passwords, keys, plaintext and full PKCS#12 data are never passed to
-  it. Errors shown to users are generic labels; OpenSSL details go to the admin log only.
+  it. Errors shown to users are generic labels. Unexpected exceptions log their class normally;
+  their sanitised messages require explicit debug logging and may still contain personal data.
+  Certificate diagnostics identify fingerprints instead of subject names.
 
 ### T12 Resource exhaustion
 * KDF cost parameters in uploaded PKCS#12 / PKCS#8 files are limited before OpenSSL derives keys
   (otherwise a 4 KB file with 2^31 iterations keeps a worker busy for minutes). Encrypted PKCS#12
   layers are decrypted with the entered password and inspected as well, within one total budget
-  (audit MS-05; the iteration count of a layer is validated before its key is derived); key imports are limited to 10 per session within 5 minutes.
+  (audit MS-05; the iteration count of a layer is validated before its key is derived). The file is
+  inspected along the PFX schema on the joined BER content - the bytes OpenSSL reads - and anything
+  that cannot be inspected is refused (audit F-03), including a key encryption scheme with unknown
+  cost parameters and a PBKDF2 key length above 64 bytes; the PHP key derivation of the inspection is
+  bounded by its real work (F-08). Key imports are limited to 10 within 5 minutes per session and
+  per user account (F-08), with atomic reservations in the existing database before cryptography.
+  A missing user or failed quota write refuses the attempt; concurrent sessions share the quota.
 * Recipient status checks in compose are limited per session (30 per minute); the total memory of
   separate Bcc envelopes is bounded (`mimeshield_max_total_envelope_bytes`, audit MS-10/MS-11).
-  Limits per user or IP across sessions belong to the reverse proxy / WAF.
+  At most 8 signed entities are extracted or verified per request, also for clear-signed and opaque
+  content in compose/download (F-07).
+  Limits per IP and request time limits
+  (native OpenSSL work ignores `max_execution_time`) belong to the reverse proxy / WAF / PHP-FPM.
+* Certificates embedded in received signatures reach OpenSSL before any plugin limit: an OpenSSL
+  library affected by CVE-2026-35189 can be made to allocate excessive memory by a crafted message
+  (F-16; `diag` warns, the fix is an OpenSSL update).
 * Upload size limits checked before reading; limits on keys/certificates per user, recipients per
   message, message size for S/MIME processing, ASN.1 nodes/depth, certificates per file, CRL size.
 

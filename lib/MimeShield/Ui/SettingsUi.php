@@ -30,7 +30,7 @@ use MimeShield\Trust\ChainValidator;
  */
 final class SettingsUi
 {
-    /** key import attempts per session within KEY_IMPORT_WINDOW seconds */
+    /** key import attempts per session and per user within KEY_IMPORT_WINDOW seconds */
     private const KEY_IMPORTS_PER_WINDOW = 10;
     private const KEY_IMPORT_WINDOW = 300;
 
@@ -76,7 +76,7 @@ final class SettingsUi
             Log::info('settings', $action . ' failed: ' . $e->getMessage());
             $this->fail($e->getUserLabel(), $e->getVars());
         } catch (\Throwable $e) {
-            Log::error('settings', $action . ' unexpected error: ' . get_class($e) . ': ' . $e->getMessage());
+            Log::exception('settings', $e, ['action' => $action]);
             $this->fail('internalerror');
         }
     }
@@ -291,8 +291,10 @@ final class SettingsUi
         $this->plugin->requirePostToken();
         $password = (string) \rcube_utils::get_input_string('_password', \rcube_utils::INPUT_POST, true);
         unset($_POST['_password'], $_REQUEST['_password']);
-        // each attempt may run password based key derivation: bound the frequency per session (MS-05/MS-11)
-        if (!RateLimiter::allow($_SESSION, 'mimeshield_rl_keyimport', self::KEY_IMPORTS_PER_WINDOW, self::KEY_IMPORT_WINDOW)) {
+        // each attempt may run password based key derivation: bound the frequency per session and per
+        // user account across sessions (MS-05/MS-11, F-08)
+        if (!RateLimiter::allow($_SESSION, 'mimeshield_rl_keyimport', self::KEY_IMPORTS_PER_WINDOW, self::KEY_IMPORT_WINDOW)
+            || !RateLimiter::allowForUser($this->plugin->services()->db(), $this->plugin->services()->userId(), 'keyimport', self::KEY_IMPORTS_PER_WINDOW, self::KEY_IMPORT_WINDOW)) {
             KeyVault::wipe($password);
             Log::info('import', 'key import attempts throttled');
             $this->rc->output->show_message('mimeshield.ratelimited', 'error');
@@ -340,11 +342,16 @@ final class SettingsUi
         $posted = array_map('intval', (array) \rcube_utils::get_input_value('_identities', \rcube_utils::INPUT_POST));
         $keys = $this->plugin->services()->keys();
         $repo = $keys->repository();
+        $db = $this->plugin->services()->db();
+        $db->raw()->set_table_dsn('mimeshield_keys', 'w');
+        $db->raw()->set_table_dsn('mimeshield_bindings', 'w');
         $rec = $repo->get($keyId);
         if ($rec === null) {
             $this->fail('notfound');
         }
         $current = $repo->bindings();
+        $bind = [];
+        $unbind = [];
         foreach ((array) $this->rc->user->list_identities() as $ident) {
             $iid = (int) $ident['identity_id'];
             $want = in_array($iid, $posted, true);
@@ -353,11 +360,20 @@ final class SettingsUi
                 if (!$keys->isUsableForSigning($rec, (string) $ident['email'])) {
                     $this->fail('bind_wrongaddress');
                 }
-                $repo->bind($iid, $keyId);
+                $bind[] = $iid;
             } elseif (!$want && ($current[$iid] ?? null) === $keyId) {
-                $repo->unbind($iid);
+                $unbind[] = $iid;
             }
         }
+        // Validate every identity before beginning any write; then commit the selection as one unit.
+        $db->transaction(static function () use ($repo, $keyId, $bind, $unbind): void {
+            foreach ($bind as $iid) {
+                $repo->bind($iid, $keyId);
+            }
+            foreach ($unbind as $iid) {
+                $repo->unbind($iid);
+            }
+        });
         // the list page is reloaded: hand the confirmation over to it (otherwise it disappears with the reload)
         $this->flash([['bindingssaved', 'confirmation']]);
         $this->rc->output->command('plugin.mimeshield_list_reload', ['id' => $keyId]);
@@ -429,16 +445,18 @@ final class SettingsUi
     private function certImport(): void
     {
         if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
-            unset($_SESSION['mimeshield_pending_cert']);
             $this->importForm('cert');
             return;
         }
         $this->rejectOversizedPost('cert');
         $this->plugin->requirePostToken();
         $confirmed = (bool) \rcube_utils::get_input_value('_confirm', \rcube_utils::INPUT_POST);
-        if ($confirmed && !empty($_SESSION['mimeshield_pending_cert']) && is_string($_SESSION['mimeshield_pending_cert'])) {
-            // public certificate data kept in the session between upload and confirmation
-            $data = base64_decode($_SESSION['mimeshield_pending_cert'], true) ?: '';
+        if ($confirmed) {
+            $data = self::takePendingCertificate((string) \rcube_utils::get_input_string('_pending_digest', \rcube_utils::INPUT_POST));
+            if ($data === null) {
+                // Never treat a new upload or another tab's pending file as already confirmed.
+                $this->fail('savecertrefused');
+            }
         } else {
             try {
                 $data = $this->uploadedFile($this->plugin->config()->int('mimeshield_max_cert_upload', 1024, 1048576), ['cer', 'crt', 'pem', 'der', 'p7b', 'p7c']);
@@ -460,7 +478,7 @@ final class SettingsUi
         }
         if ($result['confirm'] !== []) {
             $_SESSION['mimeshield_pending_cert'] = base64_encode($data);
-            $this->confirmReplaceForm($result['confirm']);
+            $this->confirmReplaceForm($result['confirm'], hash('sha256', $data));
             return;
         }
         if ($result['imported'] === [] && $result['updated'] !== []) {
@@ -486,7 +504,7 @@ final class SettingsUi
     /**
      * @param list<array{email: string, old: list<string>, new: string}> $changes
      */
-    private function confirmReplaceForm(array $changes): void
+    private function confirmReplaceForm(array $changes, string $pendingDigest): void
     {
         $items = '';
         foreach ($changes as $ch) {
@@ -498,8 +516,21 @@ final class SettingsUi
             \html::div('boxwarning mimeshield-warning', \rcube::Q($this->plugin->text('fingerprintchanged')))
             . \html::tag('ul', [], $items)
             . (new \html_hiddenfield(['name' => '_confirm', 'value' => '1']))->show()
+            . (new \html_hiddenfield(['name' => '_pending_digest', 'value' => $pendingDigest]))->show()
             . \html::p('formbuttons', \html::tag('button', ['type' => 'submit', 'class' => 'button mainaction'], \rcube::Q($this->plugin->text('replacebutton')))));
         $this->sendFrame($this->plugin->text('replacetitle'), $form);
+    }
+
+    /** Consume only the public file whose fingerprint-change dialog was confirmed. */
+    private static function takePendingCertificate(string $digest): ?string
+    {
+        $pending = $_SESSION['mimeshield_pending_cert'] ?? null;
+        $data = is_string($pending) ? base64_decode($pending, true) : false;
+        if ($data === false || $data === '' || !hash_equals(hash('sha256', $data), $digest)) {
+            return null;
+        }
+        unset($_SESSION['mimeshield_pending_cert']);
+        return $data;
     }
 
     private function certDelete(): void

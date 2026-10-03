@@ -217,3 +217,147 @@ PHP 8.1.34 with the official 1.7.4 release library (PHPUnit 10.5) 1037 / 0 / 1; 
 browser UI suite and the full E2E matrix were not re-run. Before the fix, the same synthetic layer
 structures made the inspection loop without bound (PKCS#12 PBE) or end with an uncaught `ValueError`
 (PBES2).
+
+## 9. Security remediation run (final security report, 2026-10-03, IDs F-xx)
+
+Environment of this run: Debian 13, PHP 8.4.26 CLI (Debian packages), OpenSSL 3.5.7 (CLI and
+library), PHPUnit 11.5.56, Roundcube 1.7.4 library from Composer (`roundcube/roundcubemail`, pulled in
+by `roundcube/plugin-installer`) used as `MIMESHIELD_RC`.
+
+| Suite | Result |
+|---|---|
+| PHPUnit with `MIMESHIELD_RC` (unit + integration) | Tests: 1102, Assertions: 11958, Failures: 0, Skipped: 1 (needs Internet) |
+| PHPUnit without `MIMESHIELD_RC` (unit only) | Tests: 1102, Failures: 0, Skipped: 151 (integration tests need Roundcube) |
+| `php -l` (PHP 8.4) | all PHP and localization files, 0 errors |
+| `node --check js/mimeshield.js` | OK |
+
+**Not run in this pass:** PHP 8.1/8.2/8.3/8.5, PHPStan, PHP-CS-Fixer (not installed), E2E and the
+E2E matrix (need Dovecot, SMTP sink, real Roundcube instances), browser UI tests (Chromium), interop
+(NSS, gpgsm). They must be run before a release, in particular the browser suite for the header
+indicator (F-10) and the compose dialog (F-09, F-15).
+
+New or changed regression tests:
+`IncomingProcessorTest::testContainerWithNonSignatureSecondPartIsNotTreatedAsSmime`,
+`::testContainerWithoutProtocolParameterIsNotTreatedAsSmime`, `::testTrailingDataAfterSignatureDerIsRejected`,
+`::testClearSignedTopLevelIsVerifiedAndSignaturePartHidden` (changed: only the verified first part is
+displayed) (F-01); `::testDisplayedContentIsTheVerifiedBytesWithBoundaryPrefixLine` (F-13);
+`::testSignatureVerificationsPerMessageAreBounded` (F-07);
+`RevocationPathTest` (new, throw-away PKI with CRL DPs on every level):
+`::testCaInTheOpenSslDefaultDirectoryIsNeverTrusted`, `::testNonEmptyIsolationDirectoryFailsClosed`
+(F-02, also closes INF note I-16), `::testWholePathGoodIsGood`, `::testRevokedIntermediateRevokesTheLeaf`,
+`::testIntermediateWithoutUsableCrlIsUnknownNotGood`, `::testCaOnlyCrlCoversCasButNotEndEntities`,
+`::testEndEntityOnlyCrlNeverCoversACa` (F-04), `::testShippedIssuerCopyWithoutCrlSignNeverHidesTheRevocation`,
+`::testIssuerWithoutCrlSignIsReplacedOnlyByAnAdministratorCertificate`,
+`::testFindIssuerPrefersAdministratorCertificatesThatMaySignCrls` (F-05);
+`RevocationCheckerTest::testCheckWithoutHttpDistributionPointIsUnknown` (F-06, replaces
+`…IsNotChecked`), `::testUnreachableCrlIsNotRequestedAgainWithinTheNegativeTtl`, `::testFetchBudgetPerRequest`,
+`::testCacheDirectoryIsCreatedPrivately` (changed) (F-14);
+`SignatureVerifierTest::testGoodSignerWithUncheckableIntermediateIsUnknown` (replaces
+`testGoodSignerFromCachedCrl`), `::testExpiredChainIsStillCheckedForRevocation` (changed),
+`OutgoingPipelineTest::testRevokedRecipientImportedWithoutChainIsBlocked` (changed: the TEST
+intermediate has no CRL DP, so the path is "unknown") (F-04/F-06);
+`AuditRegressionTest::testSegmentedBerAuthSafeIsInspectedOnTheJoinedContent`,
+`::testUnparsableAuthSafeContentIsRefused` (F-03), `::testPhpKeyDerivationWorkIsBounded` (F-08);
+`RateLimiterTest::testPersistentLimitIsSharedAcrossSessions` (historical Stage 5 mock, replaced by
+`AccountRateLimiterTest` during the second verification pass below) (F-08); `ComposeDecryptedTest` (F-09);
+`MessageHeaderBadgeTest` (F-10); `DotGuardTest::testMakeSafePadsUntilSafe`,
+`::testMakeSafeReportsAnUnfixablePayload` (F-11); `CliKeygenTest::testAppendRefusesAnEmptyKeyFile`,
+`::testConcurrentAppendsAreSerialisedAndKeepEveryKey` (F-12);
+`OutgoingPipelineTest::testUntrustedCertificateFromMessageNeedsConfirmationUnderWarnPolicy`,
+`::testUntrustedCertificateFromMessageUnderBlockPolicyIsStoredButNeverUsable` (F-15);
+`VerificationResultTest::testNotCheckedIsOkOnlyWhenCheckingIsDisabled` (F-06),
+`::testMultipleSignersAreAWarning` (I-12); `MessageHeaderBadgeTest::testOutdatedCipherIsAWarning` (I-11).
+The `diag` warnings for I-03/I-08 and the "save sender certificate" limit (I-17) are covered by
+`php -l` only (no automated test in this run).
+The F-03 and F-08 tests were also run against the code before the fix and failed there.
+
+**Verification pass (same environment):** PHPUnit with `MIMESHIELD_RC`: Tests: 1106, Assertions:
+11996, Failures: 0, Skipped: 1 (needs Internet); without `MIMESHIELD_RC`: Tests: 1106, Skipped: 155.
+Added regression tests that run the real plugin hooks instead of copies of their code:
+`OutgoingPipelineTest::testMessageBeforeSendHookBlocksAPayloadThatCannotBeMadeTransportSafe` and the
+real `mimeshield::message_before_send` call in
+`::testLargeClearSignedMessageWithDotsSurvivesNetSmtpChunkingWithDotGuard` (F-11; the delivery
+emulation now uses `DotGuard::makeSafe()` like the hook); `DecryptedReplyPolicyTest` runs
+`mimeshield::message_ready` with `mimeshield_require_encrypt_for_decrypted` (send and draft refused for a
+compose holding decrypted content, other composes and the default `false` unaffected) (F-09). Both
+new tests were checked to fail when the respective check in `mimeshield.php` is disabled.
+
+**Second independent verification pass (2026-10-03):** the final unchanged code/test snapshot passed
+PHPUnit **1138 tests / 12226 assertions / 0 failures / 0 errors / 1 skipped** on PHP 8.4.26,
+OpenSSL 3.5.7 and the existing Roundcube 1.7.4 libraries. The skipped test requires a direct
+connection to a public Internet address; it was not enabled. A temporary Roundcube directory links
+to the already installed library and Composer autoloader; no dependencies were installed.
+PHP syntax checks passed for 93 source/test/config/localisation files, `node --check` passed,
+and Python AST parsing passed for the edited E2E/UI scripts. E2E, browser rendering, interop,
+PHPStan/PHP-CS-Fixer and the other PHP/database versions were not run.
+
+Additional regression coverage:
+
+- `IncomingProcessorTest`: signed/enveloped data is rebuilt from verified bytes before unwrap;
+  rebuild failure clears success; opaque verification without a trust verifier consumes the budget.
+- `RevocationPathTest`: all RSA-sign, RSA-encrypt and EC-encrypt cases first demonstrate native
+  default-directory trust and then rejection with the isolated CA locations.
+- `AuditRegressionTest`: ordinary-cost segmented BER (definite/indefinite) is inspected and imported
+  by the real native PKCS#12 parser, with the expected public certificate.
+- `AccountRateLimiterTest`: committed quota across connections, account isolation, failed-write
+  rollback, clock rollback and two concurrent processes competing for the final reservation.
+- `ComposeWarningTest`, `ComposeDecryptedTest`, `DecryptedReplyPolicyTest`: warning before send,
+  retained protection for active compose sessions, send/draft rejection with missing schema.
+- `RevocationCheckerTest`, `SafeHttpClientTest`: issuer-specific failure isolation, shared transfer
+  deadline, remaining cURL timeout, DNS deadline checks and valid cached data after budget expiry.
+- `SettingsActionsTest`: absent/stale/replayed confirmation, GET preservation, binding success,
+  validation before writes, transaction-start failure and actual SQLite rollback after a write error.
+- `CliKeygenTest`: failed read and short write followed by failure preserve the original key file.
+- `LogTest`, `MessageSaveCertLimitTest`, `MessageHeaderBadgeTest`: exception details only in debug,
+  rate-limit gate before storage, explicit warning when revocation has not been checked.
+
+Third verification pass (2026-10-03) additions: `DecryptedReplyPolicyTest` (draft refused with
+`mimeshield_encrypt_drafts = false`), `ComposeWarningTest` (no localStorage copy of a decrypted
+compose), `IncomingProcessorTest` (a `multipart/signed` nested in verified content is not re-read
+through IMAP), `RevocationCheckerTest` (no negative-cache marker for a budget-limited failure;
+outdated CRL negatively cached), `KeyImporterTest` (uninspectable encrypted PKCS#8 PEM refused),
+`MessageHeaderBadgeTest` (non-AES content cipher warns). Each new test was checked to fail without
+its fix where the fix is a behaviour change.
+
+The E2E/UI expectations now include the revocation-disabled warning and decrypted-compose warning;
+syntax validation is not evidence that those browser flows passed. Before release, run the existing
+reference-stack matrix, especially the new transactional paths on MySQL/MariaDB and PostgreSQL.
+The synchronous DNS call and native OpenSSL work still require resolver/PHP-FPM lifetime limits.
+
+**Fourth verification pass (2026-10-03):** PHP 8.4.26, OpenSSL 3.5.7, PHPUnit 11.5.56,
+the existing Roundcube 1.7.4 libraries and SQLite. The post-change suite passed **1147 tests /
+11555 assertions / 0 failures / 0 errors / 1 skipped** using
+`MIMESHIELD_RC=/tmp/mimeshield-stage6-02-rc vendor/bin/phpunit --filter '^(?!.*::testFuzz)'`.
+The temporary Roundcube directory links to the existing local installation; substitute its path
+when reproducing the run. Nine fuzzing data sets were explicitly excluded by the passive
+verification scope. The one skipped test needs direct Internet access. No dependencies were
+installed and no external service was contacted.
+
+- `IncomingProcessorTest` now checks that compose/download rebuild clear-signed content and
+  attachments with the same parser as the message view, without a signature claim. Size, failed
+  extraction and the shared eight-entity budget are covered.
+- `RevocationCheckerTest` checks both the cache base and `crl/` directory for unsafe permissions,
+  foreign ownership and symlinks. Neither a cached CRL nor a failure marker in an unsafe directory
+  is trusted; directory permissions are left unchanged.
+
+E2E/browser rendering, the PHP/database matrix, interop and PHPStan/PHP-CS-Fixer were not run in
+this pass. Local passing tests do not replace those release checks.
+
+**Fifth verification pass (2026-10-03):** same local stack (PHP 8.4.26, OpenSSL 3.5.7,
+PHPUnit 11.5.56, Roundcube 1.7.4 libraries, SQLite). Before any change the suite gave the
+fourth-pass result (1147 / 11555 / 1 skipped, fuzzing data sets excluded). After the changes:
+**1150 tests / 11588 assertions / 0 failures / 0 errors / 1 skipped** with the same
+`--filter '^(?!.*::testFuzz)'`. One earlier run of this pass also included the nine local fuzzing
+data sets (1156 tests / 12404 assertions, all passing); they test only the plugin's own parser on
+generated input and contact nothing.
+
+- `AuditRegressionTest::testUninspectableKeyEncryptionSchemesAreRefused`: PBES1 with MD2 counts its
+  iterations; an unknown scheme, PBES2 with an unknown key derivation function and a PBKDF2 key
+  length above 64 bytes are refused; ordinary PBES2/PBKDF2 still passes.
+- `AuditRegressionTest::testUnknownSchemeInPkcs12KeyBagIsNotPassedToOpenSsl`: a shrouded key bag
+  with an unknown scheme gives `p12legacy` instead of reaching `openssl_pkcs12_read()`.
+- `OutgoingPipelineTest::testMainDeliveryFailureAfterBccEnvelopesIsReported`: runs the real
+  `message_before_send` and `message_send_error` hooks with a stub SMTP client.
+
+Each new test was checked to fail without its fix. E2E/browser rendering, the PHP/database matrix,
+interop and PHPStan/PHP-CS-Fixer were not run in this pass.

@@ -403,6 +403,15 @@ final class RevocationCheckerTest extends TestCase
         self::checker()->evaluate($crl, TestPki::cert('alice'), TestPki::cert('int'), time());
     }
 
+    public function testInnerAndOuterSignatureAlgorithmsMustMatch(): void
+    {
+        // The signature remains valid for the outer SHA-256 algorithm; the signed algorithm field
+        // must independently agree with it (audit I-09).
+        $crl = self::craft(['innerSigOid' => '1.2.840.113549.1.1.12']);
+        $this->expectExceptionMessage('CRL signature algorithms differ');
+        self::checker()->evaluate($crl, TestPki::cert('alice'), TestPki::cert('int'), time());
+    }
+
     /**
      * @return iterable<string, array{0: string}>
      */
@@ -630,7 +639,11 @@ final class RevocationCheckerTest extends TestCase
         self::assertSame(0, $calls);
     }
 
-    public function testCheckWithoutHttpDistributionPointIsNotChecked(): void
+    /**
+     * Audit F-06: with checking enabled, a certificate without an http(s) CRL DP has an undetermined
+     * status (subject to the revocation_unknown policy), never "not checked".
+     */
+    public function testCheckWithoutHttpDistributionPointIsUnknown(): void
     {
         // carol has no CRL DP; the intermediate has none either
         $c = new RevocationChecker(RevocationChecker::MODE_CRL, self::failingHttp($calls), '');
@@ -638,7 +651,7 @@ final class RevocationCheckerTest extends TestCase
             $cert = TestPki::cert($name);
             self::assertSame([], array_filter($cert->crlUrls, static fn ($u) => str_starts_with(strtolower($u), 'http')), $name);
             $r = $c->check($cert, TestPki::cert($name === 'int' ? 'root' : 'int'));
-            self::assertSame(RevocationResult::NOT_CHECKED, $r->status);
+            self::assertSame(RevocationResult::UNKNOWN, $r->status);
             self::assertSame('nocrldp', $r->reason);
         }
         self::assertSame(0, $calls);
@@ -755,7 +768,222 @@ final class RevocationCheckerTest extends TestCase
         $c->check(TestPki::cert('alice'), TestPki::cert('int'), time());
         self::assertDirectoryExists($cache . '/crl');
         self::assertSame(0700, fileperms($cache . '/crl') & 0777);
-        self::assertSame(['.', '..'], scandir($cache . '/crl'), 'nothing cached after a failed fetch');
+        // no CRL cached after a failed fetch, only the (private) negative-cache marker (audit F-14)
+        $files = array_values(array_diff(scandir($cache . '/crl') ?: [], ['.', '..']));
+        self::assertSame([hash('sha256', self::URL) . '.fail'], $files);
+        self::assertSame(0600, fileperms($cache . '/crl/' . $files[0]) & 0777);
+    }
+
+    /** @return iterable<string, array{0: string}> */
+    public static function cacheDirectories(): iterable
+    {
+        yield 'cache parent' => [''];
+        yield 'CRL directory' => ['/crl'];
+    }
+
+    #[DataProvider('cacheDirectories')]
+    public function testNonPrivateCacheIsNeitherReadNorWritten(string $suffix): void
+    {
+        $cache = $this->cacheWith(TestPki::read('int.crl'));
+        chmod($cache . $suffix, 0777);
+        $c = new RevocationChecker(RevocationChecker::MODE_CRL, self::refusingHttp($calls), $cache);
+
+        self::assertSame(RevocationResult::UNKNOWN, $c->check(TestPki::cert('revoked'), TestPki::cert('int'))->status);
+        self::assertSame(1, $calls, 'an unsafe cached CRL must not replace a network check');
+        self::assertSame([basename(self::cacheFile($cache))], array_values(array_diff(scandir($cache . '/crl') ?: [], ['.', '..'])),
+            'no failure marker is written into the unsafe cache');
+        self::assertSame(0777, fileperms($cache . $suffix) & 0777, 'existing permissions are never silently repaired');
+        self::assertStringContainsString('CRL disk cache disabled: unsafe directory', implode("\n", $GLOBALS['mimeshield_test_log']));
+    }
+
+    #[DataProvider('cacheDirectories')]
+    public function testNonPrivateNegativeCacheCannotSuppressAFreshCrl(string $suffix): void
+    {
+        $cache = TestPki::tempDir();
+        $this->temp[] = $cache;
+        mkdir($cache . '/crl', 0700);
+        $marker = $cache . '/crl/' . hash('sha256', self::URL) . '.fail';
+        file_put_contents($marker, '');
+        chmod($cache . $suffix, 0777);
+        self::serve('der');
+        $c = new RevocationChecker(RevocationChecker::MODE_CRL, self::proxyHttp(), $cache);
+
+        self::assertSame(RevocationResult::REVOKED, $c->check(TestPki::cert('revoked'), TestPki::cert('int'))->status);
+        self::assertSame([self::URL], self::requests(), 'an unsafe failure marker must not suppress fresh revocation evidence');
+        self::assertFileDoesNotExist(self::cacheFile($cache), 'fresh CRL is kept only in memory');
+        self::assertFileExists($marker, 'the unsafe directory is left untouched');
+    }
+
+    #[DataProvider('cacheDirectories')]
+    public function testCacheOwnedByAnotherUserIsIgnored(string $suffix): void
+    {
+        if (!function_exists('posix_geteuid') || posix_geteuid() !== 0) {
+            self::markTestSkipped('changing directory ownership requires root');
+        }
+        $cache = $this->cacheWith(TestPki::read('int.crl'));
+        $path = $cache . $suffix;
+        self::assertTrue(chown($path, 65534));
+        try {
+            $c = new RevocationChecker(RevocationChecker::MODE_CRL, self::refusingHttp($calls), $cache);
+            self::assertSame(RevocationResult::UNKNOWN, $c->check(TestPki::cert('revoked'), TestPki::cert('int'))->status);
+            self::assertSame(1, $calls);
+            self::assertStringContainsString('CRL disk cache disabled: unsafe directory', implode("\n", $GLOBALS['mimeshield_test_log']));
+        } finally {
+            chown($path, posix_geteuid());
+        }
+    }
+
+    #[DataProvider('cacheDirectories')]
+    public function testSymlinkedCacheDirectoryIsIgnored(string $suffix): void
+    {
+        $cache = $this->cacheWith(TestPki::read('int.crl'));
+        if ($suffix === '') {
+            $outer = TestPki::tempDir();
+            $this->temp[] = $outer;
+            symlink($cache, $outer . '/linked');
+            $cache = $outer . '/linked';
+        } else {
+            rename($cache . '/crl', $cache . '/actual-crl');
+            symlink($cache . '/actual-crl', $cache . '/crl');
+        }
+        $c = new RevocationChecker(RevocationChecker::MODE_CRL, self::refusingHttp($calls), $cache);
+
+        self::assertSame(RevocationResult::UNKNOWN, $c->check(TestPki::cert('revoked'), TestPki::cert('int'))->status);
+        self::assertSame(1, $calls, 'a symlinked directory cannot supply cached revocation evidence');
+        self::assertSame([basename(self::cacheFile($cache))], array_values(array_diff(scandir($cache . '/crl') ?: [], ['.', '..'])),
+            'the symlink target receives no failure marker');
+    }
+
+    /**
+     * Audit F-14: an unreachable distribution point is not requested again for NEGATIVE_TTL seconds
+     * (within the request and, through the marker file, across requests).
+     */
+    public function testUnreachableCrlIsNotRequestedAgainWithinTheNegativeTtl(): void
+    {
+        $cache = TestPki::tempDir();
+        $this->temp[] = $cache;
+        $now = time();
+        $c = new RevocationChecker(RevocationChecker::MODE_CRL, self::refusingHttp($calls), $cache);
+        self::assertSame(RevocationResult::UNKNOWN, $c->check(TestPki::cert('alice'), TestPki::cert('int'), $now)->status);
+        self::assertSame(RevocationResult::UNKNOWN, $c->check(TestPki::cert('bob'), TestPki::cert('int'), $now)->status);
+        self::assertSame(1, $calls, 'same request');
+
+        $next = new RevocationChecker(RevocationChecker::MODE_CRL, self::refusingHttp($calls2), $cache);
+        self::assertSame(RevocationResult::UNKNOWN, $next->check(TestPki::cert('alice'), TestPki::cert('int'), $now + 10)->status);
+        self::assertSame(0, $calls2, 'next request within the negative TTL');
+        self::assertStringContainsString('CRL recently unavailable', implode("\n", $GLOBALS['mimeshield_test_log']));
+
+        $later = new RevocationChecker(RevocationChecker::MODE_CRL, self::refusingHttp($calls3), $cache);
+        $later->check(TestPki::cert('alice'), TestPki::cert('int'), $now + RevocationChecker::NEGATIVE_TTL + 1);
+        self::assertSame(1, $calls3, 'retried after the negative TTL');
+    }
+
+    /**
+     * Audit F-14: network fetches per request are bounded.
+     */
+    public function testFetchBudgetPerRequest(): void
+    {
+        $c = new RevocationChecker(RevocationChecker::MODE_CRL, self::refusingHttp($calls), '', 10485760, 86400, 2, 0);
+        $r = $c->check(TestPki::cert('alice'), TestPki::cert('int'), time());
+        self::assertSame(RevocationResult::UNKNOWN, $r->status);
+        self::assertSame(0, $calls);
+        self::assertStringContainsString('fetch budget', implode("\n", $GLOBALS['mimeshield_test_log']));
+    }
+
+    public function testExpiredTimeBudgetStopsFetchingButAllowsCachedCrl(): void
+    {
+        $cache = TestPki::tempDir();
+        $this->temp[] = $cache;
+        $c = new RevocationChecker(RevocationChecker::MODE_CRL, self::refusingHttp($calls), $cache, maxFetchSecondsPerRequest: 0.0);
+        self::assertSame(RevocationResult::UNKNOWN, $c->check(TestPki::cert('alice'), TestPki::cert('int'))->status);
+        self::assertSame(0, $calls);
+        self::assertStringContainsString('time budget', implode("\n", $GLOBALS['mimeshield_test_log']));
+        self::assertSame(['.', '..'], scandir($cache . '/crl'), 'budget exhaustion is not cached as an endpoint failure');
+
+        file_put_contents(self::cacheFile($cache), TestPki::read('int.crl'));
+        self::assertSame(RevocationResult::REVOKED, $c->check(TestPki::cert('revoked'), TestPki::cert('int'))->status);
+        self::assertSame(0, $calls, 'an exhausted network budget does not disable cached revocation evidence');
+    }
+
+    /**
+     * Audit F-14: a transfer cut short by the request budget may end a moment before the deadline;
+     * such a failure says nothing about the endpoint and must not be cached for other requests.
+     */
+    public function testFailureAtTheEndOfTheTimeBudgetIsNotCached(): void
+    {
+        $cache = TestPki::tempDir();
+        $this->temp[] = $cache;
+        $start = hrtime(true) / 1e9;
+        $http = new SafeHttpClient(resolver: static function (string $h) use ($start): array {
+            // finish shortly before the 0.2 s budget ends, then fail (loopback is refused)
+            usleep(max(0, (int) (($start + 0.19 - hrtime(true) / 1e9) * 1e6)));
+            return ['127.0.0.1'];
+        });
+        $c = new RevocationChecker(RevocationChecker::MODE_CRL, $http, $cache, maxFetchSecondsPerRequest: 0.2);
+        self::assertSame(RevocationResult::UNKNOWN, $c->check(TestPki::cert('alice'), TestPki::cert('int'))->status);
+        self::assertSame(['.', '..'], scandir($cache . '/crl'), 'no negative-cache marker for a budget-limited failure');
+    }
+
+    public function testTimeBudgetIncludesDnsAndPersistsAcrossChecks(): void
+    {
+        $calls = 0;
+        $http = new SafeHttpClient(resolver: static function (string $host) use (&$calls): array {
+            $calls++;
+            usleep(20000);
+            return ['8.8.8.8'];
+        });
+        $c = new RevocationChecker(RevocationChecker::MODE_CRL, $http, '', maxFetchSecondsPerRequest: 0.01);
+        self::assertSame(RevocationResult::UNKNOWN, $c->check(TestPki::cert('alice'), TestPki::cert('int'))->status);
+        self::assertSame(RevocationResult::UNKNOWN, $c->check(TestPki::cert('bob'), TestPki::cert('int'))->status);
+        self::assertSame(1, $calls, 'after DNS used the budget no transfer or second lookup is started');
+        self::assertStringContainsString('time budget', implode("\n", $GLOBALS['mimeshield_test_log']));
+    }
+
+    public function testIssuerValidationFailureDoesNotSuppressAnotherIssuer(): void
+    {
+        $cache = TestPki::tempDir();
+        $this->temp[] = $cache;
+        self::serve('der');
+        $now = time();
+        $c = new RevocationChecker(RevocationChecker::MODE_CRL, self::proxyHttp(), $cache);
+
+        // Same distribution URL, but this response cannot be verified with the first issuer.
+        self::assertSame(RevocationResult::UNKNOWN, $c->check(TestPki::cert('alice'), TestPki::cert('root'), $now)->status);
+        self::assertSame(RevocationResult::UNKNOWN, $c->check(TestPki::cert('bob'), TestPki::cert('root'), $now)->status);
+        self::assertCount(1, self::requests(), 'the failing issuer still has an in-memory negative cache');
+
+        $next = new RevocationChecker(RevocationChecker::MODE_CRL, self::proxyHttp(), $cache);
+        self::assertSame(RevocationResult::UNKNOWN, $next->check(TestPki::cert('alice'), TestPki::cert('root'), $now + 1)->status);
+        self::assertCount(1, self::requests(), 'the issuer-specific marker works across requests');
+        self::assertSame(RevocationResult::REVOKED, $c->check(TestPki::cert('revoked'), TestPki::cert('int'), $now)->status);
+        self::assertCount(2, self::requests(), 'another issuer is not suppressed by the memory failure');
+
+        // Remove the successful cache entry so a fresh request must pass the negative-file checks.
+        unlink(self::cacheFile($cache));
+        $fresh = new RevocationChecker(RevocationChecker::MODE_CRL, self::proxyHttp(), $cache);
+        self::assertSame(RevocationResult::REVOKED, $fresh->check(TestPki::cert('revoked'), TestPki::cert('int'), $now + 1)->status);
+        self::assertCount(3, self::requests(), 'another issuer is not suppressed by the on-disk failure');
+    }
+
+    /**
+     * Audit F-14: a validly signed but outdated CRL is negatively cached like an unreachable one.
+     */
+    public function testOutdatedCrlIsNotFetchedAgainWithinTheNegativeTtl(): void
+    {
+        $cache = TestPki::tempDir();
+        $this->temp[] = $cache;
+        self::serve('der');
+        $future = time() + 20 * 365 * 86400;
+        $c = new RevocationChecker(RevocationChecker::MODE_CRL, self::proxyHttp(), $cache);
+        self::assertSame(RevocationResult::UNKNOWN, $c->check(TestPki::cert('revoked'), TestPki::cert('int'), $future)->status);
+        self::assertSame(RevocationResult::UNKNOWN, $c->check(TestPki::cert('alice'), TestPki::cert('int'), $future)->status);
+        self::assertCount(1, self::requests());
+
+        $next = new RevocationChecker(RevocationChecker::MODE_CRL, self::proxyHttp(), $cache);
+        self::assertSame(RevocationResult::UNKNOWN, $next->check(TestPki::cert('alice'), TestPki::cert('int'), $future + 1)->status);
+        self::assertCount(1, self::requests(), 'the marker works across requests');
+        // the current CRL of the same issuer is still used at the current time
+        self::assertSame(RevocationResult::REVOKED, $next->check(TestPki::cert('revoked'), TestPki::cert('int'))->status);
     }
 
     public function testCheckFetchesPemCrlViaProxyAndCachesDer(): void
@@ -1054,7 +1282,8 @@ PHP);
         $algSeq = self::tlv(0x30, self::oid($sigOid) . "\x05\x00");
         $thisUpdate = $o['thisUpdate'] ?? time() - 3600;
         $nextUpdate = array_key_exists('nextUpdate', $o) ? $o['nextUpdate'] : $thisUpdate + 86400 * 7;
-        $tbs = (($o['version'] ?? true) ? "\x02\x01\x01" : '') . $algSeq . $issuer . self::time($thisUpdate);
+        $innerAlgSeq = self::tlv(0x30, self::oid($o['innerSigOid'] ?? $sigOid) . "\x05\x00");
+        $tbs = (($o['version'] ?? true) ? "\x02\x01\x01" : '') . $innerAlgSeq . $issuer . self::time($thisUpdate);
         if ($nextUpdate !== null) {
             $tbs .= self::time($nextUpdate);
         }

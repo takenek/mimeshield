@@ -420,9 +420,14 @@
                 ul.append($('<li>').text(addr + ' – ' + label('recipient_' + st)));
             });
             content.append(ul);
-            var locked = $.inArray('encrypt', rcmail.env.mimeshield_locks || []) >= 0 || compose.enc.prop('disabled');
+            var locked = $.inArray('encrypt', rcmail.env.mimeshield_locks || []) >= 0 || compose.enc.prop('disabled')
+                || !!rcmail.env.mimeshield_require_encrypt;
             var buttons = [];
             if (!locked) {
+                if (rcmail.env.mimeshield_force_encrypt) {
+                    // the quoted / forwarded content was encrypted: say so before it is sent in clear
+                    content.append($('<p class="mimeshield-warning">').text(label('decryptedwarning')));
+                }
                 content.append($('<p>').text(label('sendwithoutencrypt')));
                 buttons.push({
                     text: label('sendunencrypted'),
@@ -457,14 +462,30 @@
             saveCert(false);
         });
         rcmail.addEventListener('plugin.mimeshield_savecert_confirm', function (data) {
-            var content = $('<div class="mimeshield-dialog">').append($('<p>').text(label('confirmreplace')));
+            var changes = (data && data.changes) || [], fp = '', replace = false, untrusted = false;
             var ul = $('<ul>');
-            $.each((data && data.changes) || [], function (i, ch) {
-                ul.append($('<li>').text(String(ch.email)));
+            $.each(changes, function (i, ch) {
+                fp = String(ch.new || '');
+                replace = replace || (ch.old || []).length > 0;
+                untrusted = untrusted || !!ch.untrusted;
+                // fingerprints of the stored and of the new certificate (audit F-15)
+                var li = $('<li>').text(String(ch.email));
+                $.each(ch.old || [], function (j, old) {
+                    li.append($('<div class="mimeshield-fp">').text(label('fingerprintold') + ' ' + formatFp(old)));
+                });
+                li.append($('<div class="mimeshield-fp">').text(label('fingerprintnew') + ' ' + formatFp(fp)));
+                ul.append(li);
             });
+            var content = $('<div class="mimeshield-dialog">');
+            if (replace) {
+                content.append($('<p>').text(label('confirmreplace')));
+            }
+            if (untrusted) {
+                content.append($('<p class="mimeshield-warning">').text(label('confirmuntrusted')));
+            }
             content.append(ul);
             rcmail.confirm_dialog(content, 'mimeshield.replacebutton', function () {
-                saveCert(true);
+                saveCert(true, fp);
             });
         });
         rcmail.addEventListener('plugin.mimeshield_savecert_done', function () {
@@ -472,10 +493,15 @@
         });
     }
 
-    function saveCert(confirm) {
+    function formatFp(hex) {
+        return String(hex).toUpperCase().replace(/(..)(?!$)/g, '$1:');
+    }
+
+    function saveCert(confirm, fingerprint) {
         var params = { _uid: String(rcmail.env.uid || ''), _mbox: String(rcmail.env.mailbox || '') };
         if (confirm) {
             params._confirm = 1;
+            params._fingerprint = String(fingerprint || '');
         }
         rcmail.http_post('plugin.mimeshield-savecert', params, rcmail.set_busy(true, 'mimeshield.saving'));
     }
