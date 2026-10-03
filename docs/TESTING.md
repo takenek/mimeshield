@@ -401,3 +401,41 @@ New or changed tests ("fails without fix" = checked against the code without the
   per-account limit.
 
 Not run in this pass: E2E/browser rendering, the PHP/database matrix, interop, PHPStan, CI on GitHub.
+
+## 11. v1.0.0 release verification (2026-10-03)
+
+Release-candidate verification was completed before tagging `v1.0.0`.
+
+Tested production snapshot: `6bf09b52ae23f7caeec8d524e5dc0e8deb0b2dc1` on `main` after PR #5. PR #5 changed only the Python
+E2E harness so that its confirmation requests match the security-hardened browser protocol
+(`_pending_digest` for certificate replacement and `_fingerprint` for save-sender-certificate);
+it did not change plugin runtime or cryptographic code.
+
+| Check | Environment | Result |
+|---|---|---|
+| GitHub CI | `main`, PHP 8.1 / 8.2 / 8.3 / 8.4 / 8.5 + PHPStan | **PASS** |
+| Interoperability | PHP 8.4.26, OpenSSL CLI, NSS `cmsutil`, GnuPG `gpgsm` | **11 passed / 0 failed** |
+| Browser UI | official signed Roundcube 1.7.4 complete release, PHP 8.4.26, Chromium 154 / Selenium 4.31.1 | **13 passed / 0 failed** |
+| End-to-end | official signed Roundcube 1.7.4 complete release, PHP 8.4.26, SQLite, Dovecot 2.4.1, SMTP sink | **58 passed / 0 failed / 0 skipped** |
+
+The Roundcube test package `roundcubemail-1.7.4-complete.tar.gz` was independently verified before
+use:
+
+- SHA-256: `2c6c878f0093f1bf7fb6086781d2dd9269d652c016b86939c157c5f1729139a2`;
+- detached GPG signature: **good signature** from
+  `Roundcube Developers <devs@roundcube.net>`;
+- signing subkey fingerprint:
+  `8970 E37A 698A F775 D87D 590D C294 6A96 09CD 56B4`;
+- primary key fingerprint:
+  `F3E4 C04B B3DB 5D42 15C4 5F7F 5AB2 BAA1 41C4 F7D5`.
+
+The full E2E run included certificate import and replacement confirmation, signing, encryption,
+decryption, Bcc handling, drafts, identity isolation, CSRF/XSS checks, Outlook/OWA/Thunderbird
+message structures, RSA-OAEP, AES-GCM, BER streaming, key rotation, schema-failure fail-closed
+behaviour, and independent OpenSSL verification/decryption of every captured protected SMTP DATA.
+
+The browser suite covered all 13 UI cases, including identity switching, recipient status,
+missing-certificate confirmation, explicit plaintext fallback, certificate settings, malicious
+certificate-name escaping, save-sender-certificate, key deletion warning, encrypted replies, and
+identity binding save-state behaviour.
+
