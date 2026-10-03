@@ -1,5 +1,9 @@
 # MIME Shield (`mimeshield`) – S/MIME for Roundcube 1.7
 
+[![CI](https://github.com/takenek/mimeshield/actions/workflows/ci.yml/badge.svg)](https://github.com/takenek/mimeshield/actions/workflows/ci.yml)
+[![Packagist](https://img.shields.io/packagist/v/takenek/mimeshield.svg)](https://packagist.org/packages/takenek/mimeshield)
+[![License](https://img.shields.io/packagist/l/takenek/mimeshield.svg)](LICENSE)
+
 MIME Shield adds complete S/MIME support to Roundcube Webmail 1.7.x using only the official plugin
 API (no changes to Roundcube core):
 
@@ -79,11 +83,13 @@ cd /var/www/roundcube
 composer require "takenek/mimeshield:^1.0"    # a tagged release; never dev-main in production
 ```
 
-Install a signed, tagged release by version constraint; see [docs/RELEASING.md](docs/RELEASING.md)
-(section 2 for installation, section 3 for verifying the tag signature). This command works only
-once v1.0.0 is tagged and published on Packagist (release process: docs/RELEASING.md section 1).
-**Until then** use the git method above, or add the repository as a Composer VCS repository and pin
-a reviewed commit (for testing, not for production):
+MIME Shield is published on [Packagist](https://packagist.org/packages/takenek/mimeshield).
+Production installations should use a signed, tagged release by version constraint; never install
+`dev-main` in production. See [docs/RELEASING.md](docs/RELEASING.md) (section 2 for installation
+and section 3 for verifying the tag signature).
+
+For deliberate testing of unreleased code only, add the repository as a Composer VCS repository
+and pin an explicitly reviewed commit:
 
 ```sh
 composer config repositories.mimeshield vcs https://github.com/takenek/mimeshield
