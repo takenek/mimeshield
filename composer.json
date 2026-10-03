@@ -35,8 +35,7 @@
     "autoload": {
         "psr-4": {
             "MimeShield\\": "lib/MimeShield/"
-        },
-        "classmap": ["mimeshield.php"]
+        }
     },
     "autoload-dev": {
         "psr-4": {
