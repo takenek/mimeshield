@@ -439,3 +439,37 @@ missing-certificate confirmation, explicit plaintext fallback, certificate setti
 certificate-name escaping, save-sender-certificate, key deletion warning, encrypted replies, and
 identity binding save-state behaviour.
 
+## 12. v1.0.1 release verification (2026-10-03)
+
+Release-candidate verification was completed on the exact candidate commit
+`b79a56df617622d48d4bae91dfbf31ad191a7c28` before tagging `v1.0.1`.
+
+This patch release changes package metadata only: it removes the Composer classmap entry for the
+Roundcube plugin bootstrap `mimeshield.php` and bumps the plugin-reported version. Roundcube loads
+the bootstrap directly from `plugins/mimeshield/mimeshield.php`; PSR-4 autoloading for
+`MimeShield\\` remains unchanged.
+
+| Check | Environment | Result |
+|---|---|---|
+| `composer validate --strict` | exact release-candidate commit | **PASS** |
+| GitHub CI | `main` commit `b79a56df617622d48d4bae91dfbf31ad191a7c28`, PHP 8.1 / 8.2 / 8.3 / 8.4 / 8.5 + PHPStan | **PASS** |
+| Interoperability | PHP 8.4.26, OpenSSL CLI, NSS `cmsutil`, GnuPG `gpgsm` | **11 passed / 0 failed** |
+| Browser UI | official signed Roundcube 1.7.4 complete release, PHP 8.4.26 | **13 passed / 0 failed** |
+| End-to-end | official signed Roundcube 1.7.4 complete release, PHP 8.4.26, SQLite, Dovecot 2.4.1, SMTP sink | **58 passed / 0 failed / 0 skipped** |
+| Composer/Roundcube packaging | fresh official Roundcube 1.7.4 tree, VCS install pinned to the exact candidate commit | **PASS**; installed into `plugins/mimeshield`; no stale `vendor/takenek/mimeshield/mimeshield.php` classmap warning |
+
+The packaging regression was reproduced with `v1.0.0`: Composer installed the plugin correctly
+into `plugins/mimeshield`, but commands such as `composer show` emitted a spurious
+`Could not scan for classes inside .../vendor/takenek/mimeshield/mimeshield.php` warning. After
+removing only the bootstrap `classmap` entry, a clean install of the exact `v1.0.1` candidate
+completed without that warning while still generating the expected PSR-4 autoload mapping to
+`plugins/mimeshield/lib/MimeShield`.
+
+The clean Roundcube test tree retained its upstream dependency lock. Composer reported two
+security advisories for the pre-existing Roundcube dependency `league/commonmark 2.10.0`
+(`GHSA-97jj-33gv-5xf9` and `GHSA-3q6v-r5mr-hxv8`). Those advisories are not dependencies added
+or changed by MIME Shield and do not affect the result of the MIME Shield packaging regression
+test.
+
+The same previously verified official Roundcube 1.7.4 archive was used as for the `v1.0.0`
+release verification (SHA-256 and detached Roundcube Developers signature recorded above).
