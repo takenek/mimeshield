@@ -5,6 +5,17 @@ semantic versioning.
 
 ## [Unreleased]
 
+## [1.0.2] – 2026-10-04
+
+### Changed
+- Identify the copyright holder as TaKeN.PL Usługi Informatyczne Marek Królikowski and
+  the original author as Marek Królikowski (TaKeN) in source headers and project metadata.
+- Add COPYRIGHT with attribution and origin notices under GPLv3 section 7(b) and 7(c),
+  limited to project-owned material distributed with those notices. Previously released
+  copies retain their original terms. The GPL-3.0-or-later grant and LICENSE text are unchanged.
+- Bump the plugin-reported version to 1.0.2. No cryptographic, mail-processing, database
+  or configuration behaviour is changed.
+
 ## [1.0.1] – 2026-10-03
 
 ### Fixed

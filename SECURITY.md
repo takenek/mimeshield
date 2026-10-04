@@ -1,6 +1,8 @@
 # Security policy – MIME Shield
 
-Maintainer: **[TaKeN](https://github.com/takenek)**.
+Maintainer: **[Marek Królikowski (TaKeN)](https://github.com/takenek)**.
+
+Business name: **TaKeN.PL Usługi Informatyczne Marek Królikowski**.
 
 ## Reporting a vulnerability
 

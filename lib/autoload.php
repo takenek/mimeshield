@@ -3,6 +3,12 @@
 declare(strict_types=1);
 
 /**
+ * Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
+ * Original author: Marek Królikowski (TaKeN)
+ * Original project: https://github.com/takenek/mimeshield
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * See LICENSE and COPYRIGHT for the license and GPL section 7 attribution terms.
+ *
  * MIME Shield - S/MIME for Roundcube
  *
  * PSR-4 autoloader for the MimeShield\ namespace (lib/MimeShield). Used when the plugin is installed

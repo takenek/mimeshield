@@ -3,12 +3,18 @@
 declare(strict_types=1);
 
 /**
+ * Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
+ * Original author: Marek Królikowski (TaKeN)
+ * Original project: https://github.com/takenek/mimeshield
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * See LICENSE and COPYRIGHT for the license and GPL section 7 attribution terms.
+ *
  * MIME Shield - S/MIME for Roundcube
  *
  * Sign, verify, encrypt and decrypt e-mail with S/MIME (RFC 8551), PKCS#12 import, encrypted
  * private key store, recipient certificate store, trust validation, multiple identities.
  *
- * @author    TaKeN
+ * @author    Marek Królikowski (TaKeN)
  * @link      https://github.com/takenek
  * @license   GPL-3.0-or-later
  *
@@ -138,8 +144,8 @@ class mimeshield extends rcube_plugin
     {
         return [
             'name' => 'MIME Shield',
-            'vendor' => 'TaKeN',
-            'version' => '1.0.1',
+            'vendor' => 'TaKeN.PL Usługi Informatyczne Marek Królikowski',
+            'version' => '1.0.2',
             'license' => 'GPL-3.0-or-later',
             'uri' => 'https://github.com/takenek/mimeshield',
         ];

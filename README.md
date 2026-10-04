@@ -23,7 +23,8 @@ API (no changes to Roundcube core):
 * UI in Settings, Compose and message view (Elastic skin), English and Polish translations,
 * CLI diagnostics and master-key tools.
 
-Created and maintained by **[TaKeN](https://github.com/takenek)**.
+Created and maintained by **[Marek Królikowski (TaKeN)](https://github.com/takenek)**,
+operating as **TaKeN.PL Usługi Informatyczne Marek Królikowski**.
 
 Documentation: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
 [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) · [SECURITY.md](SECURITY.md) ·
@@ -423,7 +424,11 @@ checklist is provided.
 
 ## 11. Author
 
-**MIME Shield** was created and is maintained by **[TaKeN](https://github.com/takenek)**.
+**MIME Shield** was created and is maintained by **[Marek Królikowski (TaKeN)](https://github.com/takenek)**.
+
+Business name: **TaKeN.PL Usługi Informatyczne Marek Królikowski**.
+
+Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski.
 
 Project repository: [github.com/takenek/mimeshield](https://github.com/takenek/mimeshield)
 
@@ -431,3 +436,8 @@ Project repository: [github.com/takenek/mimeshield](https://github.com/takenek/m
 
 GPL-3.0-or-later (same as Roundcube; see [LICENSE](LICENSE)). Roundcube's plugin exception allows
 plugins under other licenses, GPL-3.0-or-later was chosen for consistency with the ecosystem.
+
+See [COPYRIGHT](COPYRIGHT) for the copyright holder, author attribution and narrowly scoped
+additional terms under GPLv3 section 7(b) and 7(c). These preserve source attribution and require
+modified versions to identify their changes; they do not prohibit forks, renaming, commercial use
+or charging for distribution. Earlier releases retain the terms under which they were received.

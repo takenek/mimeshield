@@ -1,0 +1,58 @@
+MIME Shield
+
+Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
+Original author: Marek Królikowski (TaKeN)
+Original project: https://github.com/takenek/mimeshield
+
+TaKeN is the author's pseudonym. The business name above identifies Marek
+Królikowski trading as TaKeN.PL Usługi Informatyczne Marek Królikowski.
+It does not identify a separate corporate author.
+
+License
+-------
+
+MIME Shield is free software: you may redistribute it and/or modify it under
+the GNU General Public License as published by the Free Software Foundation,
+either version 3 of the License, or (at your option) any later version.
+The complete, unmodified license text is in LICENSE.
+
+This program is distributed without any warranty; see LICENSE, sections
+15 and 16, for the full disclaimer.
+
+Additional attribution and origin terms (GPLv3 section 7(b) and 7(c))
+-------------------------------------------------------------------
+
+These terms apply to MIME Shield material owned by the copyright holder
+identified above and distributed with a source-file notice referring to
+this COPYRIGHT file. They do not apply to third-party material or alter
+the terms granted for copies received under earlier releases.
+
+1. When conveying that material or modified versions of it, preserve the
+   following reasonable legal and author attribution notices in the
+   corresponding source material:
+
+   Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
+   Original author: Marek Królikowski (TaKeN)
+   Original project: https://github.com/takenek/mimeshield
+
+2. The origin of that material must not be misrepresented. Modified versions
+   that are conveyed must carry prominent notices stating that they were
+   modified and giving a relevant date, as required by GPLv3 section 5(a).
+   They must not be represented as an unmodified official upstream release.
+
+These terms do not require an advertising notice, a logo, a link displayed
+in the user interface, or publication of private modifications. They do
+not prohibit forks, different project names, commercial use or charging
+for distribution. Contributors may add accurate notices for their own
+copyrightable contributions without removing applicable existing notices.
+
+Third-party rights and project identity
+--------------------------------------
+
+Third-party components retain their own copyright and license notices.
+No authorship or ownership of those components is claimed here.
+
+The copyright and GPL notices do not certify trademark registration or
+grant trademark rights. Factual references identifying MIME Shield as the
+upstream project are welcome; do not imply that a modified version is
+endorsed or maintained by the original author without authorization.
