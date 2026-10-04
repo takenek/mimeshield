@@ -4,6 +4,12 @@
  * @licstart  The following is the entire license notice for the
  * JavaScript code in this file.
  *
+ * Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
+ * Original author: Marek Królikowski (TaKeN)
+ * Original project: https://github.com/takenek/mimeshield
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * See LICENSE and COPYRIGHT for the license and GPL section 7 attribution terms.
+ *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or

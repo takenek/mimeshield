@@ -2,6 +2,12 @@
 <?php
 
 /**
+ * Copyright (C) 2026 TaKeN.PL Usługi Informatyczne Marek Królikowski
+ * Original author: Marek Królikowski (TaKeN)
+ * Original project: https://github.com/takenek/mimeshield
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * See LICENSE and COPYRIGHT for the license and GPL section 7 attribution terms.
+ *
  * MIME Shield - administration tool (diagnostics, master key generation and rotation).
  *
  * Run from the Roundcube installation directory as the PHP / web server user (it must be able to
