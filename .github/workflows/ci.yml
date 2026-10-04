@@ -15,6 +15,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Recheck resolved dependencies daily, even without source changes (05:23 UTC).
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -44,11 +48,16 @@ jobs:
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
           php-version: ${{ matrix.php }}
+          tools: composer:v2
           extensions: openssl, mbstring, intl, sqlite3, pdo_sqlite, curl, sodium
           coverage: none
 
       - name: Install dependencies
         run: composer install --no-interaction --no-progress
+
+      # Audit this PHP version's installed packages, including dev and transitive dependencies.
+      - name: Audit dependencies
+        run: composer audit --no-interaction --format=plain
 
       - name: Assemble the Roundcube directory for integration tests
         run: |
@@ -88,11 +97,16 @@ jobs:
         with:
           # PHP >= 8.3 so that the curl constants added in 8.3 are known (phpstan.neon.dist)
           php-version: '8.4'
+          tools: composer:v2
           extensions: openssl, mbstring, intl, sqlite3, pdo_sqlite, curl, sodium
           coverage: none
 
       - name: Install dependencies
         run: composer install --no-interaction --no-progress
+
+      # Audit the independently resolved dependency set used by PHPStan.
+      - name: Audit dependencies
+        run: composer audit --no-interaction --format=plain
 
       # phpstan.neon.dist scans Roundcube at /opt/rcrun/1.7.4 (its documented default location)
       - name: Assemble the Roundcube directory for analysis

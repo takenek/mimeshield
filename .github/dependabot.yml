@@ -1,0 +1,15 @@
+version: 2
+updates:
+  - package-ecosystem: "composer"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # No committed lockfile: update composer.json while retaining supported ranges.
+    # Set explicitly because Dependabot does not classify roundcube-plugin as library.
+    versioning-strategy: "widen"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Dependabot updates full commit SHAs and their inline version comments.
