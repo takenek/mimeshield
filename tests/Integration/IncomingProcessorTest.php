@@ -719,7 +719,11 @@ final class IncomingProcessorTest extends TestCase
         $left = array_values(array_filter($msg->attachments, static fn ($a) => !in_array((string) $a->mime_id, $hidden, true)));
 
         self::assertSame([], $left, 'smime.p7s of a top-level clear-signed message must be hidden');
-        self::assertContainsOnly('string', $hidden, true, 'hiddenParts() is declared list<string>');
+        // per-element check: assertContainsOnly() is removed in PHPUnit 13 and its replacement
+        // assertContainsOnlyString() does not exist in PHPUnit 10.5 (still used on PHP 8.1)
+        foreach ($hidden as $id) {
+            self::assertIsString($id, 'hiddenParts() is declared list<string>');
+        }
     }
 
     public function testTamperedClearSignedBodyIsReportedModified(): void
