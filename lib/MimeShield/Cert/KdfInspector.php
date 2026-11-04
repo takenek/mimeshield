@@ -64,7 +64,9 @@ final class KdfInspector
     private const OID_DATA = '1.2.840.113549.1.7.1';
     private const OID_ENCRYPTED_DATA = '1.2.840.113549.1.7.6';
     private const OID_SHROUDED_KEY_BAG = '1.2.840.113549.1.12.10.1.2';
+    private const OID_CERT_BAG = '1.2.840.113549.1.12.10.1.3';
     private const OID_SAFE_CONTENTS_BAG = '1.2.840.113549.1.12.10.1.6';
+    private const OID_X509_CERTIFICATE = '1.2.840.113549.1.9.22.1';
 
     /**
      * Hash compression rounds the PKCS#12 PBE key derivation of this class may run in PHP per
@@ -109,6 +111,9 @@ final class KdfInspector
 
     private int $work = 0;
 
+    /** precheckCertificates(): inspect certBags only, skip key bags and encrypted layers */
+    private bool $certificatesOnly = false;
+
     /** @var array<string, bool> */
     private static array $cipherAvailable = [];
 
@@ -144,7 +149,33 @@ final class KdfInspector
             if (in_array($e->getUserLabel(), ['badpassword', 'p12legacy'], true)) {
                 throw $e;
             }
+            if ($e->getUserLabel() === 'certinvalid') {
+                throw new ValidationException($errorLabel, $e->getMessage(), [], $e);
+            }
             throw new ValidationException($errorLabel, 'structure not inspectable: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * CVE-2026-35189 pre-check (CertPrecheck) of every X.509 certificate in the readable, unencrypted
+     * SafeContents of a PKCS#12 before the file is handed to an external parser - the opt-in legacy
+     * CLI converter (audit V-08). Encrypted layers are skipped (their cipher is the reason the
+     * converter runs); the certificates they hold are pre-checked after the conversion by the import.
+     */
+    public static function precheckCertificates(string $der, string $errorLabel): void
+    {
+        $self = new self(null);
+        $self->certificatesOnly = true;
+        try {
+            $root = Asn1::parse($der, true, true);
+            $c = $root->isUniversal(Asn1::TAG_SEQUENCE) && $root->constructed ? $root->children() : [];
+            if (count($c) >= 2 && count($c) <= 3 && $c[0]->isUniversal(Asn1::TAG_INTEGER) && $c[1]->isUniversal(Asn1::TAG_SEQUENCE)) {
+                $self->pfx($c, $errorLabel);
+            } else {
+                throw new ValidationException('malformed', 'not a PFX');
+            }
+        } catch (ValidationException $e) {
+            throw new ValidationException($errorLabel, $e->getUserLabel() === 'certinvalid' ? $e->getMessage() : 'structure not inspectable: ' . $e->getMessage(), [], $e);
         }
     }
 
@@ -213,6 +244,9 @@ final class KdfInspector
         if ($type !== self::OID_ENCRYPTED_DATA) {
             throw new ValidationException('malformed', 'unsupported PKCS#12 content type ' . $type);
         }
+        if ($this->certificatesOnly) {
+            return;   // cannot be inspected without the password / cipher (legacy converter path)
+        }
         // EncryptedData ::= SEQUENCE { version, EncryptedContentInfo ::= SEQUENCE { contentType,
         // contentEncryptionAlgorithm, encryptedContent [0] IMPLICIT OCTET STRING OPTIONAL } }
         $ed = $content->isUniversal(Asn1::TAG_SEQUENCE) && $content->constructed ? $content->children() : [];
@@ -247,6 +281,9 @@ final class KdfInspector
             $oid = Asn1::oid($b[0]);
             $value = $b[1]->child(0);
             if ($oid === self::OID_SHROUDED_KEY_BAG) {
+                if ($this->certificatesOnly) {
+                    continue;
+                }
                 // EncryptedPrivateKeyInfo ::= SEQUENCE { encryptionAlgorithm, encryptedData }
                 if (!$value->isUniversal(Asn1::TAG_SEQUENCE) || !$value->constructed) {
                     throw new ValidationException('malformed', 'bad shrouded key bag');
@@ -254,8 +291,23 @@ final class KdfInspector
                 $this->encryptionAlgorithm($value->child(0), $label, 'p12legacy');
             } elseif ($oid === self::OID_SAFE_CONTENTS_BAG) {
                 $this->safeContents($value, $depth + 1, $label);
+            } elseif ($oid === self::OID_CERT_BAG) {
+                // CertBag ::= SEQUENCE { certId OID, certValue [0] EXPLICIT } - an X.509 certificate is
+                // parsed by libcrypto in openssl_pkcs12_read before any other plugin check runs: apply the
+                // CVE-2026-35189 pre-check here, fail closed on an unreadable bag (audit V-08)
+                $cb = $value->isUniversal(Asn1::TAG_SEQUENCE) && $value->constructed ? $value->children() : [];
+                if (count($cb) < 2 || !$cb[0]->isUniversal(Asn1::TAG_OID) || !$cb[1]->isContext(0) || !$cb[1]->constructed) {
+                    throw new ValidationException('malformed', 'bad certBag');
+                }
+                if (Asn1::oid($cb[0]) === self::OID_X509_CERTIFICATE) {
+                    $cert = $cb[1]->child(0);
+                    if (!$cert->isUniversal(Asn1::TAG_OCTET_STRING)) {
+                        throw new ValidationException('malformed', 'bad certBag value');
+                    }
+                    CertPrecheck::assertSafe($cert->content());
+                }
             }
-            // keyBag, certBag, crlBag, secretBag and unknown bags run no key derivation
+            // keyBag, crlBag, secretBag and unknown bags run no key derivation
         }
     }
 

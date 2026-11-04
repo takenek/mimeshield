@@ -79,6 +79,15 @@ final class Config
         'mimeshield_debug' => false,
     ];
 
+    /**
+     * Divisors of PHP's memory_limit that bound the effective S/MIME size limits (audit V-06). A
+     * processed part exists in several copies at once (transfer-encoded, DER, plaintext, canonicalised,
+     * parsed parts), each separate Bcc envelope in two (DER and base64): configured limits above these
+     * fractions would end a request with a fatal error instead of the "message too large" label.
+     */
+    public const MESSAGE_MEMORY_DIVISOR = 6;
+    public const ENVELOPE_MEMORY_DIVISOR = 2;
+
     /** Options only the administrator may set: user preferences under these names are ignored */
     private const ADMIN_ONLY_PREFIX = 'mimeshield_';
     private const USER_PREFS = ['mimeshield_pref_sign', 'mimeshield_pref_encrypt'];
@@ -145,6 +154,51 @@ final class Config
         return array_values(array_filter(array_map(static fn ($v) => strtolower(trim((string) $v)), (array) $this->get($name)), static fn ($v) => $v !== ''));
     }
 
+    /**
+     * Effective mimeshield_max_message_size: the configured value, capped at memory_limit /
+     * MESSAGE_MEMORY_DIVISOR (audit V-06).
+     */
+    public function maxMessageSize(): int
+    {
+        return self::boundedByMemory($this->int('mimeshield_max_message_size', 65536, PHP_INT_MAX),
+            self::memoryLimitBytes((string) ini_get('memory_limit')), self::MESSAGE_MEMORY_DIVISOR, 65536);
+    }
+
+    /**
+     * Effective mimeshield_max_total_envelope_bytes: the configured value, capped at memory_limit /
+     * ENVELOPE_MEMORY_DIVISOR (audit V-06).
+     */
+    public function maxTotalEnvelopeBytes(): int
+    {
+        return self::boundedByMemory($this->int('mimeshield_max_total_envelope_bytes', 1048576, PHP_INT_MAX),
+            self::memoryLimitBytes((string) ini_get('memory_limit')), self::ENVELOPE_MEMORY_DIVISOR, 1048576);
+    }
+
+    /**
+     * Bytes of a php.ini memory value ("128M", "1G", "134217728"); null for unlimited (-1), empty or
+     * unparsable values.
+     */
+    public static function memoryLimitBytes(string $ini): ?int
+    {
+        if (!preg_match('/^\s*(\d+)\s*([kmgKMG]?)\s*$/', $ini, $m)) {
+            return null;
+        }
+        $n = (int) $m[1];
+        $mult = ['' => 1, 'k' => 1024, 'm' => 1048576, 'g' => 1073741824][strtolower($m[2])];
+        return $n <= 0 || $n > intdiv(PHP_INT_MAX, $mult) ? null : $n * $mult;
+    }
+
+    /**
+     * $limit capped at $memoryLimit / $divisor (never below $min); unchanged without a memory limit.
+     */
+    public static function boundedByMemory(int $limit, ?int $memoryLimit, int $divisor, int $min): int
+    {
+        if ($memoryLimit === null || $divisor <= 0) {
+            return $limit;
+        }
+        return max($min, min($limit, intdiv($memoryLimit, $divisor)));
+    }
+
     public function cipher(): string
     {
         $c = strtolower((string) $this->get('mimeshield_cipher'));
@@ -208,6 +262,8 @@ final class Config
         $real = realpath($dir);
         $real = $real !== false ? $real : $dir;
         SecureTemp::refuseBaseDir($strict ? $real : null);
+        // a shared system directory gets a uid-specific plugin directory (audit V-11)
+        SecureTemp::markFallbackBaseDir($fallback ? $real : null);
         return $real;
     }
 

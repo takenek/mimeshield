@@ -34,6 +34,25 @@ final class LegacyPkcs12Converter
     {
     }
 
+    /**
+     * Terminate the child: SIGTERM, then SIGKILL after a short grace period, so a stuck or looping
+     * openssl process cannot keep consuming the host after the plugin gave up on it (audit N-12).
+     *
+     * @param resource $proc
+     */
+    private static function kill($proc): void
+    {
+        @proc_terminate($proc);
+        for ($i = 0; $i < 20; $i++) {
+            $status = @proc_get_status($proc);
+            if (empty($status['running'])) {
+                return;
+            }
+            usleep(50000);
+        }
+        @proc_terminate($proc, 9);
+    }
+
     public static function isAvailable(string $binary): bool
     {
         return $binary !== '' && function_exists('proc_open') && is_file($binary) && is_executable($binary);
@@ -99,7 +118,7 @@ final class LegacyPkcs12Converter
                     }
                 }
                 if (microtime(true) > $deadline || strlen($out) > 1048576 || strlen($err) > 65536) {
-                    proc_terminate($proc);
+                    self::kill($proc);
                     throw new ValidationException('p12legacy', 'openssl timeout or oversized output');
                 }
             }

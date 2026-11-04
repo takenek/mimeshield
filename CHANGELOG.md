@@ -5,6 +5,69 @@ semantic versioning.
 
 ## [Unreleased]
 
+## [1.0.3] – 2026-11-04
+
+Remediation of the second security review (2026-11-04, IDs V-xx / N-xx of that review; details in
+`docs/ARCHITECTURE.md` section 8e and `SECURITY.md`). No database migration is required; the
+configuration keys are unchanged.
+
+### Security
+- V-01: the supported Roundcube minimum is 1.7.5 (`min-version`, `diag`, documentation). 1.7.5 fixes
+  bypasses of the remote-content blocking in the core HTML sanitiser that the plugin relies on for
+  decrypted mail. `diag` also notes when a newer release than the one known at this plugin release
+  is installed; `docs/RELEASING.md` gains the platform-advisory step.
+- V-02/V-04: the shared cRLNumber high-water mark is written directly to Roundcube's `cache_shared`
+  table as validated JSON inside a row-locking transaction that only ever raises the number.
+  Concurrent writers can no longer keep the lower of two numbers, and no `unserialize()` of table
+  content is involved. Rows of the previous (serialized) format count as "no number seen" once.
+- V-03: a CRL that does not apply to the certificate (other distribution point, CA-only or
+  user-only scope, not yet valid, expired) is evaluated before the cRLNumber is recorded or the
+  file is cached: it yields "unknown" and leaves the stored state untouched.
+- V-05: decrypted or unwrapped content is checked against a MIME structure budget before the
+  platform parser allocates the tree (at most 500 entities, forwarded messages at most 8 deep,
+  retained nested bodies at most twice the size limit); beyond it the part shows "message too
+  large". The part count of the original message stays unlimited (decision F-07).
+- V-06: `mimeshield_max_message_size` and `mimeshield_max_total_envelope_bytes` are capped at
+  runtime at 1/6 and 1/2 of PHP's `memory_limit`, so an oversized message yields the "message too
+  large" label instead of a fatal error; `diag` shows the effective limits.
+- V-07: recipient status checks are also limited per account (60 per minute), public certificate
+  imports per session and per account (20 per 5 minutes), certificate detail pages per session (60
+  per minute), at most 10 stored certificates are evaluated per recipient address, and the private
+  key / certificate quotas are enforced inside one transaction with a user row lock.
+- V-08: certificates inside uploaded PKCS#12 files are pre-checked for the CVE-2026-35189 trigger
+  (`CertPrecheck`) before OpenSSL or the legacy CLI converter parses the file, including
+  certificates inside password-encrypted layers the plugin can decrypt itself.
+- V-09: AuthEnvelopedData with an aes-nonce outside 7-16 octets and key-agreement RecipientInfos
+  with algorithms outside the RFC 5753 / RFC 8418 allow-list are refused before OpenSSL.
+- V-10: the master key file and the trust bundles are checked for ownership (warning for a user
+  other than root or the PHP user, once per process and in `diag`); a world-writable trust bundle
+  is refused.
+- V-11: the fallback directory below the shared system temp directory is named
+  `mimeshield-<uid>`, so another PHP user's installation on the same host cannot occupy it.
+- V-12: `mimeshield_revocation_proxy` without `mimeshield_revocation_allow_hosts` now disables CRL
+  checking (every status "unknown", logged, `diag` FAIL) instead of checking without address pinning.
+- V-13: INFO log lines about refused imports and blocked sending carry the user-facing label only;
+  the sanitised exception message is logged at debug level.
+- V-14: `diag` warns for a PHP patch level below the fixes of CVE-2026-109618/109619 (8.2.35,
+  8.3.36, 8.4.27, 8.5.12) and for OpenSSL branches whose upstream security support has ended
+  (1.1.1, 3.0 from 2026-09-07, 3.1-3.4, 3.6), which are acceptable only with distribution backports.
+- N-12: the legacy PKCS#12 converter process is killed with SIGKILL when it ignores SIGTERM.
+
+### Changed
+- N-01: `composer.json` `extra.roundcube.min-version` 1.7.5 (the installer check cannot block
+  Composer-installed `1.7-git` cores, so `diag` and the documentation remain the main control).
+- N-04: `check-keystore` reports the number of private keys still stored in the v1 blob format.
+- N-09: `diag` warns when the master key is taken from an environment variable.
+- N-10: `bin/`, `lib/`, `SQL/`, `docs/`, `localization/` and `tests/` ship a `.htaccess` with
+  `Require all denied` for Apache installations whose document root is the Roundcube directory.
+- N-13: GitGuardian ignores only the test PKI directory and the named harness files instead of the
+  whole `tests/fixtures/` tree.
+- N-06: CI runs `composer validate --strict`; PHPUnit 13 requires ≥ 13.4.4 (CVE-2026-119193).
+- Documentation (README, SECURITY.md, docs/ARCHITECTURE.md, docs/THREAT_MODEL.md,
+  docs/RELEASING.md, config.inc.php.dist) describes the new limits, checks and requirements. The
+  README notes the review of the code with Anthropic's Mythos 5.1 on 2026-11-04.
+- Bump the plugin-reported version to 1.0.3.
+
 ## [1.0.2] – 2026-10-04
 
 ### Changed

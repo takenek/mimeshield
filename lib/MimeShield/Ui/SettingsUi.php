@@ -40,6 +40,13 @@ final class SettingsUi
     private const KEY_IMPORTS_PER_WINDOW = 10;
     private const KEY_IMPORT_WINDOW = 300;
 
+    /** public certificate import attempts per session and per user within CERT_IMPORT_WINDOW seconds (audit V-07) */
+    private const CERT_IMPORTS_PER_WINDOW = 20;
+    private const CERT_IMPORT_WINDOW = 300;
+
+    /** key / certificate detail pages (each validates a chain) per session and minute (audit V-07) */
+    private const DETAIL_VIEWS_PER_MINUTE = 60;
+
     public const ACTIONS = [
         'plugin.mimeshield' => 'keysPage',
         'plugin.mimeshield-keyinfo' => 'keyInfo',
@@ -79,7 +86,9 @@ final class SettingsUi
         try {
             $this->{$method}();
         } catch (MimeShieldException $e) {
-            Log::info('settings', $action . ' failed: ' . $e->getMessage());
+            // INFO carries the user label only; the internal message may quote request data (audit V-13)
+            Log::info('settings', $action . ' failed: ' . $e->getUserLabel());
+            Log::debug('settings', $action . ' failed: ' . $e->getMessage());
             $this->fail($e->getUserLabel(), $e->getVars());
         } catch (\Throwable $e) {
             Log::exception('settings', $e, ['action' => $action]);
@@ -229,6 +238,7 @@ final class SettingsUi
 
     private function keyInfo(?int $id = null): void
     {
+        $this->throttleDetailView();
         $id ??= (int) \rcube_utils::get_input_string('_id', \rcube_utils::INPUT_GET);
         $rec = $this->plugin->services()->keys()->repository()->get($id);
         if ($rec === null) {
@@ -312,7 +322,8 @@ final class SettingsUi
             $identities = array_map(static fn ($i) => ['identity_id' => $i['identity_id'], 'email' => (string) $i['email']], (array) $this->rc->user->list_identities());
             $result = $this->plugin->services()->keys()->import($data, $password, $identities);
         } catch (MimeShieldException $e) {
-            Log::info('import', 'key import rejected: ' . $e->getMessage());
+            Log::info('import', 'key import rejected: ' . $e->getUserLabel());
+            Log::debug('import', 'key import rejected: ' . $e->getMessage());
             $this->rc->output->show_message('mimeshield.' . $this->knownLabel($e->getUserLabel()), 'error', $e->getVars());
             $this->importForm('key');
             return;
@@ -415,6 +426,7 @@ final class SettingsUi
 
     private function certInfo(?int $id = null): void
     {
+        $this->throttleDetailView();
         $id ??= (int) \rcube_utils::get_input_string('_id', \rcube_utils::INPUT_GET);
         $rec = $this->plugin->services()->certs()->repository()->get($id);
         if ($rec === null) {
@@ -456,6 +468,15 @@ final class SettingsUi
         }
         $this->rejectOversizedPost('cert');
         $this->plugin->requirePostToken();
+        // each attempt parses an upload and validates certificate chains: bound the frequency per
+        // session and per user account across sessions, like the key import (audit V-07)
+        if (!RateLimiter::allow($_SESSION, 'mimeshield_rl_certimport', self::CERT_IMPORTS_PER_WINDOW, self::CERT_IMPORT_WINDOW)
+            || !RateLimiter::allowForUser($this->plugin->services()->db(), $this->plugin->services()->userId(), 'certimport', self::CERT_IMPORTS_PER_WINDOW, self::CERT_IMPORT_WINDOW)) {
+            Log::info('import', 'certificate import attempts throttled');
+            $this->rc->output->show_message('mimeshield.ratelimited', 'error');
+            $this->importForm('cert');
+            return;
+        }
         $confirmed = (bool) \rcube_utils::get_input_value('_confirm', \rcube_utils::INPUT_POST);
         if ($confirmed) {
             $data = self::takePendingCertificate((string) \rcube_utils::get_input_string('_pending_digest', \rcube_utils::INPUT_POST));
@@ -477,7 +498,8 @@ final class SettingsUi
         try {
             $result = $this->plugin->services()->certs()->importFile($data, $confirmed);
         } catch (MimeShieldException $e) {
-            Log::info('import', 'certificate import rejected: ' . $e->getMessage());
+            Log::info('import', 'certificate import rejected: ' . $e->getUserLabel());
+            Log::debug('import', 'certificate import rejected: ' . $e->getMessage());
             $this->rc->output->show_message('mimeshield.' . $this->knownLabel($e->getUserLabel()), 'error', $e->getVars());
             $this->importForm('cert');
             return;
@@ -565,6 +587,18 @@ final class SettingsUi
     }
 
     // ------------------------------------------------------------------ shared rendering
+
+    /**
+     * Detail pages validate a certificate chain (OpenSSL, temporary files) on every view: bound the
+     * frequency per session (audit V-07); limits per IP belong to the reverse proxy.
+     */
+    private function throttleDetailView(): void
+    {
+        if (!RateLimiter::allow($_SESSION, 'mimeshield_rl_details', self::DETAIL_VIEWS_PER_MINUTE, 60)) {
+            Log::info('settings', 'certificate detail views throttled');
+            $this->fail('ratelimited');
+        }
+    }
 
     /**
      * @param list<string> $chainPems

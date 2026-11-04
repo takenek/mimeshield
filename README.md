@@ -37,9 +37,9 @@ Documentation: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
 
 | Component | Requirement |
 |---|---|
-| Roundcube | 1.7.4 or later 1.7.x security release (`min-version` 1.7.4: decrypted mail is rendered by the core HTML sanitiser, so its security fixes matter; tested: see [Compatibility](#9-compatibility)), Elastic skin |
-| PHP | 8.1 – 8.5 accepted (composer `php >=8.1 <8.6`); PHP ≥ 8.3 recommended, and `diag` warns once a PHP branch is past its security support (audit I-14 decision) |
-| PHP extensions | `openssl` (with CMS functions, OpenSSL ≥ 3.0; keep the library loaded by PHP-FPM patched — for CVE-2026-35189 ≥ 3.0.23 / 3.4.8 / 3.5.9 / 3.6.5 / 4.0.3 on the respective branch or a distribution backport; `diag` shows the library version), `mbstring`; recommended: `intl` (internationalised domain names), `sodium` (XChaCha20-Poly1305 key store; otherwise AES-256-GCM), `curl` (only for CRL checks) |
+| Roundcube | 1.7.5 or later 1.7.x security release (`min-version` 1.7.5: the release of 2026-10-19 fixes bypasses of the remote-content blocking in the core HTML sanitiser - CVE-2026-114722, CVE-2026-114728, CVE-2026-114729 - on which the plugin relies for decrypted mail, and a session deserialization flaw, CVE-2026-114724; tested: see [Compatibility](#9-compatibility)), Elastic skin. Check <https://roundcube.net/news/> for newer security releases (`composer audit` cannot: the Packagist advisory feed does not carry the Roundcube CVEs). `min-version` is enforced only by the Composer plugin installer, and a core installed from Packagist reports `1.7-git`, which passes every 1.7.x threshold (audit N-01): `diag`, which warns below 1.7.5 and notes when a newer release than the one known at the plugin's release date is installed, is the main version control |
+| PHP | 8.1 – 8.5 accepted (composer `php >=8.1 <8.6`); PHP ≥ 8.3 recommended. Run the current patch level of the branch: 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 of 2026-10-21 fix CVE-2026-109618 and CVE-2026-109619 (critical, in the request-handling layer of every SAPI), 8.1 has no fix. `diag` warns below these levels (or when a distribution backport cannot be told apart) and once a PHP branch is past its security support (audit I-14 decision, V-14) |
+| PHP extensions | `openssl` (with CMS functions, OpenSSL ≥ 3.0; keep the library loaded by PHP-FPM patched — for CVE-2026-35189 ≥ 3.0.23 / 3.4.8 / 3.5.9 / 3.6.5 / 4.0.3 on the respective branch or a distribution backport; `diag` shows the library version and warns for a branch whose upstream security support has ended - 1.1.1, 3.1, 3.2, 3.3, 3.4, 3.6 and, from 2026-09-07, 3.0 - which is acceptable only as a distribution package with backported fixes), `mbstring`; recommended: `intl` (internationalised domain names), `sodium` (XChaCha20-Poly1305 key store; otherwise AES-256-GCM), `curl` (only for CRL checks) |
 | Database | whatever Roundcube 1.7 supports: MySQL/MariaDB, PostgreSQL, SQLite |
 | OpenSSL CLI | optional, only for converting legacy RC2 PKCS#12 files (`mimeshield_pkcs12_legacy_cli`) |
 
@@ -50,15 +50,19 @@ Documentation: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) ·
   plugin's `CertPrecheck` refuses the triggering certificates in its own input paths, but other
   libcrypto use is only protected by the update (F-16).
 * **A request time limit**: `request_terminate_timeout` in the PHP-FPM pool or a reverse-proxy read
-  timeout. The plugin bounds only its own work (8 signature checks, CRL budget) and does not limit
-  the number of MIME parts (F-07).
+  timeout. The plugin bounds only its own work (8 signature checks, CRL budget, a structure budget
+  for decrypted content) and does not limit the number of MIME parts of the original message (F-07).
 * **With `mimeshield_revocation = 'crl'`: resolver timeouts**, e.g. `options timeout:1 attempts:2`
   in `/etc/resolv.conf` (worst case 6 s with up to 3 name servers; `diag` warns above 10 s), or a
   local caching resolver; synchronous DNS lookups cannot be interrupted
   without losing the SSRF pinning (F-14).
 * **Temp directory on tmpfs** (`mimeshield_temp_dir`, e.g. under `/dev/shm`); optionally
   `mimeshield_temp_dir_strict = true` to refuse S/MIME operations rather than fall back to the
-  system temp directory (I-15).
+  system temp directory (I-15). Hardened profile: a dedicated directory owned by the PHP user, mode
+  0700, with strict mode on.
+* **With `mimeshield_revocation_proxy`: `mimeshield_revocation_allow_hosts`** is required; a proxy
+  without the allow-list disables CRL checking (every status "unknown", logged, `diag` FAIL) because
+  the plugin cannot pin the connected address through a proxy (V-12).
 * Recommended: enable `mimeshield_revocation = 'crl'` wherever outbound HTTP from the web server is
   allowed (default `off`, audit I-01 decision).
 
@@ -186,14 +190,18 @@ for the same message.
 ### 2.6 File system permissions
 
 * `plugins/mimeshield` readable by the web server, not writable.
-* The master key file: `0400`/`0440`, owner root, group = PHP user.
+* The master key file: `0400`/`0440`, owner root, group = PHP user. The plugin refuses a file with
+  group-write or any other-access bits and logs a warning (once per process; `diag` WARN) when the
+  file, the CA bundle or an intermediate bundle is owned by a user other than root or the PHP
+  process user; a world-writable trust bundle is refused outright (audit V-10).
 * Temporary files: Roundcube `temp_dir` (or `mimeshield_temp_dir`) must be writable by the PHP
   user; the plugin creates a private `mimeshield/` subdirectory with mode `0700`. A tmpfs is
   recommended (e.g. `$config['mimeshield_temp_dir'] = '/dev/shm/roundcube';`, directory owned by
   the PHP user, mode 0700). If it is unusable the plugin falls back to the system temp directory
-  (logged, `diag`); `mimeshield_temp_dir_strict = true` refuses sign/encrypt/decrypt/verify instead
-  (error "the server's temporary directory cannot be used"; certificate chains then show as
-  untrusted).
+  (logged, `diag`), where the subdirectory is named `mimeshield-<uid>` so that another PHP user's
+  installation on the same host cannot occupy it (V-11); `mimeshield_temp_dir_strict = true`
+  refuses sign/encrypt/decrypt/verify instead (error "the server's temporary directory cannot be
+  used"; certificate chains then show as untrusted).
 * The CRL disk cache (`<temp>/mimeshield/crl`) and its `mimeshield` parent must be private
   directories, owned by the PHP user with mode 0700. An unsafe directory disables disk caching;
   review its ownership and contents before restoring access. The plugin does not repair it.
@@ -203,7 +211,9 @@ for the same message.
   nginx `location ~ ^/plugins/mimeshield/(bin|lib|SQL|tests|docs|localization|config\.inc\.php) { deny all; }`
   (with Roundcube's `public_html` document root, plugin files are served only through
   `static.php`, which delivers static asset types; the rule matters for installations whose
-  document root is the Roundcube directory itself). Release archives built
+  document root is the Roundcube directory itself). The directories `bin/`, `lib/`, `SQL/`, `docs/`,
+  `localization/` and `tests/` ship a `.htaccess` with `Require all denied` for Apache 2.4 installations
+  that honour `AllowOverride` (audit N-10); nginx needs the rule above. Release archives built
   with `git archive` leave out `tests/` and developer tooling (`.gitattributes`).
 * `keygen` refuses a key file directory (or any parent) that is a symbolic link, owned by a user
   other than root / the current user, or writable by group/others without the sticky bit — in
@@ -215,20 +225,26 @@ for the same message.
 sudo -u www-data plugins/mimeshield/bin/mimeshield.sh diag
 ```
 
-The command checks Roundcube/PHP/OpenSSL versions (warning for Roundcube older than 1.7.4 and for
-an OpenSSL library below the CVE-2026-35189 fix of its branch — 3.0.23, 3.4.8, 3.5.9, 3.6.5, 4.0.3;
+The command checks Roundcube/PHP/OpenSSL versions (warning for Roundcube older than 1.7.5, with a
+note when a newer release than the one known at the plugin's release date exists; for PHP below the
+patch level that fixes CVE-2026-109618/109619 - 8.2.35, 8.3.36, 8.4.27, 8.5.12 - or past the end of
+its security support; for an OpenSSL library below the CVE-2026-35189 fix of its branch — 3.0.23,
+3.4.8, 3.5.9, 3.6.5, 4.0.3 — and for an OpenSSL branch whose upstream security support has ended;
 only the upstream version number is visible, so a distribution backport is not detected; the CLI
-SAPI may load a different OpenSSL than PHP-FPM — compare with `php-fpm -i`; end-of-life branches
-3.1–3.3 are deliberately not warned about, as the advisory lists supported branches only). Since
-F-16 the plugin also refuses, before any OpenSSL call, certificates with more than 8 or relative
+SAPI may load a different OpenSSL than PHP-FPM — compare with `php-fpm -i`). Since F-16 the plugin
+also refuses, before any OpenSSL call, certificates with more than 8 or relative
 (nameRelativeToCRLIssuer) CRL distribution points or a duplicate cRLDistributionPoints extension
-(`CertPrecheck`). `diag` further checks the PHP branch support date, extensions, CMS
-functions, the temp directory (0600 files; warning when the configured directory is not usable),
-whether the temp directory is on tmpfs/ramfs, the resolver worst case with CRL checking (warning
-above 10 seconds per lookup), reminds that a PHP-FPM/proxy request timeout is required, checks
-the CA bundle (warning while the system TLS bundle is trusted), the master key (AEAD self-test,
-never printed), the database schema (with the number of stored private keys, identity bindings and
-contact certificates) and the configuration. Exit code 0 = OK (warnings such as a missing `intl` do
+(`CertPrecheck`), since V-08 also inside uploaded PKCS#12 files. `diag` further checks the PHP
+branch support date, extensions, CMS functions, the temp directory (0600 files; warning when the
+configured directory is not usable), whether the temp directory is on tmpfs/ramfs, the resolver
+worst case with CRL checking (warning above 10 seconds per lookup), a CRL proxy without
+`mimeshield_revocation_allow_hosts` (FAIL: CRL checking is disabled, V-12), reminds that a
+PHP-FPM/proxy request timeout is required, checks the CA bundle (warning while the system TLS
+bundle is trusted) and the ownership of the trust files, the master key (AEAD self-test, never
+printed; WARN for a key taken from an environment variable, which every PHP-FPM worker inherits, or
+for a key file owned by another user), the effective size limits against PHP's `memory_limit`
+(V-06), the database schema (with the number of stored private keys, identity bindings and contact
+certificates) and the configuration. Exit code 0 = OK (warnings such as a missing `intl` do
 not fail). If the plugin directory is a symlink, set `ROUNDCUBE_INSTALL_PATH=/var/www/roundcube`.
 
 ## 3. Using it
@@ -328,7 +344,10 @@ was completely written, synced and read back with every existing key line.
 
 Replace the plugin files, then run `bin/updatedb.sh --package=mimeshield
 --dir=plugins/mimeshield/SQL` and `plugins/mimeshield/bin/mimeshield.sh diag`. Read
-`CHANGELOG.md`.
+`CHANGELOG.md`. `bin/mimeshield.sh check-keystore` reports private keys still stored in the v1 blob
+format of the first builds (one data key shared by both AEAD algorithms): run `rotate` once (section
+4, also with an unchanged master key) to re-encrypt them in the current per-algorithm format (audit
+N-04).
 
 **Always run the schema update.** While the plugin tables are missing or outdated, S/MIME is not
 available: sending (and saving drafts) is **refused** whenever protection is expected — the user
@@ -392,7 +411,8 @@ controls the web server process can use the keys (inherent to server-side S/MIME
 
 Tested versions and the exact test results are listed in [docs/TESTING.md](docs/TESTING.md):
 Roundcube 1.7.0, 1.7.1, 1.7.2, 1.7.3, 1.7.4 (git tags; 1.7.4 also as the official signed release
-tarball; since the security remediation of 2026-10-02 the supported minimum is 1.7.4), PHP 8.1, 8.2, 8.3, 8.4, 8.5, OpenSSL 3.5, MariaDB 11.8, PostgreSQL 17, SQLite 3, Chromium
+tarball; since the security remediation of 2026-10-02 the supported minimum was 1.7.4, since
+2026-11-04 it is 1.7.5, whose changelog touches no plugin API used here), PHP 8.1, 8.2, 8.3, 8.4, 8.5, OpenSSL 3.5, MariaDB 11.8, PostgreSQL 17, SQLite 3, Chromium
 154 for the browser tests. Interoperability status (NSS = Thunderbird's crypto library, gpgsm,
 OpenSSL) is documented in [docs/INTEROPERABILITY.md](docs/INTEROPERABILITY.md) — Microsoft Outlook
 and the Thunderbird application itself were **not** available in the test environment; a manual
@@ -413,9 +433,17 @@ checklist is provided.
 * When decrypting, only own keys matching a RecipientInfo are tried; if none match, at most 5 other
   keys are tried (for clients that encode the recipient identifier differently, audit I-18). A
   message naming one own key but encrypted to another does not decrypt.
-* Recipient checks are limited per session, key imports per session and atomically per user (the
-  account quota is committed before import; a quota storage failure blocks imports); limits per IP
+* Recipient checks are limited per session and per account, key and certificate imports per
+  session and atomically per user (the account quota is committed before import; a quota storage
+  failure blocks imports), certificate detail pages per session (V-07); limits per IP
   and request time limits belong to the reverse proxy / WAF and PHP-FPM in front of Roundcube.
+* `mimeshield_max_message_size` and `mimeshield_max_total_envelope_bytes` are capped at runtime at
+  1/6 and 1/2 of PHP's `memory_limit` (a processed S/MIME part exists in several copies in memory;
+  V-06): with the default `memory_limit = 128M` the effective message limit is about 21 MB, shown by
+  `diag`. Raise `memory_limit` for larger encrypted messages. Decrypted or unwrapped content is
+  parsed only within a structure budget (500 entities, forwarded messages 8 deep, retained nested
+  bodies at most twice the size limit; V-05): a message beyond it shows "message too large" for that
+  part.
 * CRL transfers share a 10-second budget and an 8-download limit per request. A synchronous DNS
   lookup already in progress cannot be interrupted by the plugin; configure resolver timeouts and
   PHP-FPM's `request_terminate_timeout` as the hard request lifetime bound.
@@ -441,3 +469,10 @@ See [COPYRIGHT](COPYRIGHT) for the copyright holder, author attribution and narr
 additional terms under GPLv3 section 7(b) and 7(c). These preserve source attribution and require
 modified versions to identify their changes; they do not prohibit forks, renaming, commercial use
 or charging for distribution. Earlier releases retain the terms under which they were received.
+
+## 13. Security review
+
+The code was reviewed with Anthropic's Mythos 5.1 on 2026-11-04 (full source review, dependency and
+platform advisory check, remediation of every accepted finding in release 1.0.3; see
+[CHANGELOG.md](CHANGELOG.md) and [SECURITY.md](SECURITY.md)). An automated review is not a
+certification: report anything it missed as described in SECURITY.md.

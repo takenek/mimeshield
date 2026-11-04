@@ -165,13 +165,17 @@
   CRLs follow `mimeshield_legacy_digests`: without `'sha1'` they give "unknown" (I-09 decision).
 * CRL replay (I-02): the highest cRLNumber per CRL issuer name, authority key identifier and
   distribution point URL is kept in Roundcube's `cache_shared` table; a CRL with a lower number is
-  "unknown" and is neither cached nor recorded (a cached copy is refetched). Accepted limits: the
-  entry lives 30 days (Roundcube's TTL cap, rewritten after a day of use); concurrent writers on
-  several servers may keep the lower of two new numbers, never one below the previous high mark;
-  a CRL without cRLNumber is handled as before.
+  "unknown" and is neither cached nor recorded (a cached copy is refetched). Since 2026-11-04 (V-02,
+  V-04) the row is written directly as JSON inside a transaction that locks the row and only ever
+  raises the number, so concurrent writers on several servers always keep the higher of two new
+  numbers; the row is validated on read (no `unserialize()` of table content) and its 30-day
+  lifetime is renewed on use by a compare-and-swap that cannot move the number. A CRL that does not
+  apply to the certificate - another distribution point, CA-only or user-only scope, not yet valid
+  - is "unknown" without touching the stored number or the disk cache (V-03). A CRL without
+  cRLNumber is handled as before.
 * When `mimeshield_revocation_proxy` is set, pinning and the connected-address check are performed
-  by the proxy, not by the plugin: the proxy must enforce the egress policy (or use
-  `mimeshield_revocation_allow_hosts`).
+  by the proxy, not by the plugin: `mimeshield_revocation_allow_hosts` is therefore REQUIRED with a
+  proxy; without it CRL checking is disabled and every status is "unknown" (V-12, `diag` FAIL).
 
 ### T8 XSS
 * Server: every dynamic value escaped; template-object handlers return escaped HTML; status bars
@@ -222,15 +226,26 @@
   bounded by its real work (F-08). Key imports are limited to 10 within 5 minutes per session and
   per user account (F-08), with atomic reservations in the existing database before cryptography.
   A missing user or failed quota write refuses the attempt; concurrent sessions share the quota.
-* Recipient status checks in compose are limited per session (30 per minute); the total memory of
-  separate Bcc envelopes is bounded (`mimeshield_max_total_envelope_bytes`, audit MS-10/MS-11).
+* Recipient status checks in compose are limited per session (30 per minute) and per account (60
+  per minute, across sessions); public certificate imports to 20 per 5 minutes per session and per
+  account; certificate detail pages to 60 per minute per session; at most 10 stored certificates are
+  evaluated per recipient address (V-07). The total memory of
+  separate Bcc envelopes is bounded (`mimeshield_max_total_envelope_bytes`, audit MS-10/MS-11), and
+  both size limits are capped at a fraction of PHP's `memory_limit` (1/6 for messages, 1/2 for
+  envelopes) because a processed part exists in several in-memory copies (V-06).
   At most 8 signed entities are extracted or verified per request, also for clear-signed and opaque
   content in compose/download (F-07).
   Limits per IP and request time limits
   (native OpenSSL work ignores `max_execution_time`) belong to the reverse proxy / WAF / PHP-FPM.
-  Decision (F-07): the total number of MIME parts is not limited (the plugin's work per non-S/MIME
-  part is constant; costly work is bounded); a PHP-FPM `request_terminate_timeout` or proxy timeout
-  is an installation requirement (`diag` reminds).
+  Decision (F-07): the total number of MIME parts of the original message is not limited (the
+  plugin's work per non-S/MIME part is constant; costly work is bounded); a PHP-FPM
+  `request_terminate_timeout` or proxy timeout is an installation requirement (`diag` reminds).
+  Content the plugin itself hands to `rcube_mime::parse_message()` - decrypted or unwrapped - is
+  bounded first by a structure budget (V-05): at most 500 entities, forwarded messages at most 8
+  deep, and the bodies the parser retains for nested messages at most twice the size limit; beyond
+  it the part shows "message too large" without being parsed.
+* Private key and certificate quotas are checked and the row inserted inside one transaction that
+  locks the user row, so concurrent uploads cannot exceed the quota (V-07).
 * "Save sender certificate" is limited per session and per user account (20 per minute, I-17).
 * Decryption tries only own keys that match a RecipientInfo; only when none matches, at most 5 other
   keys are tried (I-18 decision: interoperability with clients encoding the recipient identifier
@@ -238,12 +253,16 @@
 * Certificates embedded in received signatures reach OpenSSL before any plugin limit: an OpenSSL
   library affected by CVE-2026-35189 can be made to allocate excessive memory by a crafted message
   (F-16; `diag` warns, the fix is an OpenSSL update; CertPrecheck refuses such certificates in mail,
-  SignedData, OriginatorInfo and PKCS#7 uploads before libcrypto parses them). `diag` deliberately
-  does not warn for end-of-life OpenSSL branches 3.1-3.3, for which the advisory lists no fixed
-  version. Not covered by the pre-check: PKCS#12 import, CRLs in SignedData and the Freshest CRL
-  extension (the advisory names certificates only). CMS structures the plugin's parser cannot read
-  (e.g. non-minimal lengths, more than 20000 ASN.1 nodes) are shown as malformed / not decrypted
-  instead of being passed to OpenSSL (fail closed).
+  SignedData, OriginatorInfo and PKCS#7 uploads before libcrypto parses them, and since 2026-11-04
+  also the certBags of uploaded PKCS#12 files, V-08 - except certificates inside legacy encrypted
+  layers that only the OpenSSL CLI converter can read). `diag` warns for OpenSSL branches whose
+  upstream security support has ended (revised 2026-11-04, V-14; such a branch is acceptable only as
+  a distribution package with backported fixes). Not covered by the pre-check: CRLs in SignedData
+  and the Freshest CRL extension (the advisory names certificates only). CMS structures the plugin's
+  parser cannot read (e.g. non-minimal lengths, more than 20000 ASN.1 nodes) are shown as malformed
+  / not decrypted instead of being passed to OpenSSL (fail closed); AuthEnvelopedData with an
+  aes-nonce outside 7-16 octets and key-agreement RecipientInfos with an algorithm outside the
+  RFC 5753/8418 allow-list are refused before OpenSSL as well (V-09).
 * Upload size limits checked before reading; limits on keys/certificates per user, recipients per
   message, message size for S/MIME processing, ASN.1 nodes/depth, certificates per file, CRL size.
 

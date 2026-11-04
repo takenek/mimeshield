@@ -18,6 +18,7 @@ namespace MimeShield\Service;
 
 use MimeShield\Cert\Certificate;
 use MimeShield\Cert\ImportedKey;
+use MimeShield\Cert\KdfInspector;
 use MimeShield\Cert\KeyImporter;
 use MimeShield\Cert\LegacyPkcs12Converter;
 use MimeShield\Crypto\CmsInspector;
@@ -68,7 +69,9 @@ final class KeyService
             if ($e->getUserLabel() !== 'p12legacy' || $this->legacy === null) {
                 throw $e;
             }
-            // admin opted in: convert the legacy PKCS#12 with the openssl CLI (no shell, no disk)
+            // admin opted in: convert the legacy PKCS#12 with the openssl CLI (no shell, no disk); the
+            // certificates of its readable layers are pre-checked first (CVE-2026-35189, audit V-08)
+            KdfInspector::precheckCertificates($data, 'p12invalid');
             $pem = $this->legacy->toPem($data, $password);
             try {
                 $imported = $this->importer->import($pem, '');
@@ -116,7 +119,16 @@ final class KeyService
         $key = $imported->privateKeyPem();
         $blob = $this->vault->encrypt($key, KeyRecord::context($this->repo->userId(), $cert->fingerprint));
         $kid = KeyVault::blobKid($blob) ?? '';
-        $id = $this->repo->insert($cert, $imported->chain, $blob, $kid, KeyVault::FORMAT_VERSION);
+        $chain = $imported->chain;
+        $id = 0;
+        $this->repo->db()->transaction(function () use (&$id, $cert, $chain, $blob, $kid): void {
+            // quota and insert under the user's row lock: parallel imports cannot exceed it (audit V-07)
+            $this->repo->db()->lockUserRow($this->repo->userId());
+            if ($this->repo->count() >= $this->maxKeys) {
+                throw new ValidationException('toomanykeys', 'key limit reached', ['max' => (string) $this->maxKeys]);
+            }
+            $id = $this->repo->insert($cert, $chain, $blob, $kid, KeyVault::FORMAT_VERSION);
+        });
         Log::info('import', 'private key imported', ['fingerprint' => $cert->fingerprint, 'key_id' => $id]);
 
         // bind to matching identities: new key becomes the signing key when it is usable and

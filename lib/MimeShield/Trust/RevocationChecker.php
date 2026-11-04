@@ -52,6 +52,8 @@ final class RevocationChecker
 {
     public const MODE_OFF = 'off';
     public const MODE_CRL = 'crl';
+    /** checking requested but the configuration was refused (e.g. proxy without host allow-list, audit V-12) */
+    public const MODE_MISCONFIGURED = 'misconfigured';
 
     private const OID_CRL_NUMBER = '2.5.29.20';
     private const OID_DELTA_CRL = '2.5.29.27';
@@ -137,6 +139,10 @@ final class RevocationChecker
      */
     public function checkPath(array $path, ?TrustStore $store = null, ?int $now = null): RevocationResult
     {
+        if ($this->mode === self::MODE_MISCONFIGURED) {
+            // checking is on but cannot run: the status is undetermined, never "not checked" (audit V-12)
+            return new RevocationResult(RevocationResult::UNKNOWN, 'revocationunavailable');
+        }
         if (!$this->isEnabled()) {
             return new RevocationResult(RevocationResult::NOT_CHECKED, 'disabled');
         }
@@ -168,6 +174,9 @@ final class RevocationChecker
      */
     public function check(Certificate $cert, ?Certificate $issuer, ?int $now = null): RevocationResult
     {
+        if ($this->mode === self::MODE_MISCONFIGURED) {
+            return new RevocationResult(RevocationResult::UNKNOWN, 'revocationunavailable');
+        }
         if (!$this->isEnabled()) {
             return new RevocationResult(RevocationResult::NOT_CHECKED, 'disabled');
         }
@@ -185,7 +194,7 @@ final class RevocationChecker
         $lastReason = 'unavailable';
         foreach (array_slice($urls, 0, $this->maxUrls) as $url) {
             try {
-                $der = $this->obtain($url, $issuer, $now);
+                $der = $this->obtain($url, $cert, $issuer, $now);
                 return $this->evaluate($der, $cert, $issuer, $now);
             } catch (ValidationException $e) {
                 $lastReason = $e->getUserLabel();
@@ -207,7 +216,26 @@ final class RevocationChecker
     public function evaluate(string $crlDer, Certificate $cert, Certificate $issuer, int $now): RevocationResult
     {
         $crl = $this->parse($crlDer, $issuer);
+        $this->assertApplicable($crl, $cert, $now);
 
+        $serial = $cert->serialHex;
+        foreach ($crl['entries'] as $entry) {
+            if ($entry['serial'] === $serial) {
+                return new RevocationResult(RevocationResult::REVOKED, $entry['reason'], $entry['date']);
+            }
+        }
+        return new RevocationResult(RevocationResult::GOOD, '', null, $crl['nextUpdate']);
+    }
+
+    /**
+     * The parsed CRL applies to $cert at $now: scope (IssuingDistributionPoint), CA / end-entity
+     * restriction and validity window. Runs before any state (cRLNumber mark, disk cache) is persisted
+     * for a fetched or cached list (audit V-03), and again in evaluate().
+     *
+     * @param array{thisUpdate: int, nextUpdate: ?int, entries: list<array{serial: string, date: ?int, reason: string}>, idpUris: list<string>, idpScoped: bool, onlyUser: bool, onlyCa: bool, number: ?string, aki: string} $crl
+     */
+    private function assertApplicable(array $crl, Certificate $cert, int $now): void
+    {
         // RFC 5280 6.3.3 (b)(2): a CRL whose IssuingDistributionPoint names another distribution
         // point is out of scope for this certificate. A fullName with only unsupported name forms
         // (e.g. directoryName) is still a scope restriction, never "no IDP" (audit MS-06).
@@ -229,20 +257,14 @@ final class RevocationChecker
         if ($crl['nextUpdate'] === null || $crl['nextUpdate'] < $now - self::CLOCK_SKEW) {
             throw new ValidationException('revocationunavailable', 'CRL expired');
         }
-
-        $serial = $cert->serialHex;
-        foreach ($crl['entries'] as $entry) {
-            if ($entry['serial'] === $serial) {
-                return new RevocationResult(RevocationResult::REVOKED, $entry['reason'], $entry['date']);
-            }
-        }
-        return new RevocationResult(RevocationResult::GOOD, '', null, $crl['nextUpdate']);
     }
 
     /**
-     * Fetch (or load from cache) a CRL for $url. Cached CRLs are re-validated on every use.
+     * Fetch (or load from cache) a CRL for $url that applies to $cert. Cached CRLs are re-validated on
+     * every use; a list is cached and its cRLNumber recorded only after it passed every check for the
+     * certificate it was fetched for (audit V-03).
      */
-    private function obtain(string $url, Certificate $issuer, int $now): string
+    private function obtain(string $url, Certificate $cert, Certificate $issuer, int $now): string
     {
         if (isset($this->memory[$url])) {
             return $this->memory[$url];
@@ -252,15 +274,27 @@ final class RevocationChecker
             $age = $now - (int) @filemtime($cacheFile);
             if ($age >= 0 && $age < $this->maxCacheAge) {
                 $der = (string) @file_get_contents($cacheFile, false, null, 0, $this->maxCrlBytes + 1);
+                $cached = null;
                 try {
                     $crl = $this->parse($der, $issuer);
                     if ($crl['nextUpdate'] !== null && $crl['nextUpdate'] >= $now) {
-                        // an older CRL than already seen elsewhere (another server) is refetched (I-02)
-                        $this->checkNumber($crl, $issuer, $url);
-                        return $this->memory[$url] = $der;
+                        $cached = $crl;
                     }
                 } catch (ValidationException) {
-                    // fall through: refetch
+                    // unreadable or foreign content: refetch
+                }
+                if ($cached !== null) {
+                    // A validly signed list that does not apply to this certificate (scope, CA/end-entity
+                    // restriction, not yet valid) is still the right file for its URL: no refetch and,
+                    // above all, no state change - "unknown" for this certificate (audit V-03).
+                    $this->assertApplicable($cached, $cert, $now);
+                    try {
+                        // an older CRL than already seen elsewhere (another server) is refetched (I-02)
+                        $this->checkNumber($cached, $issuer, $url);
+                        return $this->memory[$url] = $der;
+                    } catch (ValidationException) {
+                        // fall through: refetch
+                    }
                 }
             }
         }
@@ -312,6 +346,9 @@ final class RevocationChecker
             if ($crl['nextUpdate'] === null || $crl['nextUpdate'] < $now - self::CLOCK_SKEW) {
                 throw new ValidationException('revocationunavailable', 'CRL expired');
             }
+            // scope, CA/end-entity restriction and thisUpdate BEFORE any state is persisted: a list of
+            // another scope must neither raise the number mark nor land in the disk cache (audit V-03)
+            $this->assertApplicable($crl, $cert, $now);
             // a replayed older CRL is neither used nor cached (audit I-02)
             $this->checkNumber($crl, $issuer, $url);
         } catch (ValidationException | \TypeError | \ValueError $e) {

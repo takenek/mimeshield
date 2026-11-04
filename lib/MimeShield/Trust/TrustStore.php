@@ -21,6 +21,7 @@ use MimeShield\Config;
 use MimeShield\Crypto\SecureTemp;
 use MimeShield\Exception\MimeShieldException;
 use MimeShield\Exception\ValidationException;
+use MimeShield\FileCheck;
 use MimeShield\Log;
 
 /**
@@ -79,11 +80,14 @@ final class TrustStore
     {
         $files = [];
         foreach ($this->bundleFiles as $f) {
-            if (is_file($f) && is_readable($f)) {
-                $files[] = $f;
-            } else {
+            if (!is_file($f) || !is_readable($f)) {
                 Log::warning('truststore', 'configured CA bundle not readable', ['file' => $f]);
+                continue;
             }
+            if (!self::fileTrusted($f, 'CA bundle')) {
+                continue;
+            }
+            $files[] = $f;
         }
         if ($this->useSystemStore && ($sys = self::systemBundle()) !== null) {
             $files[] = $sys;
@@ -251,6 +255,21 @@ final class TrustStore
     }
 
     /**
+     * Anchors and intermediates decide what is trusted: a file any local user may write is ignored
+     * (fail closed, logged); a group-writable file or one owned by an unexpected user is reported
+     * once per process and in diag (audit V-10).
+     */
+    private static function fileTrusted(string $file, string $what): bool
+    {
+        if (FileCheck::isWorldWritable($file)) {
+            Log::error('truststore', $what . ' is world-writable - ignored', ['file' => $file]);
+            return false;
+        }
+        FileCheck::warnOnce('truststore', $what, $file);
+        return true;
+    }
+
+    /**
      * Path of the OpenSSL default CA bundle, if present.
      */
     public static function systemBundle(): ?string
@@ -282,6 +301,9 @@ final class TrustStore
         $size = @filesize($file);
         if ($size === false || $size > 8 * 1024 * 1024) {
             Log::warning('truststore', 'CA file too large or unreadable', ['file' => $file]);
+            return [];
+        }
+        if (!self::fileTrusted($file, 'trust file')) {
             return [];
         }
         $data = @file_get_contents($file);

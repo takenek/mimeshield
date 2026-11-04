@@ -1118,6 +1118,30 @@ final class IncomingProcessorTest extends TestCase
         $this->assertNoInternalError($proc);
     }
 
+    /**
+     * Audit V-05: an entity whose structure would cost far more memory than its size when parsed (deeply
+     * nested forwarded messages, each retained in full by the platform parser) is refused before
+     * rcube_mime::parse_message() runs - here a few kilobytes inside an encrypted message.
+     */
+    public function testDeeplyNestedForwardedMessagesAreRefusedBeforeTheParserRuns(): void
+    {
+        $entity = self::TEXT;
+        for ($i = 0; $i < 12; $i++) {
+            $entity = "Content-Type: message/rfc822\r\n\r\n" . self::headers() . $entity;
+        }
+        $raw = $this->envelopedMessage($entity);
+        $msg = self::message($raw);
+        $proc = $this->processor($raw);
+
+        $res = self::hook($proc, $msg, $msg->headers->structure);
+        self::assertSame('application/pkcs7-mime', $res['mimetype'], 'the ciphertext part stays in place');
+        self::assertSame($msg->headers->structure, $res['structure']);
+        self::assertSame('messagetoolarge', self::partStatus($proc, '1')->signatureError);
+        self::assertFalse($proc->isDecryptedPart('1'));
+        self::assertStringContainsString('MIME structure budget: nested messages 12 deep', implode("\n", $GLOBALS['mimeshield_test_log']));
+        $this->assertNoInternalError($proc);
+    }
+
     // --- enveloped -----------------------------------------------------------------------------
 
     public function testEnvelopedForAliceIsDecrypted(): void

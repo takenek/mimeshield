@@ -20,6 +20,7 @@ use MimeShield\Cert\KeyImporter;
 use MimeShield\Cert\LegacyPkcs12Converter;
 use MimeShield\Cert\PublicCertImporter;
 use MimeShield\Crypto\CmsService;
+use MimeShield\Crypto\SecureTemp;
 use MimeShield\Exception\StorageException;
 use MimeShield\KeyStore\KeyVault;
 use MimeShield\KeyStore\MasterKeyProvider;
@@ -104,20 +105,28 @@ final class Services
     {
         if ($this->revocation === null) {
             $http = null;
-            if ($this->config->revocationMode() === RevocationChecker::MODE_CRL) {
+            $mode = $this->config->revocationMode();
+            $proxy = (string) $this->config->get('mimeshield_revocation_proxy');
+            if ($mode === RevocationChecker::MODE_CRL && $proxy !== '' && $this->config->list('mimeshield_revocation_allow_hosts') === []) {
+                // through a proxy the plugin cannot pin the connected address (audit I-03): without a
+                // host allow-list the configuration is refused and every status is "unknown" (audit V-12)
+                $mode = RevocationChecker::MODE_MISCONFIGURED;
+                Log::error('revocation', 'mimeshield_revocation_proxy is set without mimeshield_revocation_allow_hosts: CRL checking refused, revocation status is unknown');
+            }
+            if ($mode === RevocationChecker::MODE_CRL) {
                 $http = new SafeHttpClient(
                     $this->config->int('mimeshield_revocation_timeout', 1, 30),
                     min(3, $this->config->int('mimeshield_revocation_timeout', 1, 30)),
                     [80, 443],
                     $this->config->list('mimeshield_revocation_allow_hosts'),
                     $this->config->list('mimeshield_revocation_deny_hosts'),
-                    (string) $this->config->get('mimeshield_revocation_proxy'),
+                    $proxy,
                 );
             }
             $this->revocation = new RevocationChecker(
-                $this->config->revocationMode(),
+                $mode,
                 $http,
-                $this->config->tempBaseDir() . '/mimeshield',
+                SecureTemp::pluginDir($this->config->tempBaseDir()),
                 $this->config->int('mimeshield_revocation_max_bytes', 65536, 104857600),
                 $this->config->int('mimeshield_revocation_cache_ttl', 60, 604800),
                 acceptSha1: in_array('sha1', $this->config->legacyDigests(), true),
@@ -128,16 +137,16 @@ final class Services
     }
 
     /**
-     * Highest cRLNumber per CRL issuer/scope in Roundcube's shared cache (audit I-02). Always the db
-     * driver (table cache_shared): deliberately not rcube::get_cache_shared(), which is off unless a
-     * "<name>_cache" option is set and whose driver/TTL options could be overridden by user
-     * preferences (audit I-02 decision 2026-10-03). Without the cache there is no rollback tracking.
+     * Highest cRLNumber per CRL issuer/scope in Roundcube's cache_shared table (audit I-02), written
+     * directly with an atomic "raise to maximum" (audit V-02) as JSON (audit V-04): deliberately not
+     * rcube_cache / rcube::get_cache_shared(), whose buffered plain overwrite and unserialize() do not
+     * fit a security state. Without the table there is no rollback tracking.
      */
     private function crlNumberStore(): ?SharedCacheCrlNumberStore
     {
         try {
-            $cache = \rcube_cache::factory('db', 0, SharedCacheCrlNumberStore::PREFIX, SharedCacheCrlNumberStore::TTL);
-            return new SharedCacheCrlNumberStore($cache);
+            // direct rows of cache_shared (atomic maximum, JSON): not rcube_cache (audit V-02, V-04)
+            return new SharedCacheCrlNumberStore($this->db());
         } catch (\Throwable $e) {
             Log::info('revocation', 'CRL number tracking disabled: shared cache unavailable (' . $e->getMessage() . ')');
             return null;
@@ -207,9 +216,9 @@ final class Services
             $this->config->bool('mimeshield_encrypt_to_self'),
             $this->config->bool('mimeshield_encrypt_drafts'),
             $this->config->bccMode(),
-            $this->config->int('mimeshield_max_message_size', 65536, PHP_INT_MAX),
+            $this->config->maxMessageSize(),
             $this->config->int('mimeshield_max_recipients', 1, 1000),
-            $this->config->int('mimeshield_max_total_envelope_bytes', 1048576, PHP_INT_MAX),
+            $this->config->maxTotalEnvelopeBytes(),
         );
     }
 
@@ -224,7 +233,7 @@ final class Services
             $this->cms(),
             $verify ? $this->verifier() : null,
             static fn () => $rc->get_storage(),
-            $this->config->int('mimeshield_max_message_size', 65536, PHP_INT_MAX),
+            $this->config->maxMessageSize(),
             $allowDecrypt,
         );
     }

@@ -212,6 +212,18 @@ final class LogTest extends TestCase
         self::assertSame('ERROR import: bad file data=[BINARY-REDACTED] key=[PEM-REDACTED]', $this->lines[0]);
     }
 
+    public function testFingerprintsAreShortenedOutsideDebugLogging(): void
+    {
+        $fp = str_repeat('ab', 32);
+        Log::info('certstore', 'certificate stored', ['fingerprint' => $fp, 'source' => 'test']);
+        $line = (string) end($this->lines);
+        self::assertStringContainsString('fingerprint=' . substr($fp, 0, Log::FINGERPRINT_LOG_CHARS) . '...', $line);
+        self::assertStringNotContainsString($fp, $line);
+        Log::setDebug(true);
+        Log::debug('certstore', 'certificate stored', ['fingerprint' => $fp]);
+        self::assertStringContainsString('fingerprint=' . $fp, (string) end($this->lines));
+    }
+
     public function testDebugOnlyWhenEnabled(): void
     {
         Log::debug('cms', 'hidden');

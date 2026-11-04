@@ -109,6 +109,17 @@ final class Database
         return is_array($row) ? $row : null;
     }
 
+    /**
+     * Lock the user's row for the rest of the current transaction (no-op update: a row lock on
+     * InnoDB / PostgreSQL, the database write lock on SQLite), so that a quota check and the insert
+     * it guards are serialised across sessions and workers of one account (audit V-07). No error when
+     * the row is absent.
+     */
+    public function lockUserRow(int $userId): void
+    {
+        $this->query('UPDATE ' . $this->table('users') . ' SET `user_id` = `user_id` WHERE `user_id` = ?', $userId);
+    }
+
     public function insertId(string $table): int
     {
         // NOTE: unprefixed name - the pgsql driver builds "<prefix><table>_seq" itself

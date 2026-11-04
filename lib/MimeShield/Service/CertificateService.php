@@ -35,6 +35,9 @@ use MimeShield\Trust\VerificationResult;
  */
 final class CertificateService
 {
+    /** certificate records evaluated per recipient address (preferred first, then newest; audit V-07) */
+    private const MAX_CANDIDATES_PER_ADDRESS = 10;
+
     public const R_OK = 'ok';
     public const R_UNTRUSTED = 'untrusted';   // usable only when policy = warn
     public const R_MISSING = 'missing';
@@ -197,7 +200,9 @@ final class CertificateService
         }
 
         $best = ['status' => self::R_MISSING, 'cert' => null, 'detail' => ''];
-        foreach ($this->repo->findByEmail($email) as $rec) {
+        // preferred first, then newest: every candidate costs a chain validation (and with CRL checking
+        // possibly downloads), so one address evaluates at most MAX_CANDIDATES_PER_ADDRESS (audit V-07)
+        foreach (array_slice($this->repo->findByEmail($email), 0, self::MAX_CANDIDATES_PER_ADDRESS) as $rec) {
             $eval = $this->evaluate($rec, $email);
             if ($eval['status'] === self::R_OK) {
                 return $eval;
@@ -300,15 +305,25 @@ final class CertificateService
         if ($this->repo->count() >= $this->maxCerts) {
             throw new ValidationException('toomanycerts', 'certificate limit reached', ['max' => (string) $this->maxCerts]);
         }
+        // chain validation (OpenSSL, temporary files) stays outside the transaction
         $chain = $this->chains->validate($cert, $chainPems, $cert->canEncrypt() ? ChainValidator::PURPOSE_ENCRYPT : ChainValidator::PURPOSE_SIGN);
         $trust = $chain->isTrusted() ? CertRepository::TRUST_VERIFIED
             : ($source === CertRepository::SOURCE_MESSAGE ? CertRepository::TRUST_OBSERVED : CertRepository::TRUST_UNTRUSTED);
         $emails = $cert->emails($this->subjectEmailFallback);
-        $id = $this->repo->insert($cert, $emails, $chainPems, $source, $trust);
-        // a newly added certificate becomes the preferred one for its addresses
-        foreach ($emails as $email) {
-            $this->repo->setPreferred($id, $email);
-        }
+        $id = 0;
+        $this->repo->db()->transaction(function () use (&$id, $cert, $emails, $chainPems, $source, $trust): void {
+            // quota, insert and preference under the user's row lock: parallel imports cannot exceed the
+            // quota (audit V-07)
+            $this->repo->db()->lockUserRow($this->repo->userId());
+            if ($this->repo->count() >= $this->maxCerts) {
+                throw new ValidationException('toomanycerts', 'certificate limit reached', ['max' => (string) $this->maxCerts]);
+            }
+            $id = $this->repo->insert($cert, $emails, $chainPems, $source, $trust);
+            // a newly added certificate becomes the preferred one for its addresses
+            foreach ($emails as $email) {
+                $this->repo->setPreferred($id, $email);
+            }
+        });
         Log::info('certstore', 'certificate stored', ['fingerprint' => $cert->fingerprint, 'source' => $source, 'trust' => $trust]);
         return $id;
     }

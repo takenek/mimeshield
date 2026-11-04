@@ -92,6 +92,16 @@ final class CertRepository
         return array_map(static fn (array $r) => new CertRecord($r, !empty($r['preferred']) ? [strtolower($email)] : []), $rows);
     }
 
+    public function db(): Database
+    {
+        return $this->db;
+    }
+
+    public function userId(): int
+    {
+        return $this->userId;
+    }
+
     public function count(): int
     {
         $row = $this->db->fetchOne('SELECT COUNT(*) AS cnt FROM ' . $this->db->table('mimeshield_certs') . ' WHERE `user_id` = ?', $this->userId);

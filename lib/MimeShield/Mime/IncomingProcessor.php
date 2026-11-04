@@ -53,6 +53,18 @@ final class IncomingProcessor
      */
     public const MAX_SIGNATURE_CHECKS = 8;
 
+    /**
+     * Structure budget of one injected (decrypted / unwrapped) entity, checked BEFORE
+     * rcube_mime::parse_message() materialises its tree (audit V-05): the platform parser retains the
+     * full body of every nested message/rfc822 layer, so memory grows with size x nesting depth, not
+     * with the size alone that mimeshield_max_message_size bounds. Sibling forwarded messages (digests)
+     * retain their own bodies only and stay cheap.
+     */
+    private const MAX_MIME_PARTS = 500;
+    private const MAX_NESTED_MESSAGE_DEPTH = 8;
+    /** total body bytes retained by nested messages, relative to the size limit of one entity */
+    private const RETAINED_BODY_FACTOR = 2;
+
     private const SIG_TYPES = ['application/pkcs7-signature', 'application/x-pkcs7-signature'];
     private const MIME_TYPES = ['application/pkcs7-mime', 'application/x-pkcs7-mime'];
 
@@ -630,8 +642,87 @@ final class IncomingProcessor
         if (!is_string($raw) || $raw === '' || strlen($raw) > $this->maxSize) {
             return '';
         }
-        $part = \rcube_mime::parse_message(EntityBuilder::canonicalizeLineEndings($raw));
+        $raw = EntityBuilder::canonicalizeLineEndings($raw);
+        self::assertMimeBudget($raw, $this->maxSize);
+        $part = \rcube_mime::parse_message($raw);
         return $part instanceof \rcube_message_part && is_string($part->body) ? $part->body : '';
+    }
+
+    /**
+     * Refuse an entity whose MIME structure would cost more than the budget when parsed: too many
+     * entities, nested messages too deep, or nested message bodies (each retained in full by the
+     * platform parser) exceeding RETAINED_BODY_FACTOR x $maxSize. A cheap scan of the Content-Type
+     * headers and the boundary delimiters declared before each nested message; the span of a nested
+     * message ends at the next delimiter of a multipart declared before it (an ancestor), never at one
+     * of its own multiparts. Fail closed: the message is shown as too large, never parsed.
+     *
+     * @throws ValidationException 'messagetoolarge'
+     *
+     * @internal public for tests
+     */
+    public static function assertMimeBudget(string $entity, int $maxSize): void
+    {
+        $parts = preg_match_all('/^Content-Type:/mi', $entity);
+        if ($parts > self::MAX_MIME_PARTS) {
+            throw new ValidationException('messagetoolarge', 'MIME structure budget: ' . $parts . ' entities');
+        }
+        if (preg_match_all('/^Content-Type:[ \t]*message\/rfc822\b/mi', $entity, $nested, PREG_OFFSET_CAPTURE) === 0) {
+            return;
+        }
+        $size = strlen($entity);
+        // delimiter line positions of every multipart, with the offset of its declaration
+        $boundaries = [];
+        preg_match_all('/^Content-Type:(?:[^\r\n]|\r?\n[ \t])*/mi', $entity, $headers, PREG_OFFSET_CAPTURE);
+        foreach ($headers[0] as [$header, $declared]) {
+            if (preg_match('/boundary=(?:"([^"]{1,200})"|([^\s;"]{1,200}))/i', $header, $bm)) {
+                $delimiter = '/^--' . preg_quote($bm[1] !== '' ? $bm[1] : $bm[2], '/') . '(?:--)?[ \t]*\r?$/m';
+                preg_match_all($delimiter, $entity, $dm, PREG_OFFSET_CAPTURE);
+                $boundaries[] = [$declared, array_map(static fn (array $d): int => $d[1], $dm[0])];
+            }
+        }
+        $spans = [];
+        foreach ($nested[0] as [, $start]) {
+            $end = $size;
+            foreach ($boundaries as [$declared, $positions]) {
+                if ($declared >= $start) {
+                    continue;   // declared inside the nested message: one of its own multiparts
+                }
+                foreach ($positions as $pos) {
+                    if ($pos > $start) {
+                        $end = min($end, $pos);
+                        break;   // positions ascend
+                    }
+                }
+            }
+            $spans[] = [$start, $end];
+        }
+        $retained = 0;
+        $deepest = 0;
+        foreach ($spans as $i => [$start, $end]) {
+            $retained += $end - $start;
+            $depth = 1;
+            foreach ($spans as $j => [$s, $e]) {
+                if ($j !== $i && $s < $start && $e >= $end) {
+                    $depth++;
+                }
+            }
+            $deepest = max($deepest, $depth);
+        }
+        if ($deepest > self::MAX_NESTED_MESSAGE_DEPTH) {
+            throw new ValidationException('messagetoolarge', 'MIME structure budget: nested messages ' . $deepest . ' deep');
+        }
+        if ($retained > self::RETAINED_BODY_FACTOR * $maxSize) {
+            throw new ValidationException('messagetoolarge', 'MIME structure budget: nested message bodies of ' . $retained . ' bytes');
+        }
+    }
+
+    private static function partCount(\rcube_message_part $part): int
+    {
+        $n = 1;
+        foreach ($part->parts as $child) {
+            $n += self::partCount($child);
+        }
+        return $n;
     }
 
     private function decrypt(string $der): string
@@ -673,6 +764,8 @@ final class IncomingProcessor
         if (strlen($entity) > $this->maxSize) {
             throw new ValidationException('messagetoolarge', 'decrypted content too large');
         }
+        // structure budget before the platform parser allocates the tree (audit V-05)
+        self::assertMimeBudget($entity, $this->maxSize);
         $msg = $p['object'];
         $oldStruct = $p['structure'];
         $oldId = (string) $oldStruct->mime_id;
@@ -680,6 +773,9 @@ final class IncomingProcessor
         $new = \rcube_mime::parse_message($entity);
         if (!$new instanceof \rcube_message_part) {
             throw new ValidationException('malformed', 'decrypted content is not MIME');
+        }
+        if (self::partCount($new) > self::MAX_MIME_PARTS) {
+            throw new ValidationException('messagetoolarge', 'MIME structure budget: too many parts after parsing');
         }
 
         foreach (array_keys($msg->mime_parts) as $idx) {
