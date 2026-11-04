@@ -103,10 +103,13 @@ Only the latest release receives security fixes.
 * The database schema of the plugin must be current: while it is missing or outdated, sending or
   saving a draft that is expected to be signed or encrypted is refused (fail closed).
 * Decrypted HTML is rendered by Roundcube core: run a Roundcube release with current security fixes
-  (≥ 1.7.4) and keep the OpenSSL library used by PHP-FPM patched. Certificates embedded in received
-  signatures are parsed by OpenSSL before any plugin limit applies: use an OpenSSL library with the
-  fix for CVE-2026-35189 (≥ 3.0.23, 3.4.8, 3.5.9, 3.6.5 or 4.0.3, or a distribution package with the
-  backported fix); `bin/mimeshield.sh diag` warns otherwise.
+  (≥ 1.7.5; check <https://roundcube.net/news/> for newer ones) on a PHP patch level with current
+  security fixes (≥ 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12, or a distribution backport) and keep the
+  OpenSSL library used by PHP-FPM patched and on a supported branch. Certificates embedded in
+  received signatures or uploaded in PKCS#12 files are parsed by OpenSSL after the plugin's
+  pre-check, which covers the published trigger of CVE-2026-35189 only: use an OpenSSL library with
+  the fix (≥ 3.0.23, 3.4.8, 3.5.9, 3.6.5 or 4.0.3, or a distribution package with the backported
+  fix); `bin/mimeshield.sh diag` warns otherwise and for end-of-life branches.
 * Subjects and other headers are not encrypted by S/MIME.
 
 See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full threat model and
@@ -116,19 +119,33 @@ See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full threat model and
 
 * HTTPS only, `session_samesite = 'Strict'` or `'Lax'`, `use_https = true`.
 * `mimeshield_temp_dir` on a tmpfs (e.g. a dedicated directory under `/dev/shm`) owned by the PHP
-  user (`diag` warns otherwise); consider `mimeshield_temp_dir_strict = true` to refuse S/MIME
-  operations instead of falling back to the system temp directory.
+  user, mode 0700 (`diag` warns otherwise); consider `mimeshield_temp_dir_strict = true` to refuse
+  S/MIME operations instead of falling back to the system temp directory (where the plugin uses a
+  `mimeshield-<uid>` subdirectory, V-11).
 * Enable `mimeshield_revocation = 'crl'` wherever outbound HTTP from the web server is acceptable
   (recommended); then consider `mimeshield_revocation_allow_hosts`, a proxy and
   `mimeshield_revocation_unknown`, and bound DNS (`options timeout:1 attempts:2` in
-  `/etc/resolv.conf` or a local caching resolver - required, `diag` checks it).
-* Run a PHP branch with security support (PHP >= 8.3 recommended; `diag` warns).
+  `/etc/resolv.conf` or a local caching resolver - required, `diag` checks it). A proxy REQUIRES
+  the allow-list: without it CRL checking is disabled and every status is "unknown" (V-12).
+* Run a PHP branch with security support at its current patch level (PHP >= 8.3 recommended;
+  `diag` warns below 8.2.35 / 8.3.36 / 8.4.27 / 8.5.12 and for unsupported branches, V-14), and
+  Roundcube ≥ 1.7.5 (V-01).
+* Keep the master key file, the CA bundle and intermediate bundles owned by root or the PHP user
+  and not writable by others (`diag` and the log warn for foreign owners; a world-writable trust
+  bundle is refused, V-10). Prefer the key file to `mimeshield_master_key_env`: an environment
+  variable is inherited by every PHP-FPM worker and visible to every script of the pool (`diag`
+  warns, N-09).
+* Keep PHP's `memory_limit` in mind: the message and envelope size limits are capped at 1/6 and
+  1/2 of it (V-06); `diag` shows the effective values.
 * Configure `mimeshield_ca_bundle` with S/MIME roots and keep `mimeshield_use_system_ca = false`.
 * Add rate limits for the Roundcube endpoints at the reverse proxy / WAF and a request time limit
   (`request_terminate_timeout` in PHP-FPM, proxy read timeout): native OpenSSL work is not
-  interrupted by `max_execution_time`. The plugin limits key imports per session and per user,
-  recipient checks per session, "save sender certificate" requests per session and per account, signed-entity extraction or
-  verification per request (8, including clear-signed and opaque content in compose/download) and CRL downloads per request
+  interrupted by `max_execution_time`. The plugin limits key and certificate imports per session
+  and per user, recipient checks per session and per account, certificate detail pages per session,
+  "save sender certificate" requests per session and per account (V-07), signed-entity extraction or
+  verification per request (8, including clear-signed and opaque content in compose/download), the
+  structure of decrypted or unwrapped content (500 entities, 8 nested forwards, retained bodies at
+  most twice the size limit, V-05) and CRL downloads per request
   (8, within a shared 10-second transfer budget). Resolver timeouts and PHP-FPM must also bound
   synchronous DNS calls, which cannot be interrupted while running.
 * Keep the CRL cache and its immediate parent private (PHP-owned, mode 0700, no symlinks).
@@ -142,10 +159,14 @@ See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for the full threat model and
   `mimeshield_use_system_ca`, `mimeshield_intermediates`, `mimeshield_master_key_file`,
   `mimeshield_master_key_env`, `mimeshield_master_key_active`, `mimeshield_options_lock`.
 * Run `plugins/mimeshield/bin/mimeshield.sh diag` after every upgrade.
-* Restrict `log_dir` permissions; the plugin never logs secrets, but logs contain user ids and
-  certificate fingerprints. Unexpected exceptions log their type by default; their sanitised
-  messages are emitted only with `mimeshield_debug`, and may still include personal data or
-  infrastructure details. Keep debug logging disabled during normal operation.
+* Restrict `log_dir` permissions and limit retention; the plugin never logs secrets, but the
+  `mimeshield` log records S/MIME activity: level, operation, the Roundcube user id, the user-facing
+  label of a refused operation, draft/message ids, the first 16 hex digits of certificate
+  fingerprints (full fingerprints and the sanitised internal exception messages only with
+  `mimeshield_debug`, audit V-13), fixed context values such as algorithm names, and file paths of
+  misconfigured administrator files. Unexpected exceptions log their type by default; their
+  sanitised messages are emitted only with `mimeshield_debug`, and may still include personal data
+  or infrastructure details. Keep debug logging disabled during normal operation.
 
 ## Design decisions and accepted risks
 
@@ -157,16 +178,27 @@ longer holds.
 |---|---|---|---|
 | I-01 | `mimeshield_revocation = 'off'` by default; SHA-1 signatures accepted with a warning (never green). | CRL checks need outbound HTTP and tell CAs which certificates are checked; the UI says "revocation not checked". Outlook on the web signs with SHA-1. | Set `'crl'` where egress is allowed; set `mimeshield_legacy_digests = []` to reject SHA-1. |
 | I-09 | SHA-1 signed CRLs follow `mimeshield_legacy_digests`. | One policy for SHA-1 in signatures and CRLs. | None (or remove `'sha1'`). |
-| I-02 | Highest cRLNumber per CRL issuer/distribution point kept in Roundcube's `cache_shared`; lower numbers give "unknown". | Prevents replay of an older CRL. TTL is 30 days (Roundcube cap), refreshed daily; concurrent writers are best effort but never go below the previous high-water mark. | Keep the `cache_shared` table (Roundcube schema). |
+| I-02 | Highest cRLNumber per CRL issuer/distribution point kept in Roundcube's `cache_shared`; lower numbers give "unknown". | Prevents replay of an older CRL. Since 2026-11-04 (V-02/V-04) the row is written directly as JSON inside a row-locking transaction that only ever raises the number (no `rcube_cache` serialization, no `unserialize()` of table content); the 30-day lifetime is renewed on use without touching the number. | Keep the `cache_shared` table (Roundcube schema). |
 | I-14 | composer keeps `php >=8.1 <8.6`. | Roundcube 1.7 supports 8.1; a plugin cannot update the host runtime. | Use a PHP branch with security support (>= 8.3 recommended); `diag` warns. |
 | I-15 | Fallback to the system temp directory stays the default; new `mimeshield_temp_dir_strict`. | Refusing by default would break mail display on a misconfigured host; the fallback is logged and reported. | Put the temp dir on tmpfs; optionally enable strict mode. |
 | I-18 | Unmatched own keys are tried only when no RecipientInfo matches, at most 5. | Interoperability with clients that encode the recipient identifier differently, with bounded work. A message that lists one own key but is encrypted to another no longer decrypts. | None. |
-| F-07 | No limit on the total number of MIME parts. | Work per non-S/MIME part is constant; costly work is bounded (8 signature checks, CRL budget). | **Required:** PHP-FPM `request_terminate_timeout` or a reverse-proxy timeout. |
+| F-07 | No limit on the total number of MIME parts of the original message. | Work per non-S/MIME part is constant; costly work is bounded (8 signature checks, CRL budget). Content the plugin itself hands to the MIME parser (decrypted or unwrapped) is bounded since 2026-11-04 (V-05: 500 entities, 8 nested forwards, retained bodies at most twice the size limit). | **Required:** PHP-FPM `request_terminate_timeout` or a reverse-proxy timeout. |
 | F-14 | DNS lookups for CRL downloads stay synchronous. | They cannot be interrupted without losing SSRF DNS pinning. | **Required with CRL:** `options timeout:1 attempts:2` (at most 6 s with 3 name servers) or a local caching resolver; `diag` warns above 10 s. |
-| F-16 | `CertPrecheck` refuses certificates with risky CRL distribution points before OpenSSL; OpenSSL update still required. `diag` does not warn for end-of-life branches 3.1-3.3. | The advisory lists fixed versions only for supported branches; the pre-check covers the plugin's own input paths, not every libcrypto use. | **Required:** OpenSSL with the CVE-2026-35189 fix. |
+| F-16 | `CertPrecheck` refuses certificates with risky CRL distribution points before OpenSSL, since 2026-11-04 also inside PKCS#12 uploads (V-08); OpenSSL update still required. Revised 2026-11-04 (V-14): `diag` now warns for every OpenSSL branch whose upstream security support has ended (1.1.1, 3.1-3.4, 3.6, 3.0 from 2026-09-07). | The pre-check covers the plugin's own input paths, not every libcrypto use; an unsupported branch is acceptable only as a distribution package with backported fixes, which the version number cannot show. | **Required:** OpenSSL with the CVE-2026-35189 fix on a supported branch or with distribution backports. |
 | I-05 | CI with SHA-pinned actions and `docs/RELEASING.md`. | Signing tags and Packagist publication need the maintainer's credentials. | Install a tagged version once one is published; until then a reviewed, pinned commit (see README 2.1). |
 | I-07 | Separate Bcc envelopes are not delivered atomically. | SMTP has no transaction across envelopes; the user is told about partial delivery. | Use `separate` Bcc mode (default) knowingly. |
 | I-17 | "Save sender certificate" limited per session and per account. | An exhausted account limit also uses a session slot (same as key import). | None. |
 | F-01 | A forwarded `message/rfc822` without a parsed Content-Type is matched by its second part type only. | Its status is always "partial", never green. | None. |
 | F-02 | With several bundle certificates of the same subject and key, OpenSSL may pick any of them as anchor. | Not a bypass: the anchor is still in the administrator bundle. | Avoid duplicate anchors in bundles. |
 | F-12 | No directory fsync after the key file rename. | After a crash the old (complete) key file survives. | Back up the master key. |
+
+Decisions taken on 2026-11-04 after the second security review (IDs V-xx / N-xx of that review):
+
+| Audit ID | Decision | Rationale | Administrator action |
+|---|---|---|---|
+| V-06 | The size limits are capped at a fraction of `memory_limit` (1/6 message, 1/2 envelopes) instead of lowering the defaults. | A processed part exists in several in-memory copies; the cap turns a fatal error into "message too large" on every installation without changing documented defaults. | Raise `memory_limit` for larger encrypted messages; `diag` shows the effective limits. |
+| V-10 | Foreign ownership of the master key file or a trust bundle is a warning (log once, `diag`), not a refusal; only a world-writable trust bundle is refused. | Legitimate layouts (configuration-management owners, root-owned bundles) must keep working; the 0o027 refusal for the key file stays. | Keep the files owned by root or the PHP user. |
+| V-11 | Only the fallback below the shared system temp directory gets the `-<uid>` suffix. | Configured directories are private by requirement; the shared `/tmp` is the only place another user can pre-create the name. | Configure `mimeshield_temp_dir`. |
+| V-12 | A CRL proxy without `mimeshield_revocation_allow_hosts` disables CRL checking (every status "unknown") instead of checking without pinning. | Through a proxy the plugin cannot verify the connected address; failing closed under `mimeshield_revocation_unknown` is the safe default. | Set the allow-list when using a proxy. |
+| N-05 / N-07 | Defaults (`mimeshield_revocation = 'off'`, SHA-1 accepted with warning, AES-256-CBC) are unchanged in 1.0.x. | Changing defaults in a patch release would alter behaviour of existing installations; `diag` and the UI already report these states. | Review the hardening checklist. |
+| N-09 | `mimeshield_master_key_env` stays supported with a `diag` warning. | Some deployments can only inject secrets through the environment. | Prefer the key file. |

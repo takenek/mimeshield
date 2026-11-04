@@ -104,6 +104,10 @@ jobs:
       - name: Install dependencies
         run: composer install --no-interaction --no-progress
 
+      # The manifest must stay valid for Packagist (release checklist step, now automated; audit N-06).
+      - name: Validate composer.json
+        run: composer validate --strict --no-check-lock --no-interaction
+
       # Audit the independently resolved dependency set used by PHPStan.
       - name: Audit dependencies
         run: composer audit --no-interaction --format=plain

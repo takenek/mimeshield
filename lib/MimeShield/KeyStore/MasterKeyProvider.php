@@ -18,6 +18,7 @@ namespace MimeShield\KeyStore;
 
 use MimeShield\Config;
 use MimeShield\Exception\ConfigException;
+use MimeShield\FileCheck;
 use MimeShield\Log;
 
 /**
@@ -202,6 +203,9 @@ final class MasterKeyProvider
             Log::error('masterkey', 'master key file is group-writable or world-accessible - refusing (chmod 0400/0440)');
             throw new ConfigException('keystoreunavailable', 'master key file permissions too open');
         }
+        // owner other than root or the PHP process user: reported once, not refused (audit V-10; the
+        // owner can read the key anyway - a layout decision of the administrator, visible in diag)
+        FileCheck::warnOnce('masterkey', 'master key file', $real);
         $size = filesize($real);
         if ($size === false || $size > 16384) {
             throw new ConfigException('keystoreunavailable', 'master key file too large');

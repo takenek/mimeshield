@@ -37,6 +37,11 @@ final class KeyRepository
         }
     }
 
+    public function db(): Database
+    {
+        return $this->db;
+    }
+
     public function userId(): int
     {
         return $this->userId;

@@ -358,4 +358,27 @@ final class SecureTempTest extends TestCase
         self::assertSame('precious', file_get_contents($victim));
         self::assertFalse(is_link($p));
     }
+    /**
+     * Audit V-11: below the SHARED system temp directory the plugin directory carries the process uid,
+     * so another installation on the host (other PHP user) cannot occupy the plugin's directory name;
+     * a dedicated (configured) base keeps the documented name.
+     */
+    public function testFallbackBaseDirGetsAUidSpecificPluginDirectory(): void
+    {
+        $uid = function_exists('posix_geteuid') ? posix_geteuid() : null;
+        try {
+            SecureTemp::markFallbackBaseDir(null);
+            self::assertSame($this->base . '/mimeshield', SecureTemp::pluginDir($this->base));
+            SecureTemp::markFallbackBaseDir($this->base);
+            self::assertSame($this->base . '/mimeshield' . ($uid !== null ? '-' . $uid : ''), SecureTemp::pluginDir($this->base));
+            self::assertSame($this->base . '/mimeshield' . ($uid !== null ? '-' . $uid : ''), SecureTemp::pluginDir($this->base . '/'));
+            // another base directory is not the fallback
+            self::assertSame('/elsewhere/mimeshield', SecureTemp::pluginDir('/elsewhere'));
+            $dir = SecureTemp::prepareDir($this->base);
+            self::assertSame(realpath($this->base . '/mimeshield' . ($uid !== null ? '-' . $uid : '')), $dir);
+            self::assertSame(0o700, fileperms($dir) & 0o777);
+        } finally {
+            SecureTemp::markFallbackBaseDir(null);
+        }
+    }
 }

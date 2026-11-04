@@ -6,6 +6,8 @@ namespace MimeShield\Tests\Unit;
 
 use MimeShield\Cert\CertPrecheck;
 use MimeShield\Cert\Certificate;
+use MimeShield\Cert\KeyImporter;
+use MimeShield\Cert\KdfInspector;
 use MimeShield\Cert\PublicCertImporter;
 use MimeShield\Crypto\Asn1;
 use MimeShield\Crypto\CmsInspector;
@@ -164,6 +166,53 @@ final class CertPrecheckTest extends TestCase
     }
 
     // ------------------------------------------------------------------ PKCS#7 import
+
+    /**
+     * Audit V-08: certificates inside a PKCS#12 are pre-checked by the KDF inspector before
+     * openssl_pkcs12_read parses them - inside password-encrypted layers (with the password) and, for
+     * the readable layers, also without one (the pre-check run before the legacy CLI converter).
+     */
+    public function testPkcs12WithUnsafeCertificateIsRefusedBeforeOpenSsl(): void
+    {
+        $cert = self::aliceWith([self::crlDpExt([self::relativePoint()])]);
+        file_put_contents($this->base . '/bad.crt', "-----BEGIN CERTIFICATE-----\n" . chunk_split(base64_encode($cert), 64, "\n") . "-----END CERTIFICATE-----\n");
+        $encrypted = $this->base . '/bad-enc.p12';
+        $plainCerts = $this->base . '/bad-plain.p12';
+        foreach ([$encrypted => '', $plainCerts => ' -certpbe NONE'] as $out => $extra) {
+            exec('/usr/bin/openssl pkcs12 -export -in ' . escapeshellarg($this->base . '/bad.crt') . ' -inkey ' . escapeshellarg(TestPki::path('alice.key'))
+                . ' -passout pass:x' . $extra . ' -out ' . escapeshellarg($out) . ' 2>&1', $o, $rc);
+            self::assertSame(0, $rc, implode("\n", $o));
+        }
+
+        foreach ([$encrypted, $plainCerts] as $file) {
+            $pfx = (string) file_get_contents($file);
+            try {
+                KdfInspector::check($pfx, 'p12invalid', 'x');
+                self::fail('certBag must be pre-checked: ' . basename($file));
+            } catch (ValidationException $e) {
+                self::assertSame('p12invalid', $e->getUserLabel());
+                self::assertStringContainsString('nameRelativeToCRLIssuer', $e->getMessage());
+            }
+            try {
+                (new KeyImporter())->import($pfx, 'x');
+                self::fail('import must refuse the file before OpenSSL: ' . basename($file));
+            } catch (ValidationException $e) {
+                self::assertSame('p12invalid', $e->getUserLabel());
+                self::assertStringContainsString('nameRelativeToCRLIssuer', $e->getMessage());
+            }
+        }
+        // without the password only the readable layers can be inspected
+        KdfInspector::precheckCertificates((string) file_get_contents($encrypted), 'p12invalid');
+        try {
+            KdfInspector::precheckCertificates((string) file_get_contents($plainCerts), 'p12invalid');
+            self::fail('plain certBag must be pre-checked without a password');
+        } catch (ValidationException $e) {
+            self::assertSame('p12invalid', $e->getUserLabel());
+            self::assertStringContainsString('nameRelativeToCRLIssuer', $e->getMessage());
+        }
+        // the fixtures keep importing
+        self::assertNotNull((new KeyImporter())->import(TestPki::read('alice.p12'), TestPki::PASSWORD));
+    }
 
     public function testPkcs7BundleRefusedBeforeOpenSsl(): void
     {

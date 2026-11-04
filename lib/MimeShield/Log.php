@@ -140,12 +140,25 @@ final class Log
         return $s;
     }
 
+    /** hex digits of a certificate fingerprint kept in non-debug log lines (audit V-13) */
+    public const FINGERPRINT_LOG_CHARS = 16;
+
     /**
      * @param array<string, mixed> $context
      */
     private static function write(string $level, string $operation, string $message, array $context): void
     {
         $line = sprintf('%s %s: %s', $level, self::sanitize($operation), self::sanitize($message));
+        if ($level !== 'DEBUG') {
+            // certificate fingerprints identify correspondents: normal log lines keep a prefix that is
+            // enough to find the certificate, the full value is available with debug logging (V-13)
+            foreach ($context as $key => $value) {
+                if (is_string($value) && str_ends_with(strtolower((string) $key), 'fingerprint')
+                    && preg_match('/^[0-9a-f]{40,}$/i', $value) === 1) {
+                    $context[$key] = substr($value, 0, self::FINGERPRINT_LOG_CHARS) . '...';
+                }
+            }
+        }
 
         if (!array_key_exists('user', $context) && class_exists('rcube', false)) {
             $rc = \rcube::get_instance();

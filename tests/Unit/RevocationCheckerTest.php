@@ -1180,6 +1180,67 @@ final class RevocationCheckerTest extends TestCase
         self::assertSame(self::numberedCrl('0101'), file_get_contents(self::cacheFile($cache)));
     }
 
+    /**
+     * Audit V-03: a validly signed, unexpired CRL of ANOTHER scope (IssuingDistributionPoint of a
+     * different partition) must neither raise the stored cRLNumber mark nor be written to the disk
+     * cache; its scope is checked before any state is persisted. Here the fetched list carries a higher
+     * number than the mark - accepting it would block the proper list later.
+     */
+    public function testFetchedCrlOfAnotherScopeChangesNoStateAndIsNotCached(): void
+    {
+        $store = self::numberStore();
+        $this->checkNumbered($store, '0100');
+        $cache = TestPki::tempDir();
+        $this->temp[] = $cache;
+        self::serve('custom', self::otherScopeCrl('0200'));
+        $c = new RevocationChecker(RevocationChecker::MODE_CRL, self::proxyHttp(), $cache, crlNumbers: $store);
+        $r = $c->check(TestPki::cert('alice'), TestPki::cert('int'), time());
+        self::assertSame(RevocationResult::UNKNOWN, $r->status);
+        self::assertSame(['0100'], array_values($store->data), 'the mark of the certificate\'s own scope is untouched');
+        self::assertFileDoesNotExist(self::cacheFile($cache));
+        self::assertSame([self::URL], self::requests());
+        self::assertStringContainsString('CRL scope (distribution point) mismatch', implode("\n", $GLOBALS['mimeshield_test_log']));
+    }
+
+    public function testCachedCrlOfAnotherScopeIsUnknownWithoutRefetchOrStateChange(): void
+    {
+        $store = self::numberStore();
+        $this->checkNumbered($store, '0100');
+        $cache = $this->cacheWith(self::otherScopeCrl('0200'));
+        $c = new RevocationChecker(RevocationChecker::MODE_CRL, self::refusingHttp($calls), $cache, crlNumbers: $store);
+        $r = $c->check(TestPki::cert('alice'), TestPki::cert('int'), time());
+        self::assertSame(RevocationResult::UNKNOWN, $r->status);
+        self::assertSame(0, $calls, 'the cached list is the right file for its URL: no refetch');
+        self::assertSame(['0100'], array_values($store->data));
+    }
+
+    /** CRL of the intermediate scoped (IDP) to another distribution point, with the given cRLNumber. */
+    private static function otherScopeCrl(string $hex): string
+    {
+        $idp = self::tlv(0x30, self::tlv(0xA0, self::tlv(0xA0, self::tlv(0x86, 'http://crl.example.test/other-partition.crl'))));
+        return self::craft([
+            'thisUpdate' => time() - 3600,
+            'exts' => [self::ext('2.5.29.28', $idp, true), self::ext('2.5.29.20', self::integer($hex))],
+        ]);
+    }
+
+    /**
+     * Audit V-12: a refused configuration (proxy without a host allow-list) makes every status
+     * "unknown" (subject to mimeshield_revocation_unknown), never "not checked".
+     */
+    public function testMisconfiguredModeIsUnknown(): void
+    {
+        $c = new RevocationChecker(RevocationChecker::MODE_MISCONFIGURED, null, '');
+        self::assertFalse($c->isEnabled());
+        $r = $c->check(TestPki::cert('alice'), TestPki::cert('int'), time());
+        self::assertSame(RevocationResult::UNKNOWN, $r->status);
+        self::assertSame('revocationunavailable', $r->reason);
+        $r = $c->checkPath([TestPki::cert('alice'), TestPki::cert('int'), TestPki::cert('root')]);
+        self::assertSame(RevocationResult::UNKNOWN, $r->status);
+        // disabled checking stays "not checked"
+        self::assertSame(RevocationResult::NOT_CHECKED, (new RevocationChecker(RevocationChecker::MODE_CRL, null, ''))->check(TestPki::cert('alice'), TestPki::cert('int'), time())->status);
+    }
+
     private function checkNumbered(CrlNumberStore $store, string $number, ?Certificate $cert = null): RevocationResult
     {
         // a cached CRL older than the stored number is refetched: refused here, so it stays unknown

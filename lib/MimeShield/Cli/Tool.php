@@ -20,6 +20,7 @@ use MimeShield\Config;
 use MimeShield\Crypto\CmsService;
 use MimeShield\Crypto\SecureTemp;
 use MimeShield\Exception\MimeShieldException;
+use MimeShield\FileCheck;
 use MimeShield\KeyStore\KeyVault;
 use MimeShield\KeyStore\MasterKeyProvider;
 use MimeShield\Storage\Database;
@@ -31,8 +32,37 @@ use MimeShield\Trust\TrustStore;
  */
 final class Tool
 {
-    /** oldest Roundcube release without published security fixes the plugin relies on (MS-14) */
-    private const MIN_SECURE_ROUNDCUBE = '1.7.4';
+    /**
+     * Oldest Roundcube release containing the HTML sanitiser fixes the plugin relies on for decrypted
+     * mail (MS-14; 1.7.5 of 2026-10-19 fixed remote-content blocking bypasses, audit V-01). Update it
+     * together with LATEST_KNOWN_ROUNDCUBE and composer.json "min-version" on every core security
+     * release: the Packagist advisory feed does not list Roundcube CVEs, so composer audit cannot.
+     */
+    private const MIN_SECURE_ROUNDCUBE = '1.7.5';
+
+    /** newest 1.7.x security release known when this plugin version was released (audit V-01) */
+    private const LATEST_KNOWN_ROUNDCUBE = '1.7.5';
+
+    /**
+     * First patch release of each PHP branch with the critical request-handling fixes of 2026-10-21
+     * (CVE-2026-109618, CVE-2026-109619) and the date they were published: from that date an older
+     * patch level is a warning, as distributions may backport (audit V-14). Update with PHP releases.
+     */
+    private const PHP_MIN_PATCH = [
+        '8.2' => ['8.2.35', '2026-10-21'], '8.3' => ['8.3.36', '2026-10-21'],
+        '8.4' => ['8.4.27', '2026-10-21'], '8.5' => ['8.5.12', '2026-10-21'],
+    ];
+
+    /**
+     * End of upstream security support per OpenSSL branch (release policy of openssl-library.org,
+     * checked 2026-11-03). Such a branch receives no fixes for the 2026 CMS/PKCS#12 issues unless a
+     * distribution maintains it, so diag warns from that date (audit V-14; supersedes the F-16 decision
+     * to stay silent about 3.1-3.3). Update with OpenSSL releases.
+     */
+    private const OPENSSL_SECURITY_EOL = [
+        '1.1' => '2023-09-11', '3.0' => '2026-09-07', '3.1' => '2025-03-14', '3.2' => '2025-11-23',
+        '3.3' => '2026-04-09', '3.4' => '2026-10-22', '3.6' => '2026-11-01',
+    ];
 
     /**
      * CVE-2026-35189 (excessive memory allocation in relative CRL distribution point processing,
@@ -108,11 +138,11 @@ final class Tool
         $this->section('Versions');
         // decrypted mail is rendered by Roundcube core (HTML sanitiser): its security releases matter (MS-14)
         $rcVersion = defined('RCMAIL_VERSION') ? (string) RCMAIL_VERSION : 'unknown';
-        $rcRelease = preg_match('/^\d+\.\d+\.\d+$/D', $rcVersion) === 1;
-        $rcCurrent = $rcRelease && version_compare($rcVersion, self::MIN_SECURE_ROUNDCUBE, '>=');
-        $this->check($rcCurrent, 'Roundcube', $rcVersion . ($rcCurrent ? '' : ($rcRelease
-            ? ' - older than ' . self::MIN_SECURE_ROUNDCUBE . ' (security releases): update Roundcube'
-            : ' - not a release version: make sure it contains the fixes of ' . self::MIN_SECURE_ROUNDCUBE)), true);
+        [$rcOk, $rcText, $rcNewer] = self::roundcubeVersionStatus($rcVersion);
+        $this->check($rcOk, 'Roundcube', $rcText, true);
+        if ($rcNewer !== null) {
+            $this->check(false, 'Roundcube security release', $rcNewer, true);
+        }
         [$phpOk, $phpText] = self::phpSupportStatus(PHP_VERSION, gmdate('Y-m-d'));
         $this->check($phpOk, 'PHP', $phpText, true);
         $this->ok('OpenSSL (PHP build headers)', OPENSSL_VERSION_TEXT);
@@ -164,6 +194,14 @@ final class Tool
         $store = TrustStore::fromConfig($cfg);
         $files = $store->caInfo();
         $this->check($files !== [], 'CA bundle files', $files !== [] ? implode(', ', $files) : 'NONE - signatures cannot be verified as trusted');
+        // anchors decide what is trusted: a file other local users may write, or owned by an unexpected
+        // user, is reported (audit V-10); world-writable files are ignored by the plugin
+        foreach (array_merge((array) $cfg->get('mimeshield_ca_bundle'), (array) $cfg->get('mimeshield_intermediates')) as $f) {
+            if (is_string($f) && $f !== '') {
+                [$fOk, $fText] = FileCheck::status($f);
+                $this->check($fOk, 'trust file ' . basename($f), $fText, true);
+            }
+        }
         $this->ok('trust anchors loaded', (string) count($store->anchors()));
         $this->check(!$cfg->bool('mimeshield_use_system_ca'), 'system CA bundle as S/MIME anchors',
             $cfg->bool('mimeshield_use_system_ca') ? 'ENABLED - TLS CAs are trusted for e-mail; configure mimeshield_ca_bundle with S/MIME CAs instead' : 'not used', true);
@@ -181,9 +219,10 @@ final class Tool
             }
         }
         if ($cfg->revocationMode() === 'crl' && (string) $cfg->get('mimeshield_revocation_proxy') !== '') {
-            // through a proxy the plugin cannot pin addresses: the proxy enforces egress (audit I-03)
+            // through a proxy the plugin cannot pin addresses: the proxy enforces egress (audit I-03); without
+            // a host allow-list CRL checking is refused and every status is "unknown" (audit V-12)
             $this->check($cfg->list('mimeshield_revocation_allow_hosts') !== [], 'CRL proxy host allow-list',
-                $cfg->list('mimeshield_revocation_allow_hosts') !== [] ? 'set' : 'EMPTY - the proxy must restrict CRL egress, or set mimeshield_revocation_allow_hosts', true);
+                $cfg->list('mimeshield_revocation_allow_hosts') !== [] ? 'set' : 'EMPTY - CRL checking is disabled (all statuses "unknown") until mimeshield_revocation_allow_hosts is set; the proxy must also restrict CRL egress');
         }
 
         $this->section('Request time limits');
@@ -197,7 +236,13 @@ final class Tool
         try {
             $mk = MasterKeyProvider::fromConfig($cfg);
             $kid = $mk->activeKid();
-            $this->ok('source', $mk->source());
+            // an environment variable is visible to every script of the pool and in phpinfo() (audit I-13)
+            $this->check($mk->source() !== 'env', 'source', $mk->source() . ($mk->source() === 'env'
+                ? ' - visible to every script of the PHP pool and to phpinfo(): prefer mimeshield_master_key_file (0440, outside the web root)' : ''), true);
+            if ($mk->source() === 'file') {
+                [$fOk, $fText] = FileCheck::status((string) $cfg->get('mimeshield_master_key_file'));
+                $this->check($fOk, 'master key file', $fText, true);
+            }
             $this->ok('key ids', implode(', ', $mk->kids()) . ' (active: ' . $kid . ')');
             $vault = new KeyVault($mk);
             $blob = $vault->encrypt('self-test', 'diag');
@@ -222,6 +267,22 @@ final class Tool
             }
         } catch (\Throwable $e) {
             $this->check(false, 'database', $e->getMessage());
+        }
+
+        $this->section('Size limits');
+        // a processed S/MIME part exists in several copies in memory: limits above a fraction of
+        // memory_limit are capped at runtime so that a large message gives a label, not a fatal error (audit V-06)
+        $memory = Config::memoryLimitBytes((string) ini_get('memory_limit'));
+        if ($memory === null) {
+            $this->info('memory_limit (this CLI)', 'unlimited or unknown - the configured limits apply; compare with the PHP-FPM pool value');
+        } else {
+            foreach ([['mimeshield_max_message_size', 65536, Config::MESSAGE_MEMORY_DIVISOR], ['mimeshield_max_total_envelope_bytes', 1048576, Config::ENVELOPE_MEMORY_DIVISOR]] as [$opt, $min, $div]) {
+                $configured = $cfg->int($opt, $min, PHP_INT_MAX);
+                $effective = Config::boundedByMemory($configured, $memory, $div, $min);
+                $this->check($effective === $configured, $opt, $effective === $configured
+                    ? sprintf('%d bytes (memory_limit %d allows up to %d)', $configured, $memory, intdiv($memory, $div))
+                    : sprintf('%d bytes configured, %d effective (memory_limit %d / %d, this CLI - compare with the PHP-FPM pool): raise memory_limit or lower the option', $configured, $effective, $memory, $div), true);
+            }
         }
 
         $this->section('Configuration');
@@ -585,7 +646,11 @@ final class Tool
         $vault = new KeyVault(MasterKeyProvider::fromConfig(new Config($this->rc->config)));
         $rows = $db->fetchAll('SELECT `key_id`, `user_id`, `fingerprint`, `key_blob`, `cert_pem` FROM ' . $db->table('mimeshield_keys'));
         $bad = 0;
+        $v1 = 0;
         foreach ($rows as $r) {
+            if (KeyVault::blobVersion((string) $r['key_blob']) !== KeyVault::FORMAT_VERSION) {
+                $v1++;
+            }
             try {
                 $pem = $vault->decrypt((string) $r['key_blob'], KeyRecord::context((int) $r['user_id'], (string) $r['fingerprint']));
                 $match = openssl_x509_check_private_key((string) $r['cert_pem'], $pem);
@@ -599,6 +664,10 @@ final class Tool
             }
         }
         $this->out(sprintf("%d keys checked, %d failed\n", count($rows), $bad));
+        if ($v1 > 0) {
+            // v1 blobs share one data key between both AEAD algorithms: migrate with rotate (audit N-04)
+            $this->out(sprintf("%d key(s) still use the v1 blob format: run 'rotate' to migrate them to the current format\n", $v1));
+        }
         return $bad === 0 ? 0 : 2;
     }
 
@@ -624,19 +693,19 @@ final class Tool
 
     /**
      * Whether an OpenSSL library version text (e.g. "OpenSSL 3.5.7 9 Jun 2026") is below the release
-     * of its branch that fixes a known issue. Only the upstream version is visible: distributions may
-     * backport the fix without changing it, so a version below the fix is a warning, not a proof.
-     * Branches not listed (other libraries, end-of-life branches, newer releases) give no warning.
-     * Deliberate (audit F-16 decision 2026-10-03): end-of-life branches 3.1-3.3 are not warned about,
-     * because the CVE-2026-35189 advisory lists fixed versions for supported branches only; such
-     * libraries are out of support anyway, and CertPrecheck refuses the triggering certificates in
-     * the plugin's own input paths before OpenSSL parses them.
+     * of its branch that fixes a known issue, or belongs to a branch whose upstream security support
+     * ended before $today (Y-m-d, default: today). Only the upstream version is visible: distributions
+     * may backport fixes or maintain a branch without changing it, so both are warnings, not proof.
+     * Branches not listed (other libraries, newer releases) give no warning. Audit V-14: the earlier
+     * F-16 decision not to warn about end-of-life branches 3.1-3.3 is withdrawn, because the plugin's
+     * CertPrecheck does not cover every libcrypto input (PKCS#12 import, CMS AEAD/KARI parameters)
+     * and those branches never received the 2026 CMS fixes (e.g. CVE-2025-15467).
      *
      * @return array{0: bool, 1: string}
      *
      * @internal public for tests
      */
-    public static function opensslVersionStatus(string $text): array
+    public static function opensslVersionStatus(string $text, ?string $today = null): array
     {
         if (preg_match('/\bOpenSSL (\d+)\.(\d+)\.(\d+)/', $text, $v)) {
             $branch = $v[1] . '.' . $v[2];
@@ -644,13 +713,42 @@ final class Tool
             if ($fixedPatch !== null && (int) $v[3] < $fixedPatch) {
                 return [false, sprintf('%s - below %s.%d (CVE-2026-35189) unless the distribution backported the fix', $text, $branch, $fixedPatch)];
             }
+            $eol = self::OPENSSL_SECURITY_EOL[$branch] ?? null;
+            if ($eol !== null && ($today ?? gmdate('Y-m-d')) > $eol) {
+                return [false, sprintf('%s - OpenSSL %s upstream security support ended %s: acceptable only as a distribution package with backported fixes; prefer a supported branch', $text, $branch, $eol)];
+            }
         }
         return [true, $text];
     }
 
     /**
+     * Roundcube version check (MS-14, audit V-01): a non-release version (e.g. "1.7-git" of a Composer
+     * installation, which roundcube/plugin-installer normalises to 1.7.999, so the manifest "min-version"
+     * never blocks it) and a release below MIN_SECURE_ROUNDCUBE are warnings; a release below
+     * LATEST_KNOWN_ROUNDCUBE adds a second warning.
+     *
+     * @return array{0: bool, 1: string, 2: ?string} [ok, text, warning about a newer security release]
+     *
+     * @internal public for tests
+     */
+    public static function roundcubeVersionStatus(string $version): array
+    {
+        if (preg_match('/^\d+\.\d+\.\d+$/D', $version) !== 1) {
+            return [false, $version . ' - not a release version (e.g. 1.7-git of a Composer installation, accepted by the plugin installer for any "min-version"): verify that it contains the fixes of ' . self::LATEST_KNOWN_ROUNDCUBE . ' (core CHANGELOG, commit date)', null];
+        }
+        if (version_compare($version, self::MIN_SECURE_ROUNDCUBE, '<')) {
+            return [false, $version . ' - older than ' . self::MIN_SECURE_ROUNDCUBE . ' (security releases): update Roundcube', null];
+        }
+        $newer = version_compare($version, self::LATEST_KNOWN_ROUNDCUBE, '<')
+            ? $version . ' - newer security release ' . self::LATEST_KNOWN_ROUNDCUBE . ' is available: update Roundcube' : null;
+        return [true, $version, $newer];
+    }
+
+    /**
      * Whether the PHP branch of a version (e.g. "8.1.33") is still within its security support on
-     * $today (Y-m-d). Branches not in the table (newer releases) give no warning.
+     * $today (Y-m-d) and, from the publication date of the critical fixes in PHP_MIN_PATCH, whether the
+     * patch level contains them (audit V-14; a distribution backport is not visible in the version).
+     * Branches not in the tables (newer releases) give no warning.
      *
      * @return array{0: bool, 1: string}
      *
@@ -662,6 +760,10 @@ final class Tool
             $eol = self::PHP_SECURITY_EOL[$m[1]] ?? null;
             if ($eol !== null && $today > $eol) {
                 return [false, sprintf('%s - PHP %s security support ended %s: upgrade, PHP >= 8.3 recommended', $version, $m[1], $eol)];
+            }
+            [$minPatch, $since] = self::PHP_MIN_PATCH[$m[1]] ?? [null, null];
+            if ($minPatch !== null && $today >= $since && version_compare($version, $minPatch, '<')) {
+                return [false, sprintf('%s - below %s (critical fixes of %s) unless the distribution backported them', $version, $minPatch, $since)];
             }
         }
         return [true, $version];

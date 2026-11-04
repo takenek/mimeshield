@@ -24,6 +24,7 @@ final class SettingsActionsTest extends TestCase
     private Services $services;
     private SettingsUi $ui;
     private string $dir;
+    private Database $db;
 
     protected function setUp(): void
     {
@@ -60,6 +61,22 @@ final class SettingsActionsTest extends TestCase
             public function get($name, $default = null) { return $default; }
         };
         $this->services = new Services($this->rc, new Config($cfg));
+        // the per-account rate limits of the import actions reserve their attempt in the database (V-07)
+        $raw = \rcube_db::factory('sqlite:///' . $this->dir . '/rc.db?mode=0600');
+        $raw->set_debug(false);
+        $raw->db_connect('w');
+        $this->db = new Database($raw);
+        $this->db->query('INSERT INTO users (user_id, username, mail_host, created) VALUES (?, ?, ?, ?)', 1, 'account1', 'localhost', Database::now());
+        (new \ReflectionProperty(Services::class, 'db'))->setValue($this->services, $this->db);
+        $this->rc->user = new class () {
+            public int $ID = 1;
+
+            /** @return array<string, mixed> */
+            public function get_prefs(): array
+            {
+                return [];
+            }
+        };
         $plugin = (new \ReflectionClass(\mimeshield::class))->newInstanceWithoutConstructor();
         (new \ReflectionProperty(\mimeshield::class, 'rc'))->setValue($plugin, $this->rc);
         (new \ReflectionProperty(\mimeshield::class, 'services'))->setValue($plugin, $this->services);
@@ -70,6 +87,9 @@ final class SettingsActionsTest extends TestCase
     {
         $_SESSION = $_GET = $_POST = $_REQUEST = $_FILES = [];
         unset($_SERVER['REQUEST_METHOD']);
+        if (isset($this->db)) {
+            $this->db->raw()->closeConnection();
+        }
         if (isset($this->dir)) {
             foreach (glob($this->dir . '/*') ?: [] as $file) {
                 unlink($file);
@@ -103,6 +123,27 @@ final class SettingsActionsTest extends TestCase
         self::assertSame('response complete', $this->invoke('certImport'));
         self::assertSame(['mimeshield.savecertrefused'], $this->rc->output->messages);
         self::assertSame(base64_encode('second public file'), $_SESSION['mimeshield_pending_cert']);
+    }
+
+    public function testCertificateImportIsRateLimitedPerSessionAndPerAccount(): void
+    {
+        // audit V-07: an exhausted session window stops before the upload is looked at
+        $_SESSION['mimeshield_rl_certimport'] = array_fill(0, 20, time());
+        $_POST['_confirm'] = '1';
+        self::assertSame('form rendered', $this->invoke('certImport'));
+        self::assertSame(['mimeshield.ratelimited'], $this->rc->output->messages);
+
+        // a fresh session does not help once the account quota is used up
+        for ($i = 0; $i < 20; $i++) {
+            $_SESSION = [];
+            $this->rc->output->messages = [];
+            $this->invoke('certImport');
+            self::assertNotContains('mimeshield.ratelimited', $this->rc->output->messages, 'attempt ' . $i);
+        }
+        $_SESSION = [];
+        $this->rc->output->messages = [];
+        self::assertSame('form rendered', $this->invoke('certImport'));
+        self::assertSame(['mimeshield.ratelimited'], $this->rc->output->messages);
     }
 
     public function testGetOfImportFormPreservesPendingConfirmation(): void

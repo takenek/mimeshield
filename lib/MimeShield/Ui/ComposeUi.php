@@ -32,6 +32,9 @@ final class ComposeUi
     /** recipient status requests per session and minute */
     private const RECIPIENTS_PER_MINUTE = 30;
 
+    /** recipient status requests per user account and minute, across sessions (audit V-07) */
+    private const RECIPIENTS_PER_MINUTE_ACCOUNT = 60;
+
     /** @var array{restore: ?array{sign: bool, encrypt: bool}, force: bool} */
     private static array $state = ['restore' => null, 'force' => false];
 
@@ -237,8 +240,10 @@ final class ComposeUi
     {
         $rc = $this->plugin->rcmail();
         // every address costs a chain validation (and with CRL checking possibly a download): bound
-        // the frequency per session (audit MS-11); the send itself still re-checks every recipient
-        if (!RateLimiter::allow($_SESSION, 'mimeshield_rl_recipients', self::RECIPIENTS_PER_MINUTE, 60)) {
+        // the frequency per session (audit MS-11) and per account across sessions (audit V-07); the
+        // send itself still re-checks every recipient
+        if (!RateLimiter::allow($_SESSION, 'mimeshield_rl_recipients', self::RECIPIENTS_PER_MINUTE, 60)
+            || !RateLimiter::allowForUser($this->plugin->services()->db(), $this->plugin->services()->userId(), 'recipients', self::RECIPIENTS_PER_MINUTE_ACCOUNT, 60)) {
             Log::info('compose', 'recipient status requests throttled');
             $rc->output->command('plugin.mimeshield_recipients', ['recipients' => [], 'aliases' => [], 'throttled' => true]);
             $rc->output->send();

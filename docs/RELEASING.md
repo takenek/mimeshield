@@ -15,7 +15,15 @@ version constraint. `dev-main` is for development only.
    PHP 8.1–8.5 with the Roundcube library, `php -l`, `node --check`, PHPStan level 6). Run the
    release checks CI cannot run (E2E, browser UI, interop; see docs/TESTING.md) and record them there.
    Do not tag a release while the latest post-change E2E, browser UI or interoperability checks are still recorded as not run.
-   Run `composer validate --strict` on the exact release commit before tagging.
+   Run `composer validate --strict` on the exact release commit before tagging (CI runs it too).
+1a. **Platform security releases** (audit V-01, V-14): check <https://roundcube.net/news/> and the
+   core CHANGELOG for the newest 1.7.x security release, and the PHP (<https://www.php.net/releases/>)
+   and OpenSSL (<https://openssl-library.org/news/>) announcements. Update together:
+   `Tool::MIN_SECURE_ROUNDCUBE` / `Tool::LATEST_KNOWN_ROUNDCUBE` and `composer.json`
+   `extra.roundcube.min-version`, `Tool::PHP_MIN_PATCH`, `Tool::PHP_SECURITY_EOL`,
+   `Tool::OPENSSL_SECURITY_EOL`, `Tool::CVE_2026_35189_FIXED`, README section 1 and SECURITY.md.
+   Do not rely on `composer audit` for this: the Packagist advisory feed does not carry the Roundcube
+   CVEs, and Roundcube is not a Composer dependency of the plugin.
 2. **CHANGELOG.md**: rename `## [Unreleased]` to `## [X.Y.Z] – YYYY-MM-DD` (semantic versioning;
    any security fix is at least a patch release), add a new empty `## [Unreleased]`, commit.
 3. **Signed annotated tag** on that commit:

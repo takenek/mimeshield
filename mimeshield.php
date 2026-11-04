@@ -145,7 +145,7 @@ class mimeshield extends rcube_plugin
         return [
             'name' => 'MIME Shield',
             'vendor' => 'TaKeN.PL Usługi Informatyczne Marek Królikowski',
-            'version' => '1.0.2',
+            'version' => '1.0.3',
             'license' => 'GPL-3.0-or-later',
             'uri' => 'https://github.com/takenek/mimeshield',
         ];
@@ -528,7 +528,9 @@ class mimeshield extends rcube_plugin
         if (!$this->rc->text_exists($label)) {
             $label = 'mimeshield.internalerror';
         }
-        Log::info('send', 'sending blocked: ' . $e->getMessage(), ['draft' => $draft]);
+        // INFO carries the user label only; the internal message may quote headers of the message (audit V-13)
+        Log::info('send', 'sending blocked: ' . $e->getUserLabel(), ['draft' => $draft]);
+        Log::debug('send', 'sending blocked: ' . $e->getMessage());
         $this->rc->output->show_message($label, 'error', $e->getVars());
         if ($data !== []) {
             $this->rc->output->command('plugin.mimeshield_send_error', ['type' => $e->getUserLabel()] + $data);

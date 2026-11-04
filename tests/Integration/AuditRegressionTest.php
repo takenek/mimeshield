@@ -252,7 +252,8 @@ final class AuditRegressionTest extends TestCase
         $kdf = new \ReflectionMethod(KdfInspector::class, 'pkcs12Kdf');
         $bmp = mb_convert_encoding($password, 'UTF-16BE', 'UTF-8') . "\x00\x00";
         $salt = random_bytes(8);
-        $inner = $seq($seq($oid('1.2.840.113549.1.12.10.1.3'), $explicit0($seq($oid('1.2.840.113549.1.9.22.1'), $explicit0($octets('x'))))));
+        // a real certificate: since audit V-08 every certBag is pre-checked, so a dummy would fail first
+        $inner = $seq($seq($oid('1.2.840.113549.1.12.10.1.3'), $explicit0($seq($oid('1.2.840.113549.1.9.22.1'), $explicit0($octets(TestPki::cert('alice')->der))))));
         $ct = (string) openssl_encrypt($inner, 'des-ede3-cbc', (string) $kdf->invoke(null, $bmp, $salt, 1, $iter, 24),
             OPENSSL_RAW_DATA, (string) $kdf->invoke(null, $bmp, $salt, 2, $iter, 8));
         $layer = $seq($oid('1.2.840.113549.1.7.6'), $explicit0($seq($int(0), $seq(

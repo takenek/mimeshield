@@ -56,6 +56,15 @@ E2E/UI requirements: Dovecot with the users alice/bob/mallory/carol@example.test
 The skipped PHPUnit test (`SafeHttpClientTest::testDirectConnectionPinningToPublicAddressRequiresInternet`)
 needs outbound Internet access, which the test machine does not have.
 
+**Release 1.0.3 (2026-11-04, remediation of the second security review):** PHPUnit on PHP 8.4.27
+with the Roundcube 1.7.x library resolved from Packagist (`MIMESHIELD_RC` scratch installation):
+Tests: 1294, Assertions: 12166, Failures: 0, Skipped: 1 (the Internet test above); PHPStan level 6:
+no errors; `php -l` on every changed file: no errors; `composer validate --strict`: valid. Not
+re-run for this release: the E2E, browser UI and interoperability suites and the MariaDB/PostgreSQL
+database tests (no Roundcube 1.7.5 installation, browser or database server in the environment);
+the row-locking of the account rate limiter and of the new cRLNumber store is verified on SQLite
+only. The results above remain those of the 1.0.0 matrix.
+
 E2E matrix combinations: 1.7.4 × PHP 8.1/8.2/8.3/8.4/8.5 (SQLite); 1.7.0/1.7.1/1.7.2/1.7.3 × PHP 8.4
 (SQLite); 1.7.0 × PHP 8.1 (SQLite); 1.7.4 × PHP 8.4 (MariaDB); 1.7.4 × PHP 8.4 (PostgreSQL); 1.7.4 ×
 PHP 8.1 (MariaDB, `db_prefix = rc_`); 1.7.4 × PHP 8.5 (PostgreSQL, `db_prefix = rc_`); official

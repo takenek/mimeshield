@@ -153,6 +153,18 @@ final class CmsService
             if ($tag['macLength'] < 12 || $tag['macLength'] > 16 || ($tag['icvLength'] !== null && $tag['icvLength'] !== $tag['macLength'])) {
                 throw new CryptoException('unsupportedalgorithm', 'AuthEnvelopedData with truncated authentication tag');
             }
+            // the nonce is copied by libcrypto before any key is known (CVE-2025-15467 class): bound it to
+            // the RFC 5084 range (GCM 12 recommended, CCM 7..13) before OpenSSL parses it (audit V-09)
+            if ($tag['nonceLength'] !== null && ($tag['nonceLength'] < 7 || $tag['nonceLength'] > 16)) {
+                throw new CryptoException('unsupportedalgorithm', 'AuthEnvelopedData with an aes-nonce of ' . $tag['nonceLength'] . ' octets');
+            }
+        }
+        // key agreement and key wrap algorithms of EC recipients are checked before libcrypto unwraps a
+        // key (CVE-2026-63072 class, audit V-09)
+        try {
+            CmsInspector::assertRecipientAlgorithms($der);
+        } catch (ValidationException $e) {
+            throw new CryptoException($e->getUserLabel(), 'decrypt refused before OpenSSL: ' . $e->getMessage());
         }
         // OriginatorInfo certificates are parsed by libcrypto during openssl_cms_decrypt: pre-check
         // them (CVE-2026-35189, audit F-16); an unreadable structure or a refused certificate gives an

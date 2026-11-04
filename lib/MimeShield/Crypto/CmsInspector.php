@@ -61,6 +61,21 @@ final class CmsInspector
         '1.2.840.10040.4.3' => 'dsa-sha1',
     ];
 
+    /**
+     * KeyAgreeRecipientInfo key agreement schemes of the S/MIME profile: dhSinglePass-{std,cofactor}DH
+     * with sha1/224/256/384/512 KDF (RFC 5753), the HKDF variants of RFC 8418 (X25519/X448) and ESDH
+     * (RFC 3370). Anything else is refused before libcrypto unwraps a key (audit V-09).
+     */
+    private const KARI_KEY_AGREEMENT_OIDS = [
+        '1.3.133.16.840.63.0.2', '1.3.132.1.11.0', '1.3.132.1.11.1', '1.3.132.1.11.2', '1.3.132.1.11.3',
+        '1.3.133.16.840.63.0.3', '1.3.132.1.14.0', '1.3.132.1.14.1', '1.3.132.1.14.2', '1.3.132.1.14.3',
+        '1.2.840.113549.1.9.16.3.19', '1.2.840.113549.1.9.16.3.20', '1.2.840.113549.1.9.16.3.21',
+        '1.2.840.113549.1.9.16.3.5',
+    ];
+
+    /** key wrap algorithms of RFC 5753 / RFC 3370: AES key wrap (RFC 3394) and 3DES wrap - never the padded variants */
+    private const KARI_KEY_WRAP_OIDS = ['2.16.840.1.101.3.4.1.5', '2.16.840.1.101.3.4.1.25', '2.16.840.1.101.3.4.1.45', '1.2.840.113549.1.9.16.3.6'];
+
     private const CIPHERS = [
         '2.16.840.1.101.3.4.1.2' => 'aes-128-cbc',
         '2.16.840.1.101.3.4.1.22' => 'aes-192-cbc',
@@ -295,9 +310,10 @@ final class CmsInspector
     /**
      * Authentication tag facts of an AuthEnvelopedData, located by POSITION only (recipient infos
      * and algorithm details are not interpreted, so unusual but irrelevant fields cannot make the
-     * check fail open). Throws ValidationException when the structure cannot be read.
+     * check fail open). The aes-nonce length is returned as well, so that the caller can bound it before
+     * libcrypto copies it (audit V-09). Throws ValidationException when the structure cannot be read.
      *
-     * @return array{macLength: int, icvLength: ?int}
+     * @return array{macLength: int, icvLength: ?int, nonceLength: ?int}
      */
     public static function gcmTagInfo(string $der): array
     {
@@ -314,8 +330,16 @@ final class CmsInspector
         $aeci = $f[$i + 1]->children();
         $alg = ($aeci[1] ?? throw new ValidationException('malformed', 'CMS: no algorithm'))->children();
         $icv = null;
+        $nonce = null;
         if (isset($alg[1]) && $alg[1]->isUniversal(Asn1::TAG_SEQUENCE)) {
             $pc = $alg[1]->children();
+            if (isset($pc[0])) {
+                // GCMParameters.aes-nonce (RFC 5084): a primitive OCTET STRING
+                if (!$pc[0]->isUniversal(Asn1::TAG_OCTET_STRING) || $pc[0]->constructed) {
+                    throw new ValidationException('malformed', 'CMS: bad aes-nonce');
+                }
+                $nonce = strlen($pc[0]->content());
+            }
             if (isset($pc[1])) {
                 if (!$pc[1]->isUniversal(Asn1::TAG_INTEGER)) {
                     throw new ValidationException('malformed', 'CMS: bad aes-ICVlen');
@@ -325,10 +349,54 @@ final class CmsInspector
         }
         for ($j = $i + 2; $j < count($f); $j++) {
             if ($f[$j]->isUniversal(Asn1::TAG_OCTET_STRING)) {
-                return ['macLength' => strlen($f[$j]->content()), 'icvLength' => $icv];
+                return ['macLength' => strlen($f[$j]->content()), 'icvLength' => $icv, 'nonceLength' => $nonce];
             }
         }
         throw new ValidationException('malformed', 'CMS: no mac');
+    }
+
+    /**
+     * Refuse (Auth)EnvelopedData whose KeyAgreeRecipientInfo names a key agreement or key wrap algorithm
+     * outside the S/MIME profile, before libcrypto unwraps anything (CVE-2026-63072 class, audit V-09).
+     * KeyTransRecipientInfo (RSA) is left to OpenSSL; other RecipientInfo choices are refused by it.
+     *
+     * @throws ValidationException 'unsupportedalgorithm' | 'malformed'
+     */
+    public static function assertRecipientAlgorithms(string $der): void
+    {
+        $type = self::contentType($der);
+        if ($type !== self::OID_ENVELOPED_DATA && $type !== self::OID_AUTH_ENVELOPED_DATA) {
+            return;
+        }
+        $f = self::content($der, $type)->children();
+        $i = isset($f[1]) && $f[1]->isContext(0) ? 2 : 1;   // [0] originatorInfo OPTIONAL
+        $ris = $f[$i] ?? throw new ValidationException('malformed', 'CMS: no recipientInfos');
+        foreach ($ris->children() as $ri) {
+            if (!$ri->isContext(1)) {
+                continue;
+            }
+            // KeyAgreeRecipientInfo: version, [0] originator, [1] ukm OPTIONAL, keyEncryptionAlgorithm, recipientEncryptedKeys
+            $alg = null;
+            foreach ($ri->children() as $node) {
+                if ($node->isUniversal(Asn1::TAG_SEQUENCE) && $node->children() !== [] && $node->child(0)->isUniversal(Asn1::TAG_OID)) {
+                    $alg = $node;
+                    break;
+                }
+            }
+            if ($alg === null) {
+                throw new ValidationException('malformed', 'CMS: KARI without keyEncryptionAlgorithm');
+            }
+            $agreement = Asn1::oid($alg->child(0));
+            if (!in_array($agreement, self::KARI_KEY_AGREEMENT_OIDS, true)) {
+                throw new ValidationException('unsupportedalgorithm', 'CMS: key agreement algorithm ' . $agreement . ' not supported');
+            }
+            $wrapAlg = $alg->children()[1] ?? null;
+            $wrap = $wrapAlg !== null && $wrapAlg->isUniversal(Asn1::TAG_SEQUENCE) && $wrapAlg->children() !== [] && $wrapAlg->child(0)->isUniversal(Asn1::TAG_OID)
+                ? Asn1::oid($wrapAlg->child(0)) : '';
+            if (!in_array($wrap, self::KARI_KEY_WRAP_OIDS, true)) {
+                throw new ValidationException('unsupportedalgorithm', 'CMS: key wrap algorithm ' . ($wrap === '' ? '(missing)' : $wrap) . ' not supported');
+            }
+        }
     }
 
     /**

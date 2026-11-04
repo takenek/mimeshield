@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace MimeShield\Tests\Unit;
 
 use MimeShield\Crypto\Asn1;
+use MimeShield\Exception\CryptoException;
 use MimeShield\Crypto\CmsInspector;
 use MimeShield\Crypto\CmsService;
 use MimeShield\Exception\ValidationException;
@@ -526,6 +527,95 @@ final class CmsInspectorTest extends TestCase
         self::assertSame(self::PLAINTEXT, self::rawDecrypt(self::$cms['gcm'], 'bob'));
         self::assertSame(self::PLAINTEXT, self::service()->decrypt(self::$cms['gcm'], TestPki::cert('bob'), TestPki::key('bob')));
         self::assertSame(self::PLAINTEXT, self::service()->decrypt(self::$cms['gcm_ec'], TestPki::cert('carol'), TestPki::key('carol')));
+    }
+
+    /**
+     * Audit V-09: the aes-nonce of AuthEnvelopedData is bounded before OpenSSL parses it (the
+     * CVE-2025-15467 class of libcrypto bugs copies it before any key is known).
+     */
+    public function testOversizedGcmNonceIsRefusedBeforeOpenSsl(): void
+    {
+        self::assertSame(12, CmsInspector::gcmTagInfo(self::$cms['gcm'])['nonceLength']);
+        $long = self::rewrite(self::$cms['gcm'], 0, [...self::GCM_PARAMS_PATH, 0], static function (string $nonce): string {
+            self::assertSame("\x04\x0C", substr($nonce, 0, 2));
+            return "\x04\x40" . str_repeat("\x00", 64);
+        });
+        self::assertSame(64, CmsInspector::gcmTagInfo($long)['nonceLength']);
+        try {
+            self::service()->decrypt($long, TestPki::cert('bob'), TestPki::key('bob'));
+            self::fail('expected refusal');
+        } catch (CryptoException $e) {
+            self::assertSame('unsupportedalgorithm', $e->getUserLabel());
+            self::assertStringContainsString('aes-nonce of 64 octets', $e->getMessage());
+        }
+        // a 12 byte nonce (and the 7..16 range) stays decryptable
+        self::assertSame(self::PLAINTEXT, self::service()->decrypt(self::$cms['gcm'], TestPki::cert('bob'), TestPki::key('bob')));
+    }
+
+    /**
+     * Audit V-09: KeyAgreeRecipientInfo of EC recipients is accepted only with the key agreement and
+     * key wrap algorithms of the S/MIME profile; anything else is refused before libcrypto unwraps.
+     */
+    public function testKariAlgorithmsAreCheckedBeforeOpenSsl(): void
+    {
+        foreach (['env_ec', 'env_ec_keyid', 'gcm_ec', 'env_multi', 'env_cbc', 'gcm'] as $name) {
+            CmsInspector::assertRecipientAlgorithms(self::$cms[$name]);   // S/MIME profile: no exception
+        }
+        [$riPath, $algIdx] = self::kariKeyEncryptionAlgorithmPath(self::$cms['env_ec']);
+
+        $badAgreement = Asn1::replaceAt(Asn1::parse(self::$cms['env_ec'], false, true), [...$riPath, $algIdx, 0], self::oidTlv('1.2.3.4.5'));
+        self::assertRejects(static fn () => CmsInspector::assertRecipientAlgorithms($badAgreement), 'key agreement algorithm 1.2.3.4.5');
+        try {
+            self::service()->decrypt($badAgreement, TestPki::cert('carol'), TestPki::key('carol'));
+            self::fail('expected refusal');
+        } catch (CryptoException $e) {
+            self::assertSame('unsupportedalgorithm', $e->getUserLabel());
+        }
+
+        // the padded AES key wrap (not part of RFC 5753) is refused as well
+        $badWrap = Asn1::replaceAt(Asn1::parse(self::$cms['env_ec'], false, true), [...$riPath, $algIdx, 1, 0], self::oidTlv('2.16.840.1.101.3.4.1.8'));
+        self::assertRejects(static fn () => CmsInspector::assertRecipientAlgorithms($badWrap), 'key wrap algorithm 2.16.840.1.101.3.4.1.8');
+        // the untouched message still decrypts
+        self::assertSame(self::PLAINTEXT, self::service()->decrypt(self::$cms['env_ec'], TestPki::cert('carol'), TestPki::key('carol')));
+    }
+
+    /**
+     * Path (children indexes from the ContentInfo root) of the first KeyAgreeRecipientInfo and the
+     * index of its keyEncryptionAlgorithm.
+     *
+     * @return array{0: list<int>, 1: int}
+     */
+    private static function kariKeyEncryptionAlgorithmPath(string $der): array
+    {
+        $root = Asn1::parse($der, false, true);
+        $ed = $root->child(1)->child(0);
+        $f = $ed->children();
+        $risIdx = isset($f[1]) && $f[1]->isContext(0) ? 2 : 1;
+        foreach ($f[$risIdx]->children() as $r => $ri) {
+            if (!$ri->isContext(1)) {
+                continue;
+            }
+            foreach ($ri->children() as $i => $node) {
+                if ($node->isUniversal(Asn1::TAG_SEQUENCE) && $node->children() !== [] && $node->child(0)->isUniversal(Asn1::TAG_OID)) {
+                    return [[1, 0, $risIdx, $r], $i];
+                }
+            }
+        }
+        self::fail('no KARI in fixture');
+    }
+
+    private static function oidTlv(string $dotted): string
+    {
+        $arcs = array_map('intval', explode('.', $dotted));
+        $out = chr(40 * $arcs[0] + $arcs[1]);
+        foreach (array_slice($arcs, 2) as $a) {
+            $enc = chr($a & 0x7F);
+            while ($a >>= 7) {
+                $enc = chr(0x80 | ($a & 0x7F)) . $enc;
+            }
+            $out .= $enc;
+        }
+        return Asn1::encode("\x06", $out);
     }
 
     public function testFixGcmIcvLengthRestoresStrippedParameters(): void

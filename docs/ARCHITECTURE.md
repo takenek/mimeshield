@@ -37,7 +37,7 @@ lib/MimeShield/
     ChainValidator.php         OpenSSL decision + diagnostic path building (reasons), CA EKU for EC recipients
     AddressMatcher.php         e-mail normalisation / comparison
     RevocationChecker.php      opt-in CRL checking (signature, freshness, critical extensions, cRLNumber)
-    CrlNumberStore.php, SharedCacheCrlNumberStore.php   highest cRLNumber per CRL scope (Roundcube cache_shared)
+    CrlNumberStore.php, SharedCacheCrlNumberStore.php   highest cRLNumber per CRL scope (direct rows in Roundcube's cache_shared)
     SafeHttpClient.php         SSRF-hardened HTTP GET for CRLs
     VerificationResult.php     separated crypto / chain / identity / revocation / time / policy states
     ChainResult.php, RevocationResult.php   result value objects
@@ -403,8 +403,8 @@ reservation is committed before KDF work. Storage failures block import; no sche
   (inode/device) before the `--append` rename.
 * MS-13: `TrustStore` and `MasterKeyProvider` are built from `MimeShield\Config` (user preferences
   named like administrator options are ignored).
-* MS-14/MS-15: `min-version` 1.7.4; `diag` reports the Roundcube release and the OpenSSL library
-  loaded by the SAPI (warning below 3.5.9 on the 3.5 branch).
+* MS-14/MS-15: `min-version` 1.7.4 (1.7.5 since 2026-11-04, V-01); `diag` reports the Roundcube
+  release and the OpenSSL library loaded by the SAPI (warning below 3.5.9 on the 3.5 branch).
 
 ## 8c. Remediation of the final security report (2026-10-03, IDs F-xx)
 
@@ -460,12 +460,12 @@ accepted risks") and in "Deliberate ... (audit X decision 2026-10-03)" comments 
   ['sha1']` (comment at the defaults); the UI never shows these states as fully valid.
 * I-09: `RevocationChecker` option `acceptSha1`, wired by `Services` from `legacyDigests()`; a SHA-1
   signed CRL is otherwise UNKNOWN (`revocationunavailable`).
-* I-02: `RevocationChecker` takes an optional `CrlNumberStore`; `SharedCacheCrlNumberStore` uses
-  `rcube_cache::factory('db', ...)` directly (not `get_cache_shared()`, which is disabled without an
-  option and whose driver/TTL user preferences may override). Key: SHA-256 of issuer name DER, CRL
+* I-02: `RevocationChecker` takes an optional `CrlNumberStore`; `SharedCacheCrlNumberStore` wrote
+  through `rcube_cache::factory('db', ...)` until 2026-11-04 and now writes the `cache_shared` rows
+  directly (see 8e, V-02/V-04). Key: SHA-256 of issuer name DER, CRL
   AKI (else issuer SKI) and URL; numbers compared as unsigned big integers. Lower number → UNKNOWN,
   not stored, not disk-cached (a cached copy is refetched). Store errors are logged once; checks go
-  on. TTL 30 days (`rcube_cache` cap), rewritten when older than a day.
+  on. Lifetime 30 days, renewed when a row older than a day is used.
 * I-14/I-15/F-07/F-14: `Tool::phpSupportStatus()` (`PHP_SECURITY_EOL` table, update every release),
   `Tool::tmpfsStatus()` (longest mount prefix of the real temp path), `Tool::resolverStatus()`
   (timeout × attempts × nameservers, glibc caps, warn above 10 s) and an `[INFO]` line requiring a
@@ -480,8 +480,9 @@ accepted risks") and in "Deliberate ... (audit X decision 2026-10-03)" comments 
 * F-16: `CertPrecheck::assertSafe()` (plugin `Asn1` parser) runs in `Certificate::__construct()`,
   `CmsService` verify/decrypt/embeddedCertificates (via `CmsInspector::certificateChoices()`) and
   `PublicCertImporter` (PKCS#7 must be SignedData). Refusals: FAIL_MALFORMED signature, `CryptoException`
-  on decrypt, `[]` for embedded certificates. `Tool::opensslVersionStatus()` deliberately ignores
-  end-of-life branches 3.1-3.3.
+  on decrypt, `[]` for embedded certificates. `Tool::opensslVersionStatus()` ignored end-of-life
+  branches 3.1-3.3 until 2026-11-04; it now warns for every branch past upstream security support
+  (V-14).
 * I-05: `.github/workflows/ci.yml` (PHP 8.1-8.5 PHPUnit, `php -l`, `node --check`, PHPStan 2.x;
   SHA-pinned actions, read-only token), `docs/RELEASING.md`, `/.github export-ignore`.
 * Accepted notes: F-01 (forwarded `message/rfc822` without parsed Content-Type matched by second
@@ -490,6 +491,67 @@ accepted risks") and in "Deliberate ... (audit X decision 2026-10-03)" comments 
   rename), I-07 (separate Bcc envelopes are not atomic).
 * Cleanups: `keygen` new-file writes use the checked `Tool::writeAll()` (partial file removed);
   unused `SignatureVerifier::findIssuer()` removed.
+
+## 8e. Remediation of the second security review (2026-11-04, IDs V-xx / N-xx)
+
+Release 1.0.3. The review re-read the whole code base after the 2026-10 remediations; its accepted
+findings and the decisions on them are listed in SECURITY.md ("Design decisions", second table).
+
+* V-01: `Tool::MIN_SECURE_ROUNDCUBE` / `LATEST_KNOWN_ROUNDCUBE` = 1.7.5 (`roundcubeVersionStatus()`
+  adds a WARN when a newer release than the known one is installed - the table must be updated with
+  every plugin release, `docs/RELEASING.md` step 1a); `composer.json` `min-version` 1.7.5;
+  `DiagChecksTest` fails when the manifest, README or SECURITY.md drift from the constant.
+* V-02/V-04: `SharedCacheCrlNumberStore` writes `cache_shared` rows itself (JSON `{"n": hex,
+  "t": unix}`, validated on read - no `unserialize()` of table content). `put()` runs in a
+  transaction on the writer connection: a no-op `UPDATE ... WHERE cache_key = ?` takes the row lock
+  (InnoDB / PostgreSQL row lock, SQLite write lock), the number is re-read and only raised; the
+  INSERT race of two first writers (cache_key is the primary key) is retried as an update. `get()`
+  renews the expiry of a row older than a day with a compare-and-swap on the unchanged value.
+* V-03: `RevocationChecker::assertApplicable()` (IDP scope, onlyContainsCACerts/UserCerts,
+  thisUpdate skew, nextUpdate) runs before `checkNumber()` on both the cached and the network path:
+  a CRL of another scope changes no stored number and is not written to the disk cache.
+* V-05: `IncomingProcessor::assertMimeBudget()` runs before `rcube_mime::parse_message()` on every
+  decrypted or unwrapped entity: at most `MAX_MIME_PARTS` (500) Content-Type headers, nested
+  `message/rfc822` at most `MAX_NESTED_MESSAGE_DEPTH` (8) deep, and the bodies the parser retains for
+  nested messages (estimated from the boundary delimiters declared before each one) at most
+  `RETAINED_BODY_FACTOR` (2) × the size limit; `partCount()` re-checks the parsed tree. Refusal is
+  the `messagetoolarge` label for that part. The original message's part count stays unlimited
+  (F-07).
+* V-06: `Config::maxMessageSize()` / `maxTotalEnvelopeBytes()` cap the configured values at
+  `memory_limit` / 6 and / 2 (`memoryLimitBytes()`, `boundedByMemory()`); `diag` section "Size
+  limits" shows the effective values.
+* V-07: `ComposeUi` recipient checks also per account (60/min, `RateLimiter::allowForUser`);
+  `SettingsUi` certificate import 20 per 5 min per session and per account, `keyInfo`/`certInfo`
+  60/min per session; `CertificateService::MAX_CANDIDATES_PER_ADDRESS` (10); `KeyService::store()` and
+  `CertificateService::add()` check the quota and insert inside one transaction after
+  `Database::lockUserRow()` (no-op update of the `users` row).
+* V-08: `KdfInspector::precheckCertificates()` walks the PFX before `LegacyPkcs12Converter` /
+  `openssl_pkcs12_read` and runs `CertPrecheck::assertSafe()` on every readable certBag; `check()`
+  (with the password) does the same inside decrypted layers. Legacy encrypted layers that only the
+  CLI converter can read stay uninspected (partial by design).
+* V-09: `CmsService::decrypt()` refuses AuthEnvelopedData with an aes-nonce outside 7-16 octets and
+  `CmsInspector::assertRecipientAlgorithms()` allows only the RFC 5753 / RFC 8418 key-agreement and
+  the AES/3DES key-wrap OIDs for KeyAgreeRecipientInfo before OpenSSL sees the structure.
+* V-10: `FileCheck` (`status()`, `isWorldWritable()`, `warnOnce()`): `MasterKeyProvider` and
+  `TrustStore` log once per process when a file is owned by neither root nor the PHP user;
+  `TrustStore` refuses a world-writable bundle; `diag` reports the trust files and the key file.
+* V-11: `SecureTemp::pluginDir()` names the fallback directory below the shared system temp
+  directory `mimeshield-<euid>` (`Config::tempBaseDir()` marks the fallback with
+  `markFallbackBaseDir()`); configured directories keep `mimeshield`.
+* V-12: `Services::revocation()` builds the checker in `RevocationChecker::MODE_MISCONFIGURED`
+  (every status UNKNOWN, `revocationunavailable`) when a proxy is set without
+  `mimeshield_revocation_allow_hosts`; logged as error, `diag` FAIL.
+* V-13: INFO log lines of `SettingsUi` and `mimeshield.php` carry the user-facing label of an
+  exception; the sanitised message goes to `Log::debug` only.
+* V-14: `Tool::PHP_MIN_PATCH` (8.2.35 / 8.3.36 / 8.4.27 / 8.5.12, CVE-2026-109618/109619) in
+  `phpSupportStatus()`; `OPENSSL_SECURITY_EOL` in `opensslVersionStatus()` (WARN for 1.1, 3.0 from
+  2026-09-07, 3.1-3.4, 3.6; the CVE check runs first).
+* N-04: `check-keystore` prints the number of key blobs still in the v1 format. N-09: `diag` WARN
+  when the master key comes from an environment variable. N-10: `.htaccess` (`Require all denied`)
+  in `bin/`, `lib/`, `SQL/`, `docs/`, `localization/`, `tests/`. N-12: `LegacyPkcs12Converter::kill()` sends
+  SIGKILL when the converter ignores SIGTERM. N-13: `.gitguardian.yaml` lists the test PKI and the
+  named harness files instead of the whole `tests/fixtures/`. N-06: CI runs `composer validate
+  --strict`; `composer.json` requires PHPUnit ≥ 13.4.4 on the 13 branch.
 
 ## 9. Differences from the original requirements (and why)
 

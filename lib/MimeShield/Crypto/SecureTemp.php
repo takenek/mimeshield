@@ -47,6 +47,9 @@ final class SecureTemp
      */
     private static ?string $refusedBaseDir = null;
 
+    /** real path of the shared system temp directory used instead of an unusable configured one (V-11) */
+    private static ?string $fallbackBaseDir = null;
+
     public function __construct(string $baseDir)
     {
         $this->dir = self::prepareDir($baseDir);
@@ -169,6 +172,28 @@ final class SecureTemp
     }
 
     /**
+     * Register (or, with null, forget) the shared system temp directory the configuration fell back
+     * to. The plugin directory below a SHARED base carries the process uid, so an installation of
+     * another PHP user on the same host cannot occupy the plugin's directory name (audit V-11); a
+     * dedicated base keeps the documented name "<base>/mimeshield".
+     */
+    public static function markFallbackBaseDir(?string $baseDir): void
+    {
+        self::$fallbackBaseDir = $baseDir === null ? null : rtrim($baseDir, '/');
+    }
+
+    /**
+     * Path of the plugin's private directory below $baseDir (not created here).
+     */
+    public static function pluginDir(string $baseDir): string
+    {
+        $baseDir = rtrim($baseDir, '/');
+        $real = realpath($baseDir);
+        $shared = self::$fallbackBaseDir !== null && ($real !== false ? $real : $baseDir) === self::$fallbackBaseDir;
+        return $baseDir . '/mimeshield' . ($shared && function_exists('posix_geteuid') ? '-' . posix_geteuid() : '');
+    }
+
+    /**
      * Create/verify the dedicated directory.
      */
     public static function prepareDir(string $baseDir): string
@@ -188,7 +213,7 @@ final class SecureTemp
             }
         }
 
-        $dir = $baseDir . '/mimeshield';
+        $dir = self::pluginDir($baseDir);
         if (!file_exists($dir) && !is_link($dir)) {
             $old = umask(0077);
             try {

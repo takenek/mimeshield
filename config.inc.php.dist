@@ -27,7 +27,8 @@
 // then make it readable only by the PHP user:  chown root:www-data FILE; chmod 0440 FILE
 //
 // Absolute path of the key file ('' = not used). The plugin refuses files that are world-readable
-// or located under public_html/ or plugins/.
+// or located under public_html/ or plugins/, and reports (log, diag) a file owned by a user other
+// than root or the PHP process user (audit V-10).
 $config['mimeshield_master_key_file'] = '';
 
 // Alternatively the key can be provided in this environment variable (takes precedence over the
@@ -164,8 +165,10 @@ $config['mimeshield_encrypt_untrusted'] = 'block';
 //        Disk caching needs PHP-owned, private 0700 directories <temp>/mimeshield and its crl child;
 //        symlinks, group/other access or a foreign owner disable disk caching without changing policy.
 //        The highest cRLNumber per CRL issuer/distribution point is kept in Roundcube's cache_shared
-//        table (db driver, 30-day TTL, refreshed daily on use); a CRL older than one seen before
-//        yields "unknown" (audit I-02).
+//        table (direct rows written as JSON with an atomic "raise to maximum", 30-day lifetime renewed
+//        on use); a CRL older than one seen before yields "unknown", and a list that does not apply to
+//        the certificate (other distribution point, CA-only, not yet valid) changes nothing and is not
+//        cached (audit I-02, V-02, V-03, V-04).
 //        REQUIRED with 'crl' (audit F-14): synchronous DNS cannot be interrupted without losing the
 //        SSRF pinning, so bound it in /etc/resolv.conf ("options timeout:1 attempts:2") or use a
 //        local caching resolver. diag warns when one lookup can exceed 10 seconds.
@@ -175,7 +178,10 @@ $config['mimeshield_revocation_max_bytes'] = 10485760;   // maximum CRL size
 $config['mimeshield_revocation_cache_ttl'] = 86400;      // maximum cache age (seconds); also bounded by nextUpdate
 $config['mimeshield_revocation_allow_hosts'] = [];       // e.g. ['.actalis.it'] - if set, only these hosts
 $config['mimeshield_revocation_deny_hosts'] = [];        // always refused
-$config['mimeshield_revocation_proxy'] = '';             // optional HTTP proxy (e.g. 'http://proxy:3128')
+// Optional HTTP proxy (e.g. 'http://proxy:3128'). Through a proxy the plugin cannot pin the connected
+// address, so a proxy REQUIRES mimeshield_revocation_allow_hosts: without it CRL checking is refused
+// and every revocation status is "unknown" (subject to mimeshield_revocation_unknown; audit V-12).
+$config['mimeshield_revocation_proxy'] = '';
 
 // Recipient whose revocation status cannot be determined with 'crl' (CRL unavailable, expired,
 // out of scope, unsupported form, NO http(s) CRL distribution point - in the certificate itself or
@@ -195,6 +201,10 @@ $config['mimeshield_max_key_upload'] = 102400;           // bytes, PKCS#12/PEM u
 $config['mimeshield_max_cert_upload'] = 65536;           // bytes, public certificate upload (1024 .. 1048576)
 $config['mimeshield_max_keys_per_user'] = 20;            // 1 .. 1000
 $config['mimeshield_max_certs_per_user'] = 500;          // 1 .. 100000
+// A processed S/MIME part exists in several copies in memory (transfer-encoded, DER, plaintext,
+// canonicalised, parsed parts). Both size limits are therefore capped at runtime at a fraction of
+// PHP's memory_limit - 1/6 for messages, 1/2 for envelopes - so that a large message yields the
+// "message too large" label instead of a fatal error; diag shows the effective values (audit V-06).
 $config['mimeshield_max_message_size'] = 52428800;       // bytes, messages signed/encrypted/decrypted (>= 65536)
 $config['mimeshield_max_recipients'] = 100;              // per encrypted message (1 .. 1000)
 // Upper bound for all encrypted envelopes of one message kept in memory until delivery: the main
@@ -206,12 +216,17 @@ $config['mimeshield_max_total_envelope_bytes'] = 268435456;
 // inside encrypted PKCS#12 layers (inspected with the entered password before OpenSSL reads the
 // file). Key imports are limited to 10 attempts per session AND per account within 5 minutes.
 // Account reservations are atomic across sessions/workers; a storage failure refuses the import.
-// Recipient status checks in compose are limited to 30 per session and minute. "Save sender
-// certificate" is limited to 20 per minute per session AND per account.
-// At most 8 signed entities are verified per request. The number of MIME parts is NOT limited
-// (deliberate, audit F-07: the plugin's work per non-S/MIME part is constant). REQUIRED: a request
-// time limit - request_terminate_timeout in the PHP-FPM pool or a reverse-proxy read timeout
-// (native OpenSSL work and DNS lookups are not interrupted by max_execution_time).
+// Recipient status checks in compose are limited to 30 per session and 60 per account per minute;
+// public certificate imports to 20 per 5 minutes per session AND per account; certificate detail
+// pages to 60 per session and minute; "save sender certificate" to 20 per minute per session AND per
+// account (audit V-07). Per-address recipient lookups evaluate at most 10 stored certificates.
+// At most 8 signed entities are verified per request. The number of MIME parts of the ORIGINAL
+// message is NOT limited (deliberate, audit F-07: the plugin's work per non-S/MIME part is constant);
+// decrypted or unwrapped content is parsed only within a structure budget (at most 500 entities,
+// forwarded messages at most 8 deep, retained nested bodies at most twice the size limit; audit
+// V-05). REQUIRED: a request time limit - request_terminate_timeout in the PHP-FPM pool or a
+// reverse-proxy read timeout (native OpenSSL work and DNS lookups are not interrupted by
+// max_execution_time).
 
 // ---------------------------------------------------------------------------------------------
 // FILES
@@ -220,8 +235,11 @@ $config['mimeshield_max_total_envelope_bytes'] = 268435456;
 // "mimeshield" subdirectory (mode 0700). Private keys are never written to disk; message data is
 // (briefly, 0600, removed immediately). A tmpfs (e.g. /dev/shm) avoids writing it to disk.
 // If the configured directory is not usable, the system temp directory is used: this is logged
-// (mimeshield log, "falling back to the system temp directory") and reported by diag.
-// Put it on tmpfs/ramfs: diag warns for any other file system (audit I-15).
+// (mimeshield log, "falling back to the system temp directory") and reported by diag; below the
+// SHARED system directory the subdirectory is "mimeshield-<uid>" so that an installation of another
+// PHP user on the same host cannot occupy it (audit V-11).
+// Put it on tmpfs/ramfs: diag warns for any other file system (audit I-15). Hardened profile: a
+// dedicated tmpfs directory owned by the PHP user, mode 0700, plus mimeshield_temp_dir_strict = true.
 $config['mimeshield_temp_dir'] = '';
 
 // true: if the configured temp directory is not usable, refuse S/MIME operations (sign, encrypt,

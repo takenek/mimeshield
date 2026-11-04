@@ -1,0 +1,4 @@
+# MIME Shield: this directory holds no web assets - only plugins/mimeshield/js and skins are served over
+# HTTP. Deny direct access (Apache 2.4+, effective only with AllowOverride; nginx: see README section
+# 2.6). Installations with Roundcube's public_html document root never expose it anyway (audit N-10).
+Require all denied
