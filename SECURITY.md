@@ -6,15 +6,23 @@ Business name: **TaKeN.PL Usługi Informatyczne Marek Królikowski**.
 
 ## Reporting a vulnerability
 
-Please report security problems **privately**, not in public issues:
+Please report security problems **privately**, not in public issues or pull requests.
 
-* GitHub: use "Report a vulnerability" (private security advisory) on the repository
-  `takenek/mimeshield`, or
-* e-mail the maintainer (address in the repository profile), preferably S/MIME-encrypted.
+Use GitHub's private vulnerability reporting for this repository (a GitHub account is required):
+<https://github.com/takenek/mimeshield/security/advisories/new>. This form is the only private
+channel: there is no e-mail address for security reports. The report is not public; only you, the
+maintainer and anyone the maintainer adds to it can see it.
 
 Include the affected version, configuration (redact secrets), steps to reproduce and impact. You
 will receive an acknowledgement within 7 days. Please allow a reasonable time for a fix before
 public disclosure. Never send real private keys, PKCS#12 files, master keys or mailbox content.
+
+If the form is unavailable or the maintainer has not answered within 7 days, open a public issue
+that only says a private report is waiting or could not be sent. Do not include any details of the
+problem in that issue.
+
+Installed copies of this file may be outdated; the current policy is at
+<https://github.com/takenek/mimeshield/security/policy>.
 
 ## Supported versions
 

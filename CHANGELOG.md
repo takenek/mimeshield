@@ -5,6 +5,13 @@ semantic versioning.
 
 ## [Unreleased]
 
+### Changed
+- SECURITY.md: security problems are reported through GitHub's private vulnerability reporting,
+  which is now enabled for the repository. The "Reporting a vulnerability" section links to the
+  report form, names it as the only private channel, says what to do when the form is unavailable
+  or a report stays unanswered, and points to the current policy online. The e-mail option was
+  removed because the profile it pointed to shows no address.
+
 ## [1.0.3] – 2026-11-04
 
 Remediation of the second security review (2026-11-04, IDs V-xx / N-xx of that review; details in
