@@ -1,8 +1,8 @@
 # MIME Shield (`mimeshield`) – S/MIME for Roundcube 1.7
 
 [![CI](https://github.com/takenek/mimeshield/actions/workflows/ci.yml/badge.svg)](https://github.com/takenek/mimeshield/actions/workflows/ci.yml)
-[![Packagist](https://img.shields.io/packagist/v/takenek/mimeshield.svg)](https://packagist.org/packages/takenek/mimeshield)
-[![License](https://img.shields.io/packagist/l/takenek/mimeshield.svg)](LICENSE)
+[![Packagist](https://raw.githubusercontent.com/takenek/mimeshield/main/.github/badges/packagist-v1.0.3.svg)](https://packagist.org/packages/takenek/mimeshield)
+[![License](https://raw.githubusercontent.com/takenek/mimeshield/main/.github/badges/license.svg)](LICENSE)
 
 MIME Shield adds complete S/MIME support to Roundcube Webmail 1.7.x using only the official plugin
 API (no changes to Roundcube core):
