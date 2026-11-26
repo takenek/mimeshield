@@ -6,6 +6,14 @@ semantic versioning.
 ## [Unreleased]
 
 ### Changed
+- README: the Packagist and License badges are files of the repository (`.github/badges/`, the same
+  images shields.io draws), linked through `raw.githubusercontent.com`. GitHub's image proxy gave up
+  on `img.shields.io` after about four seconds ("504 Error Fetching Resource") whenever it had no
+  cached copy, and both badges then showed as broken images on github.com and packagist.org (which
+  renders the README through GitHub); raw.githubusercontent.com is not proxied. The version badge
+  carries the version in its file name, because packagist.org shows README images through a CDN that
+  caches a URL for a year; docs/RELEASING.md step 2 adds it to the version bump, and
+  `ReadmeBadgesTest` checks it.
 - SECURITY.md: security problems are reported through GitHub's private vulnerability reporting,
   which is now enabled for the repository. The "Reporting a vulnerability" section links to the
   report form, names it as the only private channel, says what to do when the form is unavailable

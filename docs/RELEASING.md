@@ -25,7 +25,15 @@ version constraint. `dev-main` is for development only.
    Do not rely on `composer audit` for this: the Packagist advisory feed does not carry the Roundcube
    CVEs, and Roundcube is not a Composer dependency of the plugin.
 2. **CHANGELOG.md**: rename `## [Unreleased]` to `## [X.Y.Z] – YYYY-MM-DD` (semantic versioning;
-   any security fix is at least a patch release), add a new empty `## [Unreleased]`, commit.
+   any security fix is at least a patch release), add a new empty `## [Unreleased]`, commit – in the
+   same commit as the version in `mimeshield.php` (`'version' => 'X.Y.Z'`) and the version badge of
+   the README, a file of the repository whose name carries the version:
+   `curl -fsS -o .github/badges/packagist-vX.Y.Z.svg https://img.shields.io/badge/packagist-vX.Y.Z-007ec6.svg`,
+   then the file name in the badge URL of README line 4. The README links committed files because
+   GitHub's image proxy does not reliably fetch shields.io, and a new name per release because
+   packagist.org shows README images through rawcdn.githack.com, which caches a URL for a year; the
+   badges of earlier versions stay (the READMEs of earlier releases link them through `main`).
+   `ReadmeBadgesTest` compares the badge with `mimeshield.php`.
 3. **Signed annotated tag** on that commit:
 
    ```sh
